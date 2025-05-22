@@ -1,0 +1,45 @@
+[package]
+name = "dot15d4-embassy"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Embassy binding for IEEE802.15.4 MAC layer implementations"
+keywords = ["embedded", "async", "dot15d4", "ieee802154", "mac"]
+categories = ["embedded", "no-std", "asynchronous"]
+
+[dependencies]
+dot15d4 = { path = "../dot15d4", default-features = false }
+
+embassy-sync = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace" }
+embassy-net-driver = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace" }
+embedded-hal-async = "1.0.0"
+
+defmt = { version = "1.0", optional = true }
+defmt-rtt = { version = "1.0", optional = true }
+log = { version = "0.4", optional = true }
+
+embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+    # TODO: The time driver is only required for embassy-net and rtos-trace -
+    #       depending on smoltcp directly we can make this dependency contingent
+    #       on the rtos-trace feature.
+    "time-driver-rtc1",
+], optional = true, default-features = false }
+
+rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
+
+[features]
+nrf = []
+nrf52840 = ["dep:embassy-nrf", "embassy-nrf/nrf52840", "nrf"]
+
+log = ["dep:log", "dot15d4/log"]
+defmt = [
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "dot15d4/defmt",
+    "embassy-sync/defmt",
+    "embassy-nrf/defmt",
+]
+rtos-trace = ["dep:rtos-trace", "dot15d4/rtos-trace", "log"]
+
+_clippy-std = []
+_clippy-no-std = ["nrf52840", "rtos-trace"]

@@ -4,6 +4,16 @@ name = "dot15d4-examples-nrf52840"
 version = "0.0.1"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "embassy-net-udp-fast"
+path = "src/bin/embassy-net/udp-fast.rs"
+required-features = ["embassy-net"]
+
+[[bin]]
+name = "embassy-net-udp"
+path = "src/bin/embassy-net/udp.rs"
+required-features = ["embassy-net"]
+
 [dependencies]
 cortex-m = { version = "0.7", features = [
     "inline-asm",
@@ -22,6 +32,16 @@ panic-probe = "1.0"
 heapless = "0.8"
 static_cell = "2.1"
 
+# Required by embassy-net examples only:
+dot15d4-embassy = { version = "0.0.1", path = "../../dot15d4-embassy", features = [
+    "nrf52840",
+], optional = true }
+embassy-net = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+    "medium-ieee802154",
+    "udp",
+    "proto-ipv6",
+], optional = true }
+
 defmt = { version = "1.0", optional = true }
 defmt-rtt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
@@ -29,6 +49,8 @@ log = { version = "0.4", optional = true }
 rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
 
 [features]
+embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
+
 defmt = [
     "dep:defmt",
     "dep:defmt-rtt",
@@ -54,3 +76,6 @@ rtos-trace = [
     "dot15d4-embassy/rtos-trace",
     "log",
 ]
+
+_clippy-std = []
+_clippy-no-std = ["embassy-net", "rtos-trace"]
