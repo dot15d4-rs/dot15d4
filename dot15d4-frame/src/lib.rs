@@ -1,218 +1,225 @@
-//! Zero-copy read and write structures for handling IEEE 802.15.4 MAC frames.
-//!
-//! Each reader contains the following functions:
-//! - [`new`]: Create a new reader.
-//! - [`check_len`]: Check if the buffer is long enough to contain a valid
-//!   frame.
-//! - [`new_unchecked`]: Create a new reader without checking the buffer length.
-//!
-//! The most important reader is the [`Frame`] reader, which is used to read a
-//! full IEEE 802.15.4 frame. The reader provides the following functions:
-//! - [`frame_control`]: returns a [`FrameControl`] reader.
-//! - [`sequence_number`]: returns the sequence number if not suppressed.
-//! - [`addressing`]: returns an [`AddressingFields`] reader.
-//! - [`auxiliary_security_header`]: returns an [`AuxiliarySecurityHeader`]
-//!   reader.
-//! - [`information_elements`]: returns an [`InformationElements`] reader.
-//! - [`payload`]: returns the payload of the frame.
-//!
-//! ## Reading a frame
-//! For an incoming frame, use the [`Frame`] structure to read its content.
-//! ```
-//! # use dot15d4_frame::{
-//! #   EnhancedBeacon,
-//! #   FrameControl,
-//! #   FrameType,
-//! #   AddressingFields,
-//! #   NestedInformationElementsIterator,
-//! #   PayloadGroupId,
-//! #   NestedSubId,
-//! #   NestedSubIdShort,
-//! #   TschTimeslot,
-//! # };
-//! # let frame: [u8; 35] = [
-//! #     0x40, 0xeb, 0xcd, 0xab, 0xff, 0xff, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
-//! #     0x00, 0x3f, 0x11, 0x88, 0x06, 0x1a, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x1c,
-//! #     0x00, 0x01, 0xc8, 0x00, 0x01, 0x1b, 0x00,
-//! # ];
-//! let frame = EnhancedBeacon::new(&frame).unwrap();
-//! let fc = frame.frame_control();
-//! let src_addr = frame.addressing().unwrap().src_address();
-//! let dst_addr = frame.addressing().unwrap().dst_address();
-//!
-//! assert_eq!(fc.frame_type(), FrameType::Beacon);
-//!
-//! let Some(ie) = frame.information_elements() else { return; };
-//!
-//! for payload in ie.payload_information_elements() {
-//!      if matches!(payload.group_id(), PayloadGroupId::Mlme) {
-//!         for nested in payload.nested_information_elements() {
-//!              match nested.sub_id() {
-//!                  NestedSubId::Short(NestedSubIdShort::TschTimeslot) => {
-//!                      let timeslot = TschTimeslot::new(nested.content()).unwrap();
-//!                      assert_eq!(timeslot.id(), 0);
-//!                  }
-//!                  _ => (),
-//!              }
-//!          }
-//!      }
-//!  }
-//! ```
-//!
-//! ## Writing a frame
-//!
-//! __Work in progress!__
-//!
-//! ## Information Elements
-//!
-//! The IEEE 802.15.4 standard defines a set of Information Elements (IEs) that
-//! can be included in the frame. These IEs are used to provide additional
-//! information about the frame, such as timestamping, channel hopping, and
-//! more. The IEs are divided into two groups: Header IEs and Payload IEs.
-//! Calling [`information_elements`] on a [`Frame`] reader returns an
-//! [`InformationElements`] reader. The reader provides access to the Header and
-//! Payload IEs, via the [`header_information_elements`] and
-//! [`payload_information_elements`] functions.
-//!
-//! ### Header Information Elements
-//!
-//! The Header IEs are located in the frame header, and are used to provide
-//! information about the frame itself. The following IEs are defined in the
-//! standard:
-//!
-//! - [x] [`VendorSpecific`]
-//! - [x] [`Csl`]
-//! - [x] [`Rit`]
-//! - [ ] `DsmePanDescriptor`
-//! - [x] [`RendezvousTime`]
-//! - [x] [`TimeCorrection`]
-//! - [ ] `ExtededDsmePanDescriptor`
-//! - [ ] `FragmentSequencecontextDescription`
-//! - [x] [`SimplifiedSuperframeSpecification`]
-//! - [ ] `SimplifiedGtsSpecification`
-//! - [ ] `LecimCapabilities`
-//! - [ ] `TrleDescriptor`
-//! - [ ] `RccCapabilities`
-//! - [ ] `RccnDescriptor`
-//! - [ ] `GlobalTime`
-//! - [ ] `Da`
-//! - [x] [`HeaderTermination1`]
-//! - [x] [`HeaderTermination2`]
-//!
-//! ### Payload Information Elements
-//!
-//! The Payload IEs are located in the frame payload, and are used to provide
-//! information about the payload itself. The following IEs are defined in the
-//! standard:
-//!
-//! - [ ] `Esdu`
-//! - [x] `Mlme`: The MLME group contains a set of nested IEs. Call
-//!   [`nested_information_elements`]
-//!   to get an iterator over the nested IEs.
-//! - [ ] `VendorSpecific`
-//! - [ ] `PayloadTermination`
-//!
-//! ### Nested Information Elements
-//!
-//! Some IEs contain nested IEs. The [`NestedInformationElementsIterator`]
-//! provides an iterator over the nested IEs. The iterator is used to parse the
-//! nested IEs.
-//!
-//! The Nested IEs are split into two groups: Short and Long. The following
-//! short IEs are defined in the standard:
-//!
-//! - [x] [`TschSynchronization`]
-//! - [x] [`TschSlotframeAndLink`]
-//! - [x] [`TschTimeslot`]
-//! - [ ] `HoppingTiming`
-//! - [ ] `EnhancedBeaconFilter`
-//! - [ ] `MacMetrics`
-//! - [ ] `AllMacMetrics`
-//! - [ ] `CoexistenceSpecification`
-//! - [ ] `SunDeviceCapabilities`
-//! - [ ] `SunFskGenericPhy`
-//! - [ ] `ModeSwitchParameter`
-//! - [ ] `PhyParameterChange`
-//! - [ ] `OQpskPhyMode`
-//! - [ ] `PcaAllocation`
-//! - [ ] `LecimDsssOperatingMode`
-//! - [ ] `LecimFskOperatingMode`
-//! - [ ] `TvwsPhyOperatingMode`
-//! - [ ] `TvwsDeviceCapabilities`
-//! - [ ] `TvwsDeviceCategory`
-//! - [ ] `TvwsDeviceIdentification`
-//! - [ ] `TvwsDeviceLocation`
-//! - [ ] `TvwsChannelInformationQuery`
-//! - [ ] `TvwsChannelInformationSource`
-//! - [ ] `Ctm`
-//! - [ ] `Timestamp`
-//! - [ ] `TimestampDifference`
-//! - [ ] `TmctpSpecification`
-//! - [ ] `RccPhyOperatingMode`
-//! - [ ] `LinkMargin`
-//! - [ ] `RsGfskDeviceCapabilities`
-//! - [ ] `MultiPhy`
-//! - [ ] `VendorSpecific`
-//! - [ ] `Srm`
-//!
-//! The following long IEs are defined in the standard:
-//!
-//! - [ ] `VendorSpecificNested`
-//! - [x] [`ChannelHopping`]
-//!
-//! [`new`]: DataFrame::new
-//! [`check_len`]: DataFrame::check_len
-//! [`new_unchecked`]: DataFrame::new_unchecked
-//! [`frame_control`]: DataFrame::frame_control
-//! [`sequence_number`]: DataFrame::sequence_number
-//! [`addressing`]: DataFrame::addressing
-//! [`auxiliary_security_header`]: DataFrame::auxiliary_security_header
-//! [`information_elements`]: DataFrame::information_elements
-//! [`payload`]: DataFrame::payload
-//! [`HeaderTermination1`]: HeaderElementId::HeaderTermination1
-//! [`HeaderTermination2`]: HeaderElementId::HeaderTermination2
-//! [`header_information_elements`]: InformationElements::header_information_elements
-//! [`payload_information_elements`]: InformationElements::payload_information_elements
-//! [`nested_information_elements`]: PayloadInformationElement::nested_information_elements
 #![no_std]
-#![deny(missing_docs)]
-#![deny(unsafe_code)]
-#![allow(unused)]
+#![cfg_attr(feature = "strict", deny(warnings))]
+#![allow(dead_code)]
 
-#[cfg(any(feature = "std", test))]
-#[macro_use]
-extern crate std;
+pub mod fields;
+pub mod mpdu;
+pub mod repr;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduNoFields;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduWithFrameControl;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduWithAddressing;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduWithSecurity;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduWithIes;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct MpduWithAllFields;
+
+/// A marker trait that subsumes all MPDU states that provide access to
+/// addressing fields.
+pub trait MpduUpToAddressing {}
+impl MpduUpToAddressing for MpduWithAddressing {}
+impl MpduUpToAddressing for MpduWithSecurity {}
+impl MpduUpToAddressing for MpduWithAllFields {}
+
+/// A marker trait that subsumes all MPDU states that provide access to
+/// security-related fields.
+pub trait MpduUpToSecurity {}
+impl MpduUpToSecurity for MpduWithSecurity {}
+impl MpduUpToSecurity for MpduWithAllFields {}
 
 #[cfg(test)]
-mod tests;
+mod test {
+    use core::num::NonZeroU16;
 
-pub mod frames;
-pub use frames::Beacon;
-pub use frames::DataFrame;
-pub use frames::EnhancedBeacon;
-pub use frames::Frame;
-pub use frames::FrameWithFcs;
+    use dot15d4_driver::{
+        constants::PHY_MAX_PACKET_SIZE_127,
+        frame::{
+            AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
+            RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
+        },
+        time::{Frequency, Instant},
+        DriverConfig, FcsTwoBytes, RadioTimerApi,
+    };
+    use dot15d4_util::allocator::{BufferToken, IntoBuffer};
+    use static_cell::ConstStaticCell;
+    use typenum::{U, U1, U2};
 
-mod time;
+    #[cfg(feature = "ies")]
+    use crate::repr::{IeListRepr, IeRepr, IeReprList};
+    #[cfg(feature = "security")]
+    use crate::repr::{KeyIdRepr, SecurityLevelRepr, SecurityRepr};
+    use crate::{
+        mpdu::imm_ack_frame,
+        repr::{MpduRepr, SeqNrRepr},
+        MpduWithIes,
+    };
+    struct FakeRadioTimer;
+    impl Frequency for FakeRadioTimer {
+        const FREQUENCY: u32 = 92_000_000;
+    }
+    impl RadioTimerApi for FakeRadioTimer {
+        fn now() -> Instant<Self> {
+            todo!()
+        }
 
-mod frame_control;
-pub use frame_control::*;
+        fn schedule_alarm(_at: Instant<Self>) {
+            todo!()
+        }
 
-mod aux_sec_header;
-pub use aux_sec_header::*;
+        async fn wait_for_alarm() -> Instant<Self> {
+            todo!()
+        }
+    }
 
-mod addressing;
-pub use addressing::*;
+    struct FakeDriverConfig;
+    impl DriverConfig for FakeDriverConfig {
+        type Headroom = U1;
+        type Tailroom = U2;
+        type MaxSduLength = U<PHY_MAX_PACKET_SIZE_127>;
+        type Fcs = FcsTwoBytes;
+        type Timer = FakeRadioTimer;
+    }
 
-mod ie;
-pub use ie::*;
+    #[test]
+    fn test_mpdu_repr_api_and_size() {
+        const MPDU_REPR: MpduRepr<'static, MpduWithIes> = const {
+            let mpdu_repr = MpduRepr::new();
 
-mod repr;
-pub use repr::*;
+            let mpdu_repr = mpdu_repr
+                .with_frame_control(SeqNrRepr::Yes)
+                .with_addressing(AddressingRepr::new(
+                    AddressingMode::Short,
+                    AddressingMode::Short,
+                    true,
+                    PanIdCompressionRepr::Yes,
+                ));
 
-/// An error that can occur when reading or writing an IEEE 802.15.4 frame.
-#[derive(Debug, Clone, Copy)]
-pub struct Error;
+            #[cfg(feature = "security")]
+            let mpdu_repr = mpdu_repr.with_security(SecurityRepr::new(
+                false,
+                SecurityLevelRepr::EncMic32,
+                KeyIdRepr::Source4Byte,
+            ));
 
-/// A type alias for `Result<T, frame::Error>`.
-pub type Result<T> = core::result::Result<T, Error>;
+            #[cfg(not(feature = "security"))]
+            let mpdu_repr = mpdu_repr.without_security();
+
+            #[cfg(feature = "ies")]
+            let mpdu_repr = {
+                static SLOTFRAMES: [u8; 3] = [2, 3, 4];
+                static IES: [IeRepr; 3] = [
+                    IeRepr::TimeCorrectionHeaderIe,
+                    IeRepr::FullTschTimeslotNestedIe,
+                    IeRepr::TschSlotframeAndLinkNestedIe(&SLOTFRAMES),
+                ];
+                static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
+                static IE_LIST: IeListRepr<'static> =
+                    IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
+                mpdu_repr.with_ies(IE_LIST)
+            };
+
+            #[cfg(not(feature = "ies"))]
+            let mpdu_repr = mpdu_repr.without_ies();
+
+            mpdu_repr
+        };
+
+        #[cfg(all(not(feature = "ies"), not(feature = "security")))]
+        assert_eq!(size_of_val(&MPDU_REPR), 5);
+
+        #[cfg(all(feature = "security", not(feature = "ies")))]
+        assert_eq!(size_of_val(&MPDU_REPR), 8);
+
+        #[cfg(all(feature = "ies", not(feature = "security")))]
+        assert_eq!(size_of_val(&MPDU_REPR), 32);
+
+        #[cfg(all(feature = "security", feature = "ies"))]
+        assert_eq!(size_of_val(&MPDU_REPR), 32);
+
+        const FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameUnsized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new();
+        const MAX_BUFFER_LENGTH: usize = FRAME_REPR.max_buffer_length() as usize;
+
+        static BUFFER: ConstStaticCell<[u8; MAX_BUFFER_LENGTH]> =
+            ConstStaticCell::new([0; MAX_BUFFER_LENGTH]);
+        let buffer = BufferToken::new(BUFFER.take());
+
+        const PAYLOAD_LENGTH: u16 = 5;
+        let parsed_mpdu = MPDU_REPR
+            .into_parsed_mpdu::<FakeDriverConfig>(
+                FrameVersion::Ieee802154,
+                FrameType::Data,
+                PAYLOAD_LENGTH,
+                buffer,
+            )
+            .unwrap();
+
+        #[cfg(not(any(feature = "security", feature = "ies")))]
+        assert_eq!(size_of_val(&parsed_mpdu), 32);
+
+        #[cfg(any(feature = "security", feature = "ies"))]
+        assert_eq!(size_of_val(&parsed_mpdu), 40);
+
+        unsafe {
+            parsed_mpdu.into_buffer().consume();
+        }
+    }
+
+    #[test]
+    fn test_imm_ack_frame() {
+        const IMM_ACK_LEN: u8 = 3;
+
+        const IMM_ACK_FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameSized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new()
+                .with_sdu(NonZeroU16::new(IMM_ACK_LEN as u16).unwrap());
+        const IMM_ACK_BUF_LEN: usize = IMM_ACK_FRAME_REPR.pdu_length() as usize;
+
+        static mut BUFFER: [u8; IMM_ACK_BUF_LEN] = [0; IMM_ACK_BUF_LEN];
+        #[allow(static_mut_refs)]
+        let buffer = BufferToken::new(unsafe { &mut BUFFER });
+
+        const TEST_SEQ_NUM: u8 = 55;
+        let frame = imm_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, buffer);
+
+        assert_eq!(
+            IMM_ACK_BUF_LEN as u8,
+            IMM_ACK_FRAME_REPR.driver_overhead() + IMM_ACK_LEN + IMM_ACK_FRAME_REPR.fcs_length()
+        );
+
+        let expected_buffer = [
+            0,
+            FrameType::Ack as u8,
+            (FrameVersion::Ieee802154_2006 as u8) << 4,
+            TEST_SEQ_NUM,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let frame_buffer = frame.into_buffer();
+        assert_eq!(frame_buffer.as_ref(), &expected_buffer);
+
+        unsafe {
+            frame_buffer.consume();
+        }
+    }
+
+    fn round_to_alignment(size: usize, alignment: usize) -> usize {
+        assert!(alignment > 0 && ((alignment & (alignment - 1)) == 0));
+
+        let size = size as isize;
+        let alignment = alignment as isize;
+
+        ((size + alignment - 1) & -alignment) as usize
+    }
+}

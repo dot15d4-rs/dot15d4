@@ -1,125 +1,24 @@
-use crate::FrameType;
+//! This module contains minimal structural representations for all MPDU fields.
+//!
+//! These representations contain just enough information to calculate field
+//! offsets and lengths. They are optimized for minimal runtime memory and CPU
+//! resource usage.
+//!
+//! On incoming frames structural representations are used to calculate offsets
+//! and ranges into the incoming radio frame buffer while parsing the frame.
+//! Field content may then be read directly from the incoming zero-copy buffer.
+//!
+//! On outgoing frames structural representations are used to calculate the
+//! required buffer length with minimal runtime footprint. Once a zero-copy
+//! buffer has been allocated, the same information can then be used to write
+//! field content directly into the buffer.
 
-use super::{DataFrame, Error, Result};
+mod ies;
+mod mpdu;
+mod security;
+mod seq_nr;
 
-mod addressing;
-pub use addressing::AddressingFieldsRepr;
-
-mod frame_control;
-pub use frame_control::FrameControlRepr;
-
-mod ie;
-pub use ie::*;
-
-mod builder;
-pub use builder::FrameBuilder;
-
-/// A high-level representation of an IEEE 802.15.4 frame.
-#[derive(Debug)]
-#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
-pub struct FrameRepr<'p> {
-    /// The frame control field.
-    pub frame_control: FrameControlRepr,
-    /// The sequence number.
-    pub sequence_number: Option<u8>,
-    /// The addressing fields.
-    pub addressing_fields: Option<AddressingFieldsRepr>,
-    /// The information elements.
-    pub information_elements: Option<InformationElementsRepr>,
-    /// The payload.
-    pub payload: Option<&'p [u8]>,
-}
-
-impl<'f> FrameRepr<'f> {
-    /// Parse an IEEE 802.15.4 frame.
-    pub fn parse(reader: &DataFrame<&'f [u8]>) -> Result<Self> {
-        let frame_control = FrameControlRepr::parse(reader.frame_control())?;
-        let addressing_fields = reader
-            .addressing()
-            .map(|af| AddressingFieldsRepr::parse(af));
-        let information_elements = reader
-            .information_elements()
-            .map(InformationElementsRepr::parse)
-            .transpose()?;
-
-        Ok(Self {
-            frame_control,
-            sequence_number: reader.sequence_number(),
-            addressing_fields,
-            information_elements,
-            payload: reader.payload(),
-        })
-    }
-
-    /// Validate the frame.
-    pub fn validate(&self) -> Result<()> {
-        // If the frame type is data, then the addressing fields must be present.
-        if self.frame_control.frame_type == FrameType::Data {
-            if self.addressing_fields.is_none() {
-                return Err(Error);
-            }
-
-            if self.payload.is_none() {
-                return Err(Error);
-            }
-        }
-
-        // If the addressing fields are present, they must be valid.
-        if let Some(af) = &self.addressing_fields {
-            af.validate(&self.frame_control)?;
-        }
-
-        // If the payload is present, it must not be empty.
-        if let Some(payload) = self.payload {
-            if payload.is_empty() {
-                return Err(Error);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Return the length of the frame when emitted into a buffer.
-    pub fn buffer_len(&self) -> usize {
-        let mut len = 2; // Frame control
-
-        if self.sequence_number.is_some() {
-            len += 1;
-        }
-
-        if let Some(af) = &self.addressing_fields {
-            len += af.buffer_len(&self.frame_control);
-        }
-
-        if let Some(ie) = &self.information_elements {
-            len += ie.buffer_len(self.payload.is_some());
-        }
-
-        if let Some(payload) = self.payload {
-            len += payload.len();
-        }
-
-        len
-    }
-
-    /// Emit the frame into a buffer.
-    pub fn emit(&self, frame: &mut DataFrame<&'_ mut [u8]>) {
-        frame.set_frame_control(&self.frame_control);
-
-        if let Some(sequence_number) = self.sequence_number {
-            frame.set_sequence_number(sequence_number);
-        }
-
-        if let Some(af) = &self.addressing_fields {
-            frame.set_addressing_fields(af);
-        }
-
-        if let Some(ie) = &self.information_elements {
-            frame.set_information_elements(ie, self.payload.is_some());
-        }
-
-        if let Some(payload) = self.payload {
-            frame.set_payload(payload);
-        }
-    }
-}
+pub use ies::*;
+pub use mpdu::*;
+pub use security::*;
+pub use seq_nr::*;
