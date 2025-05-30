@@ -1,0 +1,37 @@
+[package]
+edition = "2021"
+name = "dot15d4-util"
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+allocator-api2 = { version = "0.3", default-features = false }
+generic-array = "1.2"
+heapless = "0.8"
+static_cell = "2.1"
+typenum = "1.18"
+
+defmt = { version = "1.0", optional = true }
+log = { version = "0.4", optional = true }
+
+rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
+systemview-target = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", features = [
+    "log",
+    "callbacks-app",
+    "callbacks-os",  # required for embassy integration
+], optional = true }
+
+[dev-dependencies]
+embedded-hal-async = "1.0"
+pollster = { version = "0.4", features = ["macro"] }
+
+[features]
+std = ["allocator-api2/std"]
+
+defmt = ["dep:defmt"]
+log = ["dep:log"]
+
+rtos-trace = ["dep:rtos-trace", "dep:systemview-target", "log"]
+_clippy-std = ["std"]
+_clippy-no-std = ["rtos-trace"]
+
