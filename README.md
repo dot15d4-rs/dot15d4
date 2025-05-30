@@ -22,21 +22,17 @@ Add this to your `Cargo.toml`:
 dot15d4 = "0.1.0"
 ```
 
-### Configurable features 
+### Configurable features
 
-* `std`: Enables `std` only features
-* `log`: Use the `log` crate for structured logging
-* `defmt`: Use the `defmt` crate for structured logging
+- `std`: Enables `std` only features
+- `log`: Use the `log` crate for structured logging
+- `defmt`: Use the `defmt` crate for structured logging
 
 ### Configurable environment variables
 
-* `DOT15D4_MAC_MIN_BE` (default: 0): Minimum backoff exponent used in `CSMA`
-* `DOT15D4_MAC_MAX_BE` (default: 8): Maximum backoff exponent used in `CSMA`
-* `DOT15D4_MAC_UNIT_BACKOFF_DURATION` (default: 320us): The time of one backoff period 
-* `DOT15D4_MAC_MAX_FRAME_RETRIES` (default: 3): Maximum CCA/ACK rounds
-* `DOT15D4_MAC_AIFS_PERIOD` (default: 1ms): The minimal time for the receiving end to go from transmitting to receiving mode when sending an ACK
-* `DOT15D4_MAC_SIFS_PERIOD` (default: 1ms): The inter-frame spacing time for short frames
-* `DOT15D4_MAC_LIFS_PERIOD` (default: 10ms): The inter-frame spacing time for long frames
+- `DOT15D4_MAC_MIN_BE` (default: 0): Minimum backoff exponent used in `CSMA`
+- `DOT15D4_MAC_MAX_BE` (default: 8): Maximum backoff exponent used in `CSMA`
+- `DOT15D4_MAC_MAX_FRAME_RETRIES` (default: 3): Maximum CCA/ACK rounds
 
 For more information, see the [API documentation](https://docs.rs/dot15d4).
 
@@ -51,6 +47,7 @@ dot15d4 40ebcdabffff0100010001000100003f1188061a0e0000000000011c0001c800011b00
 ```
 
 Output:
+
 ```txt
 Frame Control
   frame type: Enhanced Beacon
@@ -90,8 +87,8 @@ Information Elements
 
 Licensed under either of
 
- * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
- * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
 

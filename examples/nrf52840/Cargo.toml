@@ -1,0 +1,56 @@
+[package]
+edition = "2021"
+name = "dot15d4-examples-nrf52840"
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+cortex-m = { version = "0.7", features = [
+    "inline-asm",
+    "critical-section-single-core",
+] }
+cortex-m-rt = "0.7.0"
+dot15d4-driver = { version = "0.0.1", path = "../../dot15d4-driver", features = [
+    "nrf52840",
+] }
+dot15d4-util = { version = "0.0.1", path = "../../dot15d4-util" }
+embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+    "arch-cortex-m",
+    "executor-thread",
+] }
+panic-probe = "1.0"
+heapless = "0.8"
+static_cell = "2.1"
+
+defmt = { version = "1.0", optional = true }
+defmt-rtt = { version = "1.0", optional = true }
+log = { version = "0.4", optional = true }
+
+rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
+
+[features]
+defmt = [
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "dot15d4-driver/defmt",
+    "dot15d4-embassy/defmt",
+    "dot15d4-util/defmt",
+    "embassy-executor/defmt",
+    "embassy-net/defmt",
+    "panic-probe/print-defmt",
+]
+log = [
+    "dep:log",
+    "dot15d4-driver/log",
+    "dot15d4-embassy/log",
+    "dot15d4-util/log",
+]
+
+rtos-trace = [
+    "dep:rtos-trace",
+    "embassy-executor/rtos-trace",
+    "dot15d4-util/rtos-trace",
+    "dot15d4-driver/rtos-trace",
+    "dot15d4-embassy/rtos-trace",
+    "log",
+]
