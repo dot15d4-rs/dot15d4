@@ -1,6 +1,26 @@
 [workspace]
-
 resolver = "2"
 
-members = ["dot15d4", "dot15d4-cat", "dot15d4-frame", "dot15d4-macros", "fuzz"]
-exclude = ["ensure-no-std"]
+members = [
+    "dot15d4-util",
+    "dot15d4-driver",
+    "dot15d4-frame",
+    "dot15d4",
+    "dot15d4-embassy",
+    "examples/nrf52840",
+]
+default-members = [
+    "dot15d4-util",
+    "dot15d4-driver",
+    "dot15d4-frame",
+    "dot15d4",
+    "dot15d4-embassy",
+]
+exclude = [
+    # The following dependencies need to be migrated to the new frame crate.
+    "dot15d4-cat",
+    "fuzz",
+]
+
+[profile.release]
+debug = true
