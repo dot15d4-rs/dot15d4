@@ -1,6 +1,8 @@
-use dot15d4_frame::{TschLinkOption, TschTimeslotTimings};
-
-use crate::mac::neighbors::MacNeighbor;
+#![allow(dead_code)]
+use crate::mac::{
+    frame::fields::{TschLinkOption, TschTimeslotTimings},
+    neighbors::MacNeighbor,
+};
 
 use super::asn::AbsoluteSlotNumber;
 
@@ -199,12 +201,9 @@ impl<const S: usize, const L: usize, T: MacNeighbor> Default for TschSchedule<S,
 
 #[cfg(test)]
 pub mod tests {
-    use dot15d4_frame::TschLinkOption;
+    use crate::mac::{frame::fields::TschLinkOption, neighbors::tests::TestNeighbor};
 
-    use crate::mac::neighbors::tests::TestNeighbor;
-    use crate::mac::tsch::schedule::{ScheduleError, TschLink, TschLinkType};
-
-    use super::{TschSchedule, TschSlotframe};
+    use super::{ScheduleError, TschLink, TschLinkType, TschSchedule, TschSlotframe};
 
     #[test]
     fn schedule() {

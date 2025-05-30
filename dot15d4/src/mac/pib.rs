@@ -1,9 +1,7 @@
-#![allow(dead_code)]
-use crate::time::Duration;
-
-use super::constants::*;
+use crate::driver::frame::PanId;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
+#[allow(dead_code)]
 pub struct Pib {
     /// The extended address assigned to the device.
     pub(crate) extended_address: Option<[u8; 8]>,
@@ -32,13 +30,9 @@ pub struct Pib {
     /// The maximum number of backoffs the CSMA-CA algorithm will attempt
     /// before declaring a channel access failure.
     pub(crate) max_csma_backoffs: u8,
-    /// The minimum time forming a LIFS period.
-    pub(crate) lifs_period: Duration,
-    /// The minimum time forming a SIFS period.
-    pub(crate) sifs_period: Duration,
     /// The identifier of the PAN on which the device is operating. If this
     /// value is 0xffff, the device is not associated.
-    pub(crate) pan_id: u16,
+    pub(crate) pan_id: PanId<[u8; 2]>,
     /// Indication of whether the MAC sublayer is in a promiscuous (receive
     /// all) mode. A value of `true` indicates that the MAC sublayer accepts
     /// all frames received from the PHY.
@@ -46,7 +40,7 @@ pub struct Pib {
     /// Indication of whether the MAC sublayer is to enable its receiver
     /// during idle periods. For a beacon-enabled PAN, this attribute is
     /// relevant only during the CAP of the incoming superframe. For a
-    /// nonbeacon-enabled PAN, this attribute is relevant at all times.
+    /// non-beacon-enabled PAN, this attribute is relevant at all times.
     pub(crate) rx_on_when_idle: bool,
     /// Indication of whether the MAC sublayer has security enabled. A value
     /// of `true` indicates that security is enabled, while a value of `false`
@@ -65,6 +59,8 @@ pub struct Pib {
 
 impl Default for Pib {
     fn default() -> Self {
+        use dot15d4_driver::const_config::*;
+
         Self {
             extended_address: None,
             associated_pan_coord: false,
@@ -73,10 +69,8 @@ impl Default for Pib {
             coord_short_address: 0xffff,
             max_be: MAC_MAX_BE,
             min_be: MAC_MIN_BE,
-            max_frame_retries: MAC_MAX_FRAME_RETIES,
+            max_frame_retries: MAC_MAX_FRAME_RETRIES,
             max_csma_backoffs: MAC_MAX_CSMA_BACKOFFS,
-            lifs_period: MAC_LIFS_PERIOD,
-            sifs_period: MAC_SIFS_PERIOD,
             pan_id: MAC_PAN_ID,
             promiscuous_mode: false,
             rx_on_when_idle: false,

@@ -1,11 +1,9 @@
+#![allow(dead_code)]
 use core::ops::RangeInclusive;
 
-use embedded_hal_async::delay::DelayNs;
 use rand_core::RngCore;
 
-use crate::mac::MacService;
-use crate::phy::radio::{Radio, RadioFrameMut};
-use crate::upper::UpperLayer;
+use crate::{driver::DriverConfig, mac::MacService};
 
 pub enum ScanType {
     Ed,
@@ -20,7 +18,6 @@ pub enum ScanChannels {
     Single(u8),
 }
 
-#[allow(dead_code)]
 pub struct ScanConfirm {
     scan_type: ScanType,
     channel_page: u8,
@@ -42,16 +39,7 @@ pub enum ScanError {
     InvalidParameter,
 }
 
-#[allow(dead_code)]
-impl<Rng, U, TIMER, R> MacService<'_, Rng, U, TIMER, R>
-where
-    Rng: RngCore,
-    U: UpperLayer,
-    TIMER: DelayNs + Clone,
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
-{
+impl<'svc, Rng: RngCore, RadioDriverImpl: DriverConfig> MacService<'svc, Rng, RadioDriverImpl> {
     /// Initiates a channel scan over a given set of channels.
     pub(crate) async fn mlme_scan_request(
         &self,

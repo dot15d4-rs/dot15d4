@@ -1,87 +1,77 @@
-#![no_std]
-
-#[cfg(any(feature = "std", test))]
-#[macro_use]
-extern crate std;
-
-#[macro_use]
-pub(crate) mod utils;
-
-pub use dot15d4_frame as frame;
-
+#![cfg_attr(not(feature = "std"), no_std)]
+pub mod driver;
 pub mod mac;
-pub mod phy;
-pub mod sync;
-pub mod time;
-pub mod upper;
 
-use crate::{
-    phy::radio::{Radio, RadioFrameMut},
-    sync::{channel::Channel, mutex::Mutex, select, Either},
-    upper::UpperLayer,
+use dot15d4_driver::{
+    tasks::{
+        OffState, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx, TaskTx as RadioTaskTx,
+        TxState,
+    },
+    RadioDriverApi,
 };
-use embedded_hal_async::delay::DelayNs;
-use rand_core::RngCore;
+pub use dot15d4_util as util;
 
-use self::{mac::MacService, phy::PhyService};
-
-pub struct Device<R: Radio, Rng, U: UpperLayer, TIMER> {
-    radio: Mutex<R>,
-    rng: Mutex<Rng>,
-    upper_layer: U,
-    timer: TIMER,
+pub mod export {
+    pub use rand_core::RngCore;
 }
 
-impl<R, Rng, U, TIMER> Device<R, Rng, U, TIMER>
-where
-    R: Radio,
-    Rng: RngCore,
-    U: UpperLayer,
-{
-    pub fn new(radio: R, rng: Rng, upper_layer: U, timer: TIMER) -> Self {
+use rand_core::RngCore;
+
+use self::{
+    driver::{
+        tasks::{RadioDriver, TaskOff},
+        DriverConfig, DriverRequestChannel, DriverService,
+    },
+    mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
+    util::sync::{mutex::Mutex, select, Either},
+};
+
+pub struct Device<RadioDriverImpl: DriverConfig, Rng> {
+    radio: RadioDriver<RadioDriverImpl, TaskOff>,
+    rng: Mutex<Rng>,
+}
+
+impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Device<RadioDriverImpl, Rng> {
+    pub fn new(radio: RadioDriver<RadioDriverImpl, TaskOff>, rng: Rng) -> Self {
         Self {
-            radio: Mutex::new(radio),
+            radio,
             rng: Mutex::new(rng),
-            upper_layer,
-            timer,
         }
     }
 }
 
-impl<R, Rng, U, TIMER> Device<R, Rng, U, TIMER>
+impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Device<RadioDriverImpl, Rng>
 where
-    R: Radio,
-    for<'a> R::RadioFrame<&'a mut [u8]>: RadioFrameMut<&'a mut [u8]>,
-    for<'a> R::TxToken<'a>: From<&'a mut [u8]>,
-    Rng: RngCore,
-    U: UpperLayer,
-    TIMER: DelayNs + Clone,
+    RadioDriver<RadioDriverImpl, RadioTaskOff>: OffState<RadioDriverImpl> + RadioDriverApi,
+    RadioDriver<RadioDriverImpl, RadioTaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
+    RadioDriver<RadioDriverImpl, RadioTaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
-    pub async fn run(&mut self) -> ! {
-        #[cfg(feature = "rtos-trace")]
+    pub async fn run<'upper_layer>(
+        mut self,
+        buffer_allocator: MacBufferAllocator,
+        request_receiver: MacRequestReceiver<'upper_layer>,
+        indication_sender: MacIndicationSender<'upper_layer>,
+    ) -> ! {
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
 
-        let (mut tx, mut rx) = (Channel::new(), Channel::new());
-        let (tx_send, tx_recv) = tx.split();
-        let (rx_send, rx_recv) = rx.split();
-
-        let mut tx_done = Channel::new();
-        let (tx_done_send, tx_done_recv) = tx_done.split();
-
-        let mut phy_service = PhyService::new(&mut self.radio, tx_recv, rx_send, tx_done_send);
-        let mut mac_service = MacService::<'_, Rng, U, TIMER, R>::new(
+        let driver_service_channel = DriverRequestChannel::new();
+        let driver_service = DriverService::new(
+            self.radio,
+            driver_service_channel.receiver(),
+            buffer_allocator,
+        );
+        let mut mac_service = MacService::<'_, Rng, RadioDriverImpl>::new(
             &mut self.rng,
-            &mut self.upper_layer,
-            self.timer.clone(),
-            rx_recv,
-            tx_send,
-            tx_done_recv,
+            buffer_allocator,
+            request_receiver,
+            indication_sender,
+            driver_service_channel.sender(),
         );
 
-        match select::select(mac_service.run(), phy_service.run()).await {
-            Either::First(_) => panic!("Tasks should never terminate, MAC service just did"),
-            Either::Second(_) => panic!("Tasks should never terminate, PHY service just did"),
+        match select::select(mac_service.run(), driver_service.run()).await {
+            Either::First(_) => panic!("MAC service terminated"),
+            Either::Second(_) => panic!("Driver service terminated"),
         }
     }
 
@@ -117,16 +107,29 @@ pub mod trace {
         "Tracing cannot be enabled at the same time as defmt. Logs will be visible in the SystemView application if the 'log' feature is enabled."
     );
 
+    // Tasks
     pub const MAC_INDICATION: u32 = 0;
     pub const MAC_REQUEST: u32 = 1;
-    pub const PHY_TX: u32 = 2;
-    pub const PHY_RX: u32 = 3;
+
+    // Markers
+    pub const TX_FRAME: u32 = 0;
+    pub const TX_NACK: u32 = 1;
+    pub const TX_CCABUSY: u32 = 2;
+    pub const RX_FRAME: u32 = 3;
+    pub const RX_INVALID: u32 = 4;
+    pub const RX_CRC_ERROR: u32 = 5;
+    pub const RX_WINDOW_ENDED: u32 = 6;
 
     /// Instrument the library for tracing.
-    pub(super) fn instrument() {
+    pub(crate) fn instrument() {
         rtos_trace::trace::task_new_stackless(MAC_INDICATION, "MAC indication\0", 0);
         rtos_trace::trace::task_new_stackless(MAC_REQUEST, "MAC request\0", 0);
-        rtos_trace::trace::task_new_stackless(PHY_TX, "PHY Tx\0", 0);
-        rtos_trace::trace::task_new_stackless(PHY_RX, "PHY Rx\0", 0);
+        rtos_trace::trace::name_marker(TX_FRAME, "TX frame\0");
+        rtos_trace::trace::name_marker(TX_NACK, "TX NACK\0");
+        rtos_trace::trace::name_marker(TX_CCABUSY, "TX CCA Busy\0");
+        rtos_trace::trace::name_marker(RX_FRAME, "RX frame\0");
+        rtos_trace::trace::name_marker(RX_INVALID, "RX invalid frame\0");
+        rtos_trace::trace::name_marker(RX_CRC_ERROR, "RX CRC error\0");
+        rtos_trace::trace::name_marker(RX_WINDOW_ENDED, "RX window ended\0");
     }
 }

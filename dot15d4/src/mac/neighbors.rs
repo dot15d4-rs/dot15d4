@@ -1,4 +1,6 @@
-use crate::time::Instant;
+#![allow(dead_code)]
+
+use crate::driver::time::{Instant, Microseconds};
 
 pub enum TableError {
     Full,
@@ -16,14 +18,14 @@ where
     fn remove_neighbor(&mut self, address: A);
 }
 
-/// Trait that allows for interacion with the concept of MAC neighbor used in
+/// Trait that allows for interaction with the concept of MAC neighbor used in
 /// another crate.
 pub trait MacNeighbor {
     /// The IEEE 8012.15.4 address of the neighbor.
     fn address(&self) -> [u8; 8];
     /// Time of last transmission of a packet by the neighbor.
-    fn last_tx(&self) -> Instant;
-    /// Estimated transmission count when communiting with the neighbor.
+    fn last_tx(&self) -> Instant<Microseconds>;
+    /// Estimated transmission count when communicating with the neighbor.
     fn etx(&self) -> u32;
     /// Link quality indicator
     fn lqi(&self) -> u32;
@@ -31,8 +33,8 @@ pub trait MacNeighbor {
     fn num_tx(&self) -> u32;
     /// Number of packets received
     fn num_rx(&self) -> u32;
-    /// Set the time of last transmussion of a packet by the neighbor.
-    fn set_last_tx(&mut self, instant: Instant);
+    /// Set the time of last transmission of a packet by the neighbor.
+    fn set_last_tx(&mut self, instant: Instant<Microseconds>);
     /// Set the Estimated transmission count.
     fn set_etx(&mut self, etx: u32);
     /// Set the link quality indicator.
@@ -45,12 +47,12 @@ pub trait MacNeighbor {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::time::Instant;
+    use crate::driver::time::{Instant, Microseconds};
 
     use super::MacNeighbor;
     pub(crate) struct TestNeighbor {
         address: [u8; 8],
-        last_tx: Instant,
+        last_tx: Instant<Microseconds>,
         etx: u32,
         n_tx: u32,
         n_rx: u32,
@@ -61,7 +63,7 @@ pub mod tests {
         fn default() -> Self {
             Self {
                 address: [0; 8],
-                last_tx: Instant::from_us(0),
+                last_tx: Instant::new(0),
                 etx: 2,
                 n_tx: 0,
                 n_rx: 0,
@@ -84,7 +86,7 @@ pub mod tests {
             self.address
         }
 
-        fn last_tx(&self) -> Instant {
+        fn last_tx(&self) -> Instant<Microseconds> {
             self.last_tx
         }
 
@@ -104,7 +106,7 @@ pub mod tests {
             self.n_rx
         }
 
-        fn set_last_tx(&mut self, instant: Instant) {
+        fn set_last_tx(&mut self, instant: Instant<Microseconds>) {
             self.last_tx = instant;
         }
 

@@ -4,5 +4,3 @@ pub mod reset;
 pub mod scan;
 pub mod set;
 pub mod start;
-
-pub use super::MacService;

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// The absolute slot number represents the total number of timeslots that has
 /// elapsed since the start of the network or an arbitrary start time
 /// determined by the PAN coordinator. It is stored as a 5-byte unsigned
@@ -46,9 +47,7 @@ impl PartialEq<i64> for AbsoluteSlotNumber {
 
 impl PartialOrd for AbsoluteSlotNumber {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        if self.ms1b < other.ms1b {
-            Some(core::cmp::Ordering::Less)
-        } else if self.ls4b < other.ls4b {
+        if self.ms1b < other.ms1b || self.ls4b < other.ls4b {
             Some(core::cmp::Ordering::Less)
         } else if self.ls4b > other.ls4b {
             Some(core::cmp::Ordering::Greater)
