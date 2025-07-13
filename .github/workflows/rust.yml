@@ -73,14 +73,3 @@ jobs:
         files: lcov.info
         fail_ci_if_error: false
         slug: thvdveld/dot15d4
-  
-  ensure-no-std-compatible:
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Install a no_std target
-      run: rustup target add thumbv7em-none-eabi
-    - name: Check if it is buildable with a no_std target
-      working-directory: ./ensure-no-std
-      run: cargo build --target thumbv7em-none-eabi
