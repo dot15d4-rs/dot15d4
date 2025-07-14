@@ -1,11 +1,19 @@
 [licenses]
 allow = [
-    "MIT",
+    "0BSD",
     "Apache-2.0",
-    "Unicode-3.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
     "MPL-2.0",
+    "Unicode-3.0",
 ]
 confidence-threshold = 0.8
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "The paste crate is still considered stable and safe, see https://users.rust-lang.org/t/paste-alternatives/126787." },
+]
 
 [bans]
 multiple-versions = "warn"
@@ -18,7 +26,11 @@ external-default-features = "allow"
 unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # TODO: Remove once our changes landed.
+    "https://gitlab.com/fgcfh/rtos-trace.git?branch=dev",
+    "https://github.com/fg-cfh/embassy.git?branch=rtos-trace",
+]
 
 [sources.allow-org]
 github = []

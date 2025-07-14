@@ -2,9 +2,9 @@ name: Build and Test
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,62 +14,73 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-    - uses: actions/checkout@v3
-    - uses: EmbarkStudios/cargo-deny-action@v1
+      - uses: actions/checkout@v3
+      - uses: EmbarkStudios/cargo-deny-action@v1
 
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Format
-      run: cargo fmt --check --verbose
+      - uses: actions/checkout@v3
+      - name: Build
+        run: cargo build --verbose
+      - name: Format
+        run: cargo fmt --check --verbose
 
-
-  clippy:
+  clippy-std:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Clippy
-      run: cargo clippy --all-features --all-targets
+      - uses: actions/checkout@v3
+      - name: Clippy
+        run: cargo clippy --features _clippy-std --all-targets
+
+  clippy-no-std:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install ARM Target
+        run: |
+          rustup target install thumbv7em-none-eabihf
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: Clippy
+        run: cargo clippy --features _clippy-no-std --lib --bins --target thumbv7em-none-eabihf
 
   tests:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v3
+      - name: Tests
+        run: cargo test --verbose
 
   miri:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Install Miri
-      run: |
-        rustup toolchain install nightly --component miri
-        cargo +nightly miri setup
-    - name: Miri
-      run: cargo +nightly miri test --verbose
+      - uses: actions/checkout@v3
+      - name: Install Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          cargo +nightly miri setup
+      - name: Miri
+        run: cargo +nightly miri test --verbose
 
   coverage:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - name: Install `llvm-cov`
-      uses: taiki-e/install-action@cargo-llvm-cov
-    - name: Coverage
-      run: |
-        cargo llvm-cov --no-report
-        cargo llvm-cov report --lcov --output-path lcov.info
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4.0.1
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: lcov.info
-        fail_ci_if_error: false
-        slug: thvdveld/dot15d4
+      - uses: actions/checkout@v3
+      - name: Install `llvm-cov`
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Coverage
+        run: |
+          cargo llvm-cov --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4.0.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+          slug: thvdveld/dot15d4
