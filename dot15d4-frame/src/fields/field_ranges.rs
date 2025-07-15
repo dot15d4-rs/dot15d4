@@ -8,8 +8,8 @@ use crate::repr::IeListRepr;
 #[cfg(feature = "security")]
 use crate::repr::SecurityRepr;
 use crate::{
-    repr::SeqNrRepr, MpduUpToAddressing, MpduUpToSecurity, MpduWithAddressing, MpduWithAllFields,
-    MpduWithFrameControl, MpduWithSecurity,
+    repr::SeqNrRepr, MpduParsedUpToAddressing, MpduParsedUpToSecurity, MpduWithAddressing,
+    MpduWithAllFields, MpduWithFrameControl, MpduWithSecurity,
 };
 
 /// This structure contains various field offsets successively collected while
@@ -333,8 +333,8 @@ impl<State> MpduFieldRanges<State> {
 }
 
 /// Addressing fields are available on all states implementing
-/// [`MpduUpToAddressing`].
-impl<State: MpduUpToAddressing> MpduFieldRanges<State> {
+/// [`MpduParsedUpToAddressing`].
+impl<State: MpduParsedUpToAddressing> MpduFieldRanges<State> {
     /// The buffer range containing all addressing fields.
     pub(crate) const fn range_addressing(&self) -> Option<Range<usize>> {
         let offset_addressing = self.offset_addressing.get() as usize;
@@ -355,8 +355,8 @@ impl<State: MpduUpToAddressing> MpduFieldRanges<State> {
 }
 
 /// Security fields are available on all states implementing
-/// [`MpduUpToSecurity`].
-impl<State: MpduUpToSecurity> MpduFieldRanges<State> {
+/// [`MpduParsedUpToSecurity`].
+impl<State: MpduParsedUpToSecurity> MpduFieldRanges<State> {
     /// The buffer range containing the auxiliary security header.
     pub(crate) const fn range_aux_sec_header(&self) -> Option<Range<usize>> {
         #[cfg(feature = "security")]

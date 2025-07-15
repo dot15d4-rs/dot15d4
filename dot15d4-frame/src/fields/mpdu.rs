@@ -16,7 +16,7 @@ use crate::repr::IeListRepr;
 use crate::{
     mpdu::MpduFrame,
     repr::{MpduRepr, SeqNrRepr},
-    MpduUpToAddressing, MpduUpToSecurity, MpduWithAddressing, MpduWithAllFields,
+    MpduParsedUpToAddressing, MpduParsedUpToSecurity, MpduWithAddressing, MpduWithAllFields,
     MpduWithFrameControl, MpduWithIes, MpduWithSecurity,
 };
 
@@ -430,7 +430,9 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithSecurity> 
 
 /// Exposes read-only fields accessible from an MPDU at the addressing
 /// parsing stage or beyond.
-impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduUpToAddressing> MpduParser<ReadOnlyMpdu, State> {
+impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduParsedUpToAddressing>
+    MpduParser<ReadOnlyMpdu, State>
+{
     /// Read-only addressing field access.
     pub fn addressing_fields(&self) -> SimplifiedResult<Option<AddressingFields<&[u8]>>> {
         let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
@@ -452,7 +454,7 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduUpToAddressing> MpduParser<ReadO
 
 /// Exposes writable fields accessible from an MPDU at the addressing
 /// parsing stage or beyond.
-impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduUpToAddressing>
+impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAddressing>
     MpduParser<ReadWriteMpdu, State>
 {
     /// Writable addressing field access.
@@ -477,7 +479,7 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduUpToAddressi
 }
 
 /// Allows access to stand-alone addressing field references.
-impl<'mpdu, State: MpduUpToAddressing> MpduParser<&'mpdu MpduFrame, State> {
+impl<'mpdu, State: MpduParsedUpToAddressing> MpduParser<&'mpdu MpduFrame, State> {
     /// Consumes an MPDU reader and returns a stand-alone reference into the
     /// MPDU's addressing fields instead.
     pub fn into_addressing_fields(self) -> SimplifiedResult<Option<AddressingFields<&'mpdu [u8]>>> {
@@ -497,7 +499,7 @@ impl<'mpdu, State: MpduUpToAddressing> MpduParser<&'mpdu MpduFrame, State> {
 
 /// Exposes fields accessible from an MPDU at the security parsing stage or
 /// beyond.
-impl<AnyMpdu, State: MpduUpToSecurity> MpduParser<AnyMpdu, State> {
+impl<AnyMpdu, State: MpduParsedUpToSecurity> MpduParser<AnyMpdu, State> {
     // TODO: Add access to the aux security header and MIC.
 }
 

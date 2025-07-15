@@ -26,16 +26,16 @@ pub struct MpduWithAllFields;
 
 /// A marker trait that subsumes all MPDU states that provide access to
 /// addressing fields.
-pub trait MpduUpToAddressing {}
-impl MpduUpToAddressing for MpduWithAddressing {}
-impl MpduUpToAddressing for MpduWithSecurity {}
-impl MpduUpToAddressing for MpduWithAllFields {}
+pub trait MpduParsedUpToAddressing {}
+impl MpduParsedUpToAddressing for MpduWithAddressing {}
+impl MpduParsedUpToAddressing for MpduWithSecurity {}
+impl MpduParsedUpToAddressing for MpduWithAllFields {}
 
 /// A marker trait that subsumes all MPDU states that provide access to
 /// security-related fields.
-pub trait MpduUpToSecurity {}
-impl MpduUpToSecurity for MpduWithSecurity {}
-impl MpduUpToSecurity for MpduWithAllFields {}
+pub trait MpduParsedUpToSecurity {}
+impl MpduParsedUpToSecurity for MpduWithSecurity {}
+impl MpduParsedUpToSecurity for MpduWithAllFields {}
 
 #[cfg(test)]
 mod test {
