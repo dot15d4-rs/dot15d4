@@ -15,7 +15,7 @@ pub struct RadioFrameRepr<Config: DriverConfig, State> {
     ///
     /// The SDU length is the driver configuration dependent length of the PSDU
     /// (=MPDU). It contains the FCS length unless FCS calculation is offloaded
-    /// to the driver or hardware (see [`FcsNone`])
+    /// to the driver or hardware (see [`crate::FcsNone`])
     ///
     /// Safety: When set, the SDU length must be strictly greater then the
     ///         length of the FCS.

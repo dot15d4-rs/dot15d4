@@ -35,8 +35,7 @@
 //!     Sends the given request without consuming the request token. Returns
 //!     synchronously without waiting for delivery. The response produced by the
 //!     receiver must actively awaited or polled, see
-//!     [`Sender::wait_for_response()`], [`Sender::poll_wait_for_response()`]
-//!     and [`Sender::try_receive_response()`].
+//!     [`Sender::wait_for_response()`] and [`Sender::try_receive_response()`].
 //!
 //!   - [`Sender::wait_for_response()`]
 //!     Asynchronously waits until a response matching any of the given request
