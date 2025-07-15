@@ -46,7 +46,7 @@ jobs:
          server: "matrix.org"
 
   new-issue:
-    if: github.event.action == 'opened' && github.repository == 'dot15d4-rs/dot15d4'
+    if: github.event.action == 'opened' && github.repository == 'dot15d4-rs/dot15d4' && !contains(github.event.issue.html_url, '/pull/')
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -59,7 +59,7 @@ jobs:
           server: "matrix.org"
 
   closed-issue:
-    if: github.event.action == 'closed' && github.repository == 'dot15d4-rs/dot15d4'
+    if: github.event.action == 'closed' && github.repository == 'dot15d4-rs/dot15d4' && !contains(github.event.issue.html_url, '/pull/')
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
