@@ -28,6 +28,7 @@ pub mod export {
     pub use typenum::{Const, ToUInt, U};
 }
 
+#[allow(rustdoc::broken_intra_doc_links)]
 /// A token representing a non-cloneable, zerocopy, 1-aligned byte buffer that
 /// safely fakes static lifetime so that it can be passed around without
 /// polluting channels' and other framework structures' lifetimes.
@@ -293,8 +294,8 @@ where
 ///
 /// Currently we wrap our own allocator backend by default. Interesting future
 /// candidates might be:
-/// - https://github.com/pcwalton/offset-allocator
-/// - https://crates.io/crates/ring-alloc
+/// - <https://github.com/pcwalton/offset-allocator>
+/// - <https://crates.io/crates/ring-alloc>
 #[derive(Clone, Copy)]
 pub struct BufferAllocator {
     allocator: &'static dyn Allocator,
@@ -425,8 +426,8 @@ where
 ///
 /// Currently we wrap our own allocator backend by default. Interesting future
 /// candidates might be:
-/// - https://github.com/pcwalton/offset-allocator
-/// - https://crates.io/crates/ring-alloc
+/// - <https://github.com/pcwalton/offset-allocator>
+/// - <https://crates.io/crates/ring-alloc>
 #[derive(Clone, Copy)]
 pub struct AsyncBufferAllocator<const BACKLOG: usize>
 where

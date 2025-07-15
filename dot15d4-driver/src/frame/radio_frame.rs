@@ -243,7 +243,7 @@ impl Frame for RadioFrame<RadioFrameSized> {
 ///   implement the DroppableRadioFrame based on a droppable buffer. This makes
 ///   sense as soon as we need a droppable buffer elsewhere.
 /// - We could implement a "RecoverableRadioFrame" that uses
-///   Cell<Option<BufferToken>> internally. It can be passed around by reference
+///   `Cell<Option<BufferToken>>` internally. It can be passed around by reference
 ///   which allows the allocating call site to retain ownership while also
 ///   passing shared ownership (via interior mutability) to the callee. This
 ///   version would have to implement a method "try_into_buffer()" That recovers

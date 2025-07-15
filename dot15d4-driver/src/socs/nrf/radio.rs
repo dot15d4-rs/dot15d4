@@ -1347,7 +1347,7 @@ fn prepare_tx_frame(radio_frame: &mut RadioFrame<RadioFrameSized>) -> u32 {
 /// NOTE: Must be preceded by a volatile write operation to the DMA pointer.
 ///
 /// TODO: Is this actually correct?
-/// Also see https://github.com/rust-lang/unsafe-code-guidelines/issues/260.
+/// Also see <https://github.com/rust-lang/unsafe-code-guidelines/issues/260>.
 fn dma_start_fence() {
     compiler_fence(Ordering::Release);
 }
@@ -1355,7 +1355,7 @@ fn dma_start_fence() {
 /// NOTE: Must be followed by a volatile read operation to the DMA pointer.
 ///
 /// TODO: Is this actually correct?
-/// Also see https://github.com/rust-lang/unsafe-code-guidelines/issues/260.
+/// Also see <https://github.com/rust-lang/unsafe-code-guidelines/issues/260>.
 fn dma_end_fence() {
     compiler_fence(Ordering::Acquire);
 }
