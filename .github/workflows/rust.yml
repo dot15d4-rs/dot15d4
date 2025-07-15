@@ -54,6 +54,23 @@ jobs:
       - name: Tests
         run: cargo test --verbose
 
+  doc:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Generate Documentation
+        run: cargo doc --no-deps
+
+  doc-private:
+    needs: [build]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v3
+      - name: Generate Private Documentation
+        run: cargo doc --no-deps --document-private-items
+
   miri:
     needs: [build]
     runs-on: ubuntu-latest
