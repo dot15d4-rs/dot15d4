@@ -15,11 +15,11 @@ use crate::{
 /// This structure contains various field offsets successively collected while
 /// parsing an MPDU.
 ///
-/// All offsets are actually pure functions of an unparsed MPDU in state
-/// [`MpduSized`]`, i.e. an MPDU whose overall length is known. This is the type
-/// of MPDU we get from a receiving driver. Storing offsets is therefore
-/// redundant and can only be justified as a performance optimization when
-/// fields need to be accessed repeatedly.
+/// All offsets are actually pure functions of an unparsed
+/// [`crate::mpdu::MpduFrame`]`, i.e. an MPDU whose overall length is known.
+/// This is the type of MPDU we get from a receiving driver. Storing offsets is
+/// therefore redundant and can only be justified as a performance optimization
+/// when fields need to be accessed repeatedly.
 ///
 /// As acquiring offsets is not free and we often only want to read a few
 /// initial fields, e.g. just the frame control, sequence number or addressing
@@ -379,8 +379,8 @@ impl<State: MpduParsedUpToSecurity> MpduFieldRanges<State> {
     }
 }
 
-/// The [`MpduSized`] parsing state represents a fully parsed frame with access
-/// to all sub-fields.
+/// The [`MpduWithAllFields`] parsing state represents a fully parsed frame with
+/// access to all sub-fields.
 impl MpduFieldRanges<MpduWithAllFields> {
     /// The buffer range containing information elements.
     pub(crate) const fn range_ies(&self) -> Option<Range<usize>> {
