@@ -22,7 +22,22 @@ pub struct MpduFrame {
 }
 
 impl MpduFrame {
-    pub fn new(buffer: BufferToken, offset: u8, length_wo_fcs: NonZero<u16>) -> Self {
+    /// Creates a new unparsed MPDU frame.
+    ///
+    /// # Safety
+    ///
+    /// 1. Incoming frames must always be backed by a `buffer` that is at least
+    ///    [`RadioFrameRepr::max_buffer_length()`] bytes long. This is because we don't know
+    ///    the length of the MPDU at this point, so we assume the maximum length.
+    /// 2. Outgoing frames must always be backed by a `buffer` that can at least hold the smallest
+    ///    MPDU, which is the immediate acknowledgment (ACK) frame.
+    ///
+    /// These conditions are not checked at runtime, so it is the caller's
+    /// responsibility to ensure that the buffer is large enough.
+    ///
+    /// [`RadioFrameRepr::max_buffer_length()`]:
+    /// dot15d4_driver::frame::RadioFrameRepr::max_buffer_length
+    pub unsafe fn new(buffer: BufferToken, offset: u8, length_wo_fcs: NonZero<u16>) -> Self {
         Self {
             buffer,
             offset,

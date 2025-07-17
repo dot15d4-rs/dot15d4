@@ -171,7 +171,9 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         assert!(buffer.len() >= min_buffer_length as usize);
 
         let offset_mpdu = radio_frame_repr.headroom_length();
-        let mut mpdu = MpduFrame::new(buffer, offset_mpdu, mpdu_length_wo_fcs);
+        // Safety: we already asserted that the buffer is large enough to hold the minimum
+        // calculated MPDU length.
+        let mut mpdu = unsafe { MpduFrame::new(buffer, offset_mpdu, mpdu_length_wo_fcs) };
 
         let (dst_addr_mode, src_addr_mode, pan_id_compression) = match &self.addressing {
             Some(addressing) => (
