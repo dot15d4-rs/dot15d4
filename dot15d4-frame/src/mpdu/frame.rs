@@ -22,7 +22,15 @@ pub struct MpduFrame {
 }
 
 impl MpduFrame {
+    /// Creates a new MPDU frame.
+    ///
+    /// # Safety
+    /// The caller must ensure that the `buffer` contains at least 3 bytes starting
+    /// from `offset` to accommodate the smallest possible MPDU (immediate acknowledgment).
     pub fn new(buffer: BufferToken, offset: u8, length_wo_fcs: NonZero<u16>) -> Self {
+        debug_assert!(buffer.len() as u16 >= offset as u16 + length_wo_fcs.get());
+        debug_assert!(length_wo_fcs.get() >= 3);
+
         Self {
             buffer,
             offset,
