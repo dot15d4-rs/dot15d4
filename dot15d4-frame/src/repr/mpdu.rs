@@ -2,7 +2,7 @@ use core::{marker::PhantomData, num::NonZero};
 
 use dot15d4_driver::{
     frame::{AddressingRepr, RadioFrameRepr, RadioFrameSized},
-    DriverConfig,
+    radio::DriverConfig,
 };
 use dot15d4_util::{Error, Result};
 
@@ -22,8 +22,9 @@ use super::seq_nr::SeqNrRepr;
 /// To read or write content a [`crate::fields::MpduParser`] can be derived via
 /// [`MpduRepr::into_parsed_mpdu()`].
 ///
-/// The MPDU representation does not refer to a [`dot15d4_driver::DriverConfig`]
-/// so that it can be re-used across drivers.
+/// The MPDU representation does not refer to a
+/// [`dot15d4_driver::radio::DriverConfig`] so that it can be re-used across
+/// drivers.
 ///
 /// The MPDU representation is fully const compatible so that MPDU
 /// configurations can be prepared at compile time.

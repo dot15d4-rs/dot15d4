@@ -12,8 +12,9 @@ use crate::{
             Address, AddressingMode, PanId, RadioFrame, RadioFrameRepr, RadioFrameSized,
             RadioFrameUnsized,
         },
+        radio::DriverConfig,
         tasks::{RxError, RxResult, Timestamp, TxError, TxResult},
-        DriverConfig, DrvSvcRequest, DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskRx, DrvSvcTaskTx,
+        DrvSvcRequest, DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskRx, DrvSvcTaskTx,
     },
     mac::{frame::mpdu::MpduFrame, task::*, MacBufferAllocator},
     util::{Error, Result as SimplifiedResult},
@@ -246,12 +247,10 @@ pub(crate) enum DataRequestResult {
     ),
 }
 
-impl<RadioDriverImpl: DriverConfig> MacTask<RadioDriverImpl::Timer>
-    for DataRequestTask<'_, RadioDriverImpl>
-{
+impl<RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'_, RadioDriverImpl> {
     type Result = DataRequestResult;
 
-    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self, RadioDriverImpl::Timer> {
+    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(MAC_REQUEST);
 
@@ -361,7 +360,7 @@ impl<'task, RadioDriverImpl: DriverConfig> DataIndicationTask<'task, RadioDriver
     fn produce_indication_and_restart_rx(
         rx_mpdu: MpduFrame,
         buffer_allocator: MacBufferAllocator,
-    ) -> MacTaskTransition<Self, RadioDriverImpl::Timer> {
+    ) -> MacTaskTransition<Self> {
         let data_indication = DataIndication {
             mpdu: rx_mpdu,
             timestamp: None,
@@ -387,12 +386,10 @@ impl<'task, RadioDriverImpl: DriverConfig> DataIndicationTask<'task, RadioDriver
     }
 }
 
-impl<RadioDriverImpl: DriverConfig> MacTask<RadioDriverImpl::Timer>
-    for DataIndicationTask<'_, RadioDriverImpl>
-{
+impl<RadioDriverImpl: DriverConfig> MacTask for DataIndicationTask<'_, RadioDriverImpl> {
     type Result = DataIndication;
 
-    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self, RadioDriverImpl::Timer> {
+    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(MAC_INDICATION);
 

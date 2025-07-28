@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 dot15d4-util = { version = "0.0.1", path = "../dot15d4-util", default-features = false }
 
 critical-section = "1.2"
+fugit = "0.3"
 generic-array = "1.2"
 typenum = "1.18"
 

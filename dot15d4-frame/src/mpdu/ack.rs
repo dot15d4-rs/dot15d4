@@ -1,6 +1,6 @@
 use dot15d4_driver::{
     frame::{FrameType, FrameVersion},
-    DriverConfig,
+    radio::DriverConfig,
 };
 use dot15d4_util::allocator::BufferToken;
 

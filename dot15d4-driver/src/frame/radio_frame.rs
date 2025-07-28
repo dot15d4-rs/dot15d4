@@ -7,7 +7,7 @@ use dot15d4_util::{
 
 use crate::{
     frame::{AddressingRepr, FrameControl},
-    DriverConfig,
+    radio::DriverConfig,
 };
 
 use super::{RadioFrameRepr, RadioFrameSized, RadioFrameUnsized};

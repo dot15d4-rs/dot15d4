@@ -1,4 +1,4 @@
-use crate::driver::{time::Frequency, DrvSvcRequest, DrvSvcResponse};
+use crate::driver::{DrvSvcRequest, DrvSvcResponse};
 
 /// A MAC task represents a - possibly infinite - stream of driver
 /// request/response exchanges each of which MAY time out.
@@ -12,7 +12,7 @@ use crate::driver::{time::Frequency, DrvSvcRequest, DrvSvcResponse};
 /// The task is instantiated, entered (see [`MacTaskEvent::Entry`]), driven and
 /// optionally forced to exit (see [`MacTaskEvent::Exit`]) by the MAC service in
 /// its role as an a MAC task executor.
-pub trait MacTask<F: Frequency> {
+pub trait MacTask {
     /// A task MAY produce intermediate and final results while being executed.
     type Result;
 
@@ -26,7 +26,7 @@ pub trait MacTask<F: Frequency> {
     ///   response to a pending request from the state machine.
     /// - [`MacTaskEvent::Timeout`]: The transition timed out.
     /// - [`MacTaskEvent::Poll`]: The task previously returned
-    fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self, F>
+    fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self>
     where
         Self: Sized;
 }
@@ -52,7 +52,7 @@ pub enum MacTaskEvent {
 /// resources blocked by another state machine.
 ///
 /// A transition MAY time out.
-pub enum MacTaskTransition<Task: MacTask<F>, F: Frequency> {
+pub enum MacTaskTransition<Task: MacTask> {
     /// This result signals to the executor that a transition has been
     /// triggered, i.e. a driver service request needs to be sent to the driver
     /// service.

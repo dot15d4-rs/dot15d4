@@ -4,15 +4,16 @@
 use panic_probe as _;
 
 use dot15d4_driver::{
+    radio::Timer,
     socs::nrf::{export::*, NrfRadioDriver},
-    time::{now, wait_for_alarm_at, Duration, Milliseconds, Timer},
+    timer::{now, wait_until, SyntonizedDuration},
 };
 use embassy_executor::Spawner;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     type NrfTimer = Timer<NrfRadioDriver>;
-    const TIMEOUT: Duration<NrfTimer> = Duration::<Milliseconds>::new(10).convert_into_rounding_up();
+    const TIMEOUT: SyntonizedDuration = SyntonizedDuration::millis(10);
 
     let peripherals = pac::Peripherals::take().unwrap();
 
@@ -31,6 +32,6 @@ async fn main(_spawner: Spawner) {
     let mut count = 0;
     loop {
         count += 1;
-        wait_for_alarm_at::<NrfTimer>(anchor_time + count * TIMEOUT).await;
+        wait_until::<NrfTimer>(anchor_time + count * TIMEOUT).await;
     }
 }

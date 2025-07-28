@@ -3,7 +3,7 @@ use dot15d4_driver::{
         AddressingFields, AddressingMode, AddressingRepr, FrameControl, FrameType, FrameVersion,
         RadioFrame, RadioFrameRepr, RadioFrameSized,
     },
-    DriverConfig,
+    radio::DriverConfig,
 };
 use dot15d4_util::{
     allocator::{BufferToken, IntoBuffer},

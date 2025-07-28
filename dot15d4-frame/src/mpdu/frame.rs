@@ -1,9 +1,8 @@
 use core::{num::NonZero, ops::Range};
 
 use dot15d4_driver::{
-    export::Unsigned,
     frame::{RadioFrame, RadioFrameSized},
-    DriverConfig,
+    radio::{export::Unsigned, DriverConfig},
 };
 use dot15d4_util::{
     allocator::{BufferToken, IntoBuffer},

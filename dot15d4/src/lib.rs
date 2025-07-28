@@ -12,11 +12,12 @@ use rand_core::RngCore;
 
 use self::{
     driver::{
+        radio::{DriverConfig, RadioDriverApi},
         tasks::{
             OffState, RadioDriver, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
             TaskTx as RadioTaskTx, TxState,
         },
-        DriverConfig, DriverRequestChannel, DriverService, RadioDriverApi,
+        DriverRequestChannel, DriverService,
     },
     mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
     util::sync::{mutex::Mutex, select, Either},

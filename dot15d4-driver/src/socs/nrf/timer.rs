@@ -13,8 +13,7 @@ use dot15d4_util::sync::CancellationGuard;
 use dot15d4_util::warn;
 use nrf52840_hal::pac::{self, interrupt, RTC0};
 
-use crate::time::Instant;
-use crate::{Frequency, RadioTimerApi};
+use crate::timer::{RadioTimerApi, SyntonizedInstant};
 
 /// Calculate the timestamp from the period count and the tick count.
 ///
@@ -360,26 +359,92 @@ fn RTC0() {
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct NrfRadioTimer;
 
+// Assert that our formula works correctly for u64::MAX ns.
+const _: () = assert!(
+    NrfRadioTimer::ns_to_sleep_ticks(SyntonizedInstant::from_ticks(u64::MAX))
+        == NrfRadioTimer::MAX_RTC_TICKS
+);
+const _: () = {
+    const ROUNDING_ERROR: u64 = 17924; // one RTC tick is ~30517ns, the rounding
+                                       // error must be less
+    assert!(
+        NrfRadioTimer::sleep_ticks_to_ns(NrfRadioTimer::MAX_RTC_TICKS).ticks()
+            == u64::MAX - ROUNDING_ERROR
+    );
+};
+
 impl NrfRadioTimer {
+    // The max number of RTC ticks representable in nanoseconds (~584 years).
+    const MAX_RTC_TICKS: u64 = 604462909807314;
+    #[allow(dead_code)]
+    const FREQUENCY: u32 = 32_768;
+
     pub fn init(rtc: RTC0) {
         DRIVER.init(rtc)
     }
-}
 
-impl Frequency for NrfRadioTimer {
-    const FREQUENCY: u32 = 32_768;
+    const fn sleep_ticks_to_ns(sleep_ticks: u64) -> SyntonizedInstant {
+        debug_assert!(sleep_ticks <= Self::MAX_RTC_TICKS);
+
+        // To keep tick-to-ns conversion cheap we avoid division while
+        // minimizing rounding errors:
+        //
+        // timestamp_ns = ticks * (1 / timer_frequency_hz) * 10^9 ns/s
+        //              = ticks * (1 / 32768 Hz) * 10^9 ns/s
+        //              = (ticks * (10^9 / 2^15)) ns
+        //              = (ticks * (5^9 / 2^6)) ns
+        //              = ((ticks * 5^9) >> 6) ns
+        const _: () = assert!(NrfRadioTimer::FREQUENCY == 2_u32.pow(15));
+
+        // Safety: The overflow protected tick counter uses 55 bits, see
+        //         `now()`. Representing MAX_RTC_TICKS still requires 50 bits.
+        //         Multiplying by 5^9 requires another 21 bits. We therefore
+        //         have to calculate in 128 bits to ensure that the calculation
+        //         cannot overflow.
+        const RTC_FREQ_NS_GCD: u128 = 5_u128.pow(9);
+        let ns = (sleep_ticks as u128 * RTC_FREQ_NS_GCD) >> 6;
+
+        // Safety: We checked above that the number of ticks given is less than
+        //         the max ticks that are still representable in nanoseconds.
+        //         Therefore casting down will always succeed.
+        SyntonizedInstant::from_ticks(ns as u64)
+    }
+
+    const fn ns_to_sleep_ticks(ns: SyntonizedInstant) -> u64 {
+        // To keep tick-to-ns conversion cheap we avoid division while
+        // minimizing rounding errors:
+        //
+        // ticks = (timestamp_ns / (10^9 ns/s)) * timer_frequency_hz
+        //       = (timestamp_ns / (10^9 ns/s)) * 32768 Hz
+        //       = timestamp_ns * (2^15 / 10^9)
+        //       = timestamp_ns * (2^6 / 5^9)
+        //       = timestamp_ns * ((2^6 * 2^N) / (5^9 * 2^N))
+        //       = (timestamp_ns * (2^(6+N) / 5^9)) >> N
+        //       = (timestamp_ns * M(N)) >> N where M(N) = 2^(6+N) / 5^9
+        //
+        // We can now choose M(N) such that it provides maximum precision, i.e.
+        // the largest N is chosen such that timestamp_ns_max * M(N) remains
+        // representable. It turns out that the largest such N is 78.
+        const N: u32 = 78;
+        const MULTIPLIER: u128 = 2_u128.pow(6 + N) / 5_u128.pow(9);
+
+        // Safety: We asserted above that the max representable instant in
+        //         nanoseconds times the MULTIPLIER does not overflow. We can
+        //         represent less nanoseconds in 64 bits than ticks, so casting
+        //         down the end result is always safe.
+        ((ns.ticks() as u128 * MULTIPLIER) >> N) as u64
+    }
 }
 
 impl RadioTimerApi for NrfRadioTimer {
-    fn now() -> Instant<Self> {
-        Instant::new(DRIVER.now())
+    fn now() -> SyntonizedInstant {
+        Self::sleep_ticks_to_ns(DRIVER.now())
     }
 
-    fn schedule_alarm(at: Instant<Self>) {
-        DRIVER.schedule_alarm(at.tick());
-    }
-
-    async fn wait_for_alarm() -> Instant<Self> {
-        Instant::new(DRIVER.wait_for_alarm().await)
+    async fn wait_until(instant: SyntonizedInstant) {
+        let scheduled_tick = Self::ns_to_sleep_ticks(instant);
+        DRIVER.schedule_alarm(scheduled_tick);
+        let now = DRIVER.wait_for_alarm().await;
+        debug_assert_eq!(scheduled_tick, now);
     }
 }

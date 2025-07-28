@@ -2,7 +2,7 @@ use typenum::Unsigned;
 
 use core::{fmt::Debug, marker::PhantomData, num::NonZero, ops::Range};
 
-use crate::DriverConfig;
+use crate::radio::DriverConfig;
 
 use super::{RadioFrameSized, RadioFrameUnsized};
 
@@ -15,7 +15,7 @@ pub struct RadioFrameRepr<Config: DriverConfig, State> {
     ///
     /// The SDU length is the driver configuration dependent length of the PSDU
     /// (=MPDU). It contains the FCS length unless FCS calculation is offloaded
-    /// to the driver or hardware (see [`crate::FcsNone`])
+    /// to the driver or hardware (see [`crate::radio::FcsNone`])
     ///
     /// Safety: When set, the SDU length must be strictly greater then the
     ///         length of the FCS.

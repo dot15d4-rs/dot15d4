@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use rand_core::RngCore;
 
-use crate::{driver::DriverConfig, mac::MacService};
+use crate::{driver::radio::DriverConfig, mac::MacService};
 
 pub enum SetError {
     InvalidParameter,
