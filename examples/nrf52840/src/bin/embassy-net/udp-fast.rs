@@ -105,7 +105,7 @@ async fn main(spawner: Spawner) {
             let (_n, _ep) = socket.recv_from(&mut buf).await.unwrap();
             rx_count += 1;
             if rx_count % 100 == 0 {
-                info!("Received {} packets", rx_count);
+                info!("Received {rx_count} packets");
             }
         } else {
             // If we are not 1 -> Send datagram every 10 ms
@@ -114,7 +114,7 @@ async fn main(spawner: Spawner) {
             socket.send_to(b"Hello, World !", ep).await.unwrap();
             tx_count += 1;
             if tx_count % 100 == 0 {
-                info!("Sent {} packets", tx_count);
+                info!("Sent {tx_count} packets");
             }
 
             // Schedule the next transmission in 10ms (synchronized with the
