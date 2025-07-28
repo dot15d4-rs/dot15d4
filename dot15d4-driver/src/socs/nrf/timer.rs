@@ -18,12 +18,12 @@ use crate::{Frequency, RadioTimerApi};
 
 /// Calculate the timestamp from the period count and the tick count.
 ///
-/// The RTC counter is 24 bit. Ticking at 32768hz, it overflows every ~8 minutes. This is
-/// too short. We must make it "never" overflow.
+/// The RTC counter is 24 bit. Ticking at 32768 Hz, it overflows every ~8
+/// minutes. This is too short. We must protect it against overflow.
 ///
-/// The obvious way would be to count overflow periods. Every time the counter overflows,
-/// increase a `periods` variable. `now()` simply does `periods << 24 + counter`. So, the logic
-/// around an overflow would look like this:
+/// The obvious way would be to count overflow periods. Every time the counter
+/// overflows, increase a `periods` variable. `now()` simply does `periods << 24
+/// + counter`. So, the logic around an overflow would look like this:
 ///
 /// ```not_rust
 /// periods = 1, counter = 0xFF_FFFE --> now = 0x1FF_FFFE
@@ -33,11 +33,11 @@ use crate::{Frequency, RadioTimerApi};
 /// periods = 2, counter = 0x00_0001 --> now = 0x200_0001
 /// ```
 ///
-/// The problem is this is vulnerable to race conditions if `now()` runs at the exact time an
-/// overflow happens.
+/// The problem is that this is vulnerable to race conditions if `now()` runs at
+/// the exact time an overflow happens.
 ///
-/// If `now()` reads `periods` first and `counter` later, and overflow happens between the reads,
-/// it would return a wrong value:
+/// If `now()` reads `periods` first and `counter` later, and overflow happens
+/// between the reads, it would return a wrong value:
 ///
 /// ```not_rust
 /// periods = 1 (OLD), counter = 0x00_0000 (NEW) --> now = 0x100_0000 -> WRONG
@@ -45,24 +45,27 @@ use crate::{Frequency, RadioTimerApi};
 ///
 /// It fails similarly if it reads `counter` first and `periods` second.
 ///
-/// To fix this, we define a "period" to be 2^23 ticks (instead of 2^24). One "overflow cycle" is 2 periods.
+/// To fix this, we define a "period" to be 2^23 ticks (instead of 2^24). One
+/// "overflow cycle" is 2 periods.
 ///
 /// - `period` is incremented on overflow (at counter value 0)
-/// - `period` is incremented "midway" between overflows (at counter value 0x80_0000)
+/// - `period` is incremented "midway" between overflows (at counter value
+///   0x80_0000)
 ///
-/// Therefore, when `period` is even, counter is in 0..0x7f_ffff. When odd, counter is in 0x80_0000..0xFF_FFFF
-/// This allows for now() to return the correct value even if it races an overflow.
+/// Therefore, when `period` is even, the counter is expected to be in the range
+/// 0..0x7f_ffff, when odd, in the range 0x80_0000..0xff_ffff.
 ///
-/// To get `now()`, `period` is read first, then `counter` is read. If the counter value matches
-/// the expected range for the `period` parity, we're done. If it doesn't, this means that
-/// a new period start has raced us between reading `period` and `counter`, so we assume the `counter` value
-/// corresponds to the next period.
+/// To get `now()`, the `period` is read first, then the `counter`. If the
+/// counter value range matches the expected `period` parity, we're done.  If it
+/// doesn't, we know that a new period has started between reading `period` and
+/// `counter`. We then assume that the `counter` value corresponds to the next
+/// period.
 ///
-/// `period` is a 32bit integer, so It overflows on 2^32 * 2^23 / 32768 seconds of uptime, which is 34865
-/// years. For comparison, flash memory like the one containing your firmware is usually rated to retain
-/// data for only 10-20 years. 34865 years is long enough!
+/// The `period` has 32 bits and a single period is represented by 23 bits. The
+/// counter ticks at 32768 Hz. The overflow protected counter therefore wraps
+/// after (2^55-1) / 32768 seconds of uptime, which corresponds to 34865 years.
 ///
-/// Adopted verbatim from embassy_nrf. Kudos to the embassy contributors!
+/// Adopted from embassy_nrf. Kudos to the embassy contributors!
 fn calc_now(period: u32, counter: u32) -> u64 {
     ((period as u64) << 23) + ((counter ^ ((period & 1) << 23)) as u64)
 }
@@ -158,7 +161,7 @@ impl RtcDriver {
         // Wait for clear
         while rtc.counter.read().counter() != 0 {}
 
-        // Clear and enable the radio interrupt
+        // Clear and enable the timer interrupt
         pac::NVIC::unpend(pac::Interrupt::RTC0);
         // Safety: We're in early initialization, so there should be no
         //         concurrent critical sections.
