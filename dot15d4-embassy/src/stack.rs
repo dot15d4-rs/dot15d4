@@ -2,8 +2,8 @@ use core::{cell::Cell, marker::PhantomData};
 
 use dot15d4::{
     driver::{
+        radio::{DriverConfig, RadioDriverApi},
         tasks::{OffState, RadioDriver, RxState, TaskOff, TaskRx, TaskTx, TxState},
-        DriverConfig, RadioDriverApi,
     },
     export::*,
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},

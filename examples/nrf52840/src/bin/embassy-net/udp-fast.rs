@@ -4,9 +4,10 @@
 use panic_probe as _;
 
 use dot15d4_driver::{
+    radio::Timer,
     socs::nrf::{export::*, NrfRadioDriver},
     tasks::RadioDriver,
-    time::{now, wait_for_alarm_at, Duration, Milliseconds, Timer},
+    timer::{now, wait_until, SyntonizedDuration},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -119,9 +120,8 @@ async fn main(spawner: Spawner) {
 
             // Schedule the next transmission in 10ms (synchronized with the
             // time at which the first packet was transmitted)
-            const TIMEOUT: Duration<NrfTimer> =
-                Duration::<Milliseconds>::new(10).convert_into_rounding_up();
-            wait_for_alarm_at::<NrfTimer>(anchor_time + ((tx_count + 1) * TIMEOUT)).await;
+            const TIMEOUT: SyntonizedDuration = SyntonizedDuration::millis(10);
+            wait_until::<NrfTimer>(anchor_time + ((tx_count + 1) * TIMEOUT)).await;
         }
     }
 }

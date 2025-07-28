@@ -3,7 +3,7 @@ use core::cell::RefCell;
 use rand_core::RngCore;
 
 use crate::{
-    driver::DriverConfig,
+    driver::radio::DriverConfig,
     mac::{pib, MacService},
 };
 

@@ -4,9 +4,10 @@
 use panic_probe as _;
 
 use dot15d4_driver::{
+    radio::Timer,
     socs::nrf::{export::*, NrfRadioDriver},
     tasks::RadioDriver,
-    time::{now, wait_for_alarm_at, Duration, Milliseconds, Timer},
+    timer::{now, wait_until, SyntonizedDuration},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -102,11 +103,10 @@ async fn main(spawner: Spawner) {
             socket.send_to(b"Hello, World !", ep).await.unwrap();
             let (_, _ep) = socket.recv_from(&mut buf).await.unwrap();
 
-            const TIMEOUT: Duration<NrfTimer> =
-                Duration::<Milliseconds>::new(500).convert_into_rounding_up();
+            const TIMEOUT: SyntonizedDuration = SyntonizedDuration::millis(500);
             let now = now::<NrfTimer>();
-            let at = now + TIMEOUT;
-            wait_for_alarm_at::<NrfTimer>(at).await;
+            let instant = now + TIMEOUT;
+            wait_until::<NrfTimer>(instant).await;
         }
     }
 }

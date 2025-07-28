@@ -47,8 +47,8 @@ mod test {
             AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
             RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
         },
-        time::{Frequency, Instant},
-        DriverConfig, FcsTwoBytes, RadioTimerApi,
+        radio::{DriverConfig, FcsTwoBytes},
+        timer::{RadioTimerApi, SyntonizedInstant},
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
@@ -64,19 +64,12 @@ mod test {
         MpduWithIes,
     };
     struct FakeRadioTimer;
-    impl Frequency for FakeRadioTimer {
-        const FREQUENCY: u32 = 92_000_000;
-    }
     impl RadioTimerApi for FakeRadioTimer {
-        fn now() -> Instant<Self> {
+        fn now() -> SyntonizedInstant {
             todo!()
         }
 
-        fn schedule_alarm(_at: Instant<Self>) {
-            todo!()
-        }
-
-        async fn wait_for_alarm() -> Instant<Self> {
+        async fn wait_until(_: SyntonizedInstant) {
             todo!()
         }
     }

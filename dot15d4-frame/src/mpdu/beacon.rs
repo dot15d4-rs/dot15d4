@@ -1,6 +1,6 @@
 use dot15d4_driver::{
     frame::{AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr},
-    DriverConfig,
+    radio::DriverConfig,
 };
 use dot15d4_util::{
     allocator::{export::*, AsyncBufferAllocator},

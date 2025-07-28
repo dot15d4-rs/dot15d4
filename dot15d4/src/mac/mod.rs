@@ -15,8 +15,10 @@ use rand_core::RngCore;
 
 use crate::{
     driver::{
-        constants::PHY_MAX_PACKET_SIZE_127, frame::FrameType, DriverConfig, DriverRequestSender,
-        DRIVER_CHANNEL_CAPACITY, MAX_DRIVER_OVERHEAD,
+        constants::PHY_MAX_PACKET_SIZE_127,
+        frame::FrameType,
+        radio::{DriverConfig, MAX_DRIVER_OVERHEAD},
+        DriverRequestSender, DRIVER_CHANNEL_CAPACITY,
     },
     mac::mcps::data::DataRequestResult,
     util::{
@@ -109,15 +111,15 @@ macro_rules! mac_svc_tasks {
             }
 
             enum MacSvcTaskResult<'task, RadioDriverImpl: DriverConfig> {
-                $($mac_task(<[<$mac_task Task>]<'task, RadioDriverImpl> as MacTask<RadioDriverImpl::Timer>>::Result)),*
+                $($mac_task(<[<$mac_task Task>]<'task, RadioDriverImpl> as MacTask>::Result)),*
             }
 
             $(mac_svc_tasks!(transition_converter: $mac_task);)*
 
-            impl<'task, RadioDriverImpl: DriverConfig> MacTask<RadioDriverImpl::Timer> for MacSvcTask<'task, RadioDriverImpl> {
+            impl<'task, RadioDriverImpl: DriverConfig> MacTask for MacSvcTask<'task, RadioDriverImpl> {
                 type Result = MacSvcTaskResult<'task, RadioDriverImpl>;
 
-                fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self, RadioDriverImpl::Timer> {
+                fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self> {
                     match self {
                         $(MacSvcTask::$mac_task(inner_task) => inner_task.step(event).into()),*
                     }
@@ -129,8 +131,8 @@ macro_rules! mac_svc_tasks {
 
     (transition_converter: $mac_task:ident) => {
         paste!{
-            impl<'task, RadioDriverImpl: DriverConfig> From<MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>, RadioDriverImpl::Timer>> for MacTaskTransition<MacSvcTask<'task, RadioDriverImpl>, RadioDriverImpl::Timer> {
-                fn from(value: MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>, RadioDriverImpl::Timer>) -> Self {
+            impl<'task, RadioDriverImpl: DriverConfig> From<MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>> for MacTaskTransition<MacSvcTask<'task, RadioDriverImpl>> {
+                fn from(value: MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>) -> Self {
                     match value {
                         MacTaskTransition::DrvSvcRequest(updated_task, driver_request, task_result) => {
                             let updated_task = MacSvcTask::$mac_task(updated_task);

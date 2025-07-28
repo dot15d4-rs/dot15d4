@@ -23,13 +23,14 @@ use self::{
     frame::{
         is_frame_valid_and_for_us, RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
     },
+    radio::{DriverConfig, RadioDriverApi},
     tasks::{
         CompletedRadioTransition, ExternalRadioTransition, Ifs, OffResult, OffState, RadioDriver,
         RadioTask, RadioTaskError, RxError, RxResult, RxState, SelfRadioTransition,
         TaskOff as RadioTaskOff, TaskRx as RadioTaskRx, TaskTx as RadioTaskTx, Timestamp, TxResult,
         TxState,
     },
-    time::{timer_frequency, Duration, SymbolsOQpsk250kB},
+    timer::{RadioTimerApi, SymbolsOQpsk250Duration, SyntonizedDuration},
 };
 
 pub use dot15d4_driver::*;
@@ -282,10 +283,18 @@ where
     /// therefore consists of:
     /// t_ACK = 12 symbols (MAC_AIFS) + 10 symbols (SHR) + 2 symbols (PHR)
     ///       = 24 symbols = 384µs.
-    const DRIVER_RX_ACK_TIMEOUT: Duration<RadioDriverImpl::Timer> = {
-        // Note: We cannot use addition of durations as they are non-const.
-        assert!(MAC_AIFS.frequency() == timer_frequency::<SymbolsOQpsk250kB>());
-        Duration::<SymbolsOQpsk250kB>::new(MAC_AIFS.ticks() + 10 + 2).convert_into_rounding_up()
+    const DRIVER_RX_ACK_TIMEOUT: SyntonizedDuration = {
+        const SHR_DURATION: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(10);
+        const PHR_DURATION: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(2);
+        // Note: the add operation cannot be used in const context, that's why
+        //       we use checked addition.
+        // Safety: O-QPSK symbols can be expressed in µs w/o rounding.
+        (MAC_AIFS
+            .checked_add(SHR_DURATION)
+            .unwrap()
+            .checked_add(PHR_DURATION))
+        .unwrap()
+        .convert()
     };
 
     /// Creates a new [`DriverService`] instance wrapping the given driver
@@ -1087,7 +1096,7 @@ where
         // Note: This is just a rough estimate with some safety margin for now.
         //       Precise timing requires timestamp and RX window support in the
         //       driver.
-        let timeout = RadioDriverImpl::Timer::wait_for_alarm_at(
+        let timeout = RadioDriverImpl::Timer::wait_until(
             RadioDriverImpl::Timer::now() + Self::DRIVER_RX_ACK_TIMEOUT,
         );
 

@@ -28,7 +28,7 @@ use nrf52840_hal::{
 use typenum::U;
 
 #[cfg(feature = "rtos-trace")]
-use crate::trace::{
+use crate::radio::trace::{
     MISSED_ISR, TASK_FALL_BACK, TASK_OFF_RUN, TASK_OFF_SCHEDULE, TASK_RX_FRAME_INFO,
     TASK_RX_FRAME_STARTED, TASK_RX_RUN, TASK_RX_SCHEDULE, TASK_TRANSITION_TO_OFF,
     TASK_TRANSITION_TO_RX, TASK_TRANSITION_TO_TX, TASK_TX_RUN, TASK_TX_SCHEDULE,
@@ -39,13 +39,12 @@ use crate::{
         DEFAULT_SFD, FCS_LEN, MAC_AIFS, MAC_LIFS, MAC_SIFS, PHY_HDR_LEN, PHY_MAX_PACKET_SIZE_127,
     },
     frame::{AddressingFields, RadioFrame, RadioFrameSized},
+    radio::{DriverConfig, FcsNone, RadioDriverApi},
     tasks::{
         ExternalRadioTransition, Ifs, OffResult, OffState, PreliminaryFrameInfo, RadioDriver,
         RadioState, RadioTaskError, RadioTransition, RxError, RxResult, RxState, SchedulingError,
         SelfRadioTransition, TaskOff, TaskRx, TaskTx, Timestamp, TxError, TxResult, TxState,
     },
-    time::{Duration, Microseconds},
-    DriverConfig, FcsNone, RadioDriverApi,
 };
 
 use super::NrfRadioTimer;
@@ -153,17 +152,16 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
     }
 
     fn set_ifs(ifs: Ifs) {
-        const DRIVER_AIFS: Duration<Microseconds> = MAC_AIFS.convert_into_rounding_up();
-        const DRIVER_SIFS: Duration<Microseconds> = MAC_SIFS.convert_into_rounding_up();
-        const DRIVER_LIFS: Duration<Microseconds> = MAC_LIFS.convert_into_rounding_up();
+        const AIFS_US: u16 = MAC_AIFS.to_micros() as u16;
+        const SIFS_US: u16 = MAC_SIFS.to_micros() as u16;
+        const LIFS_US: u16 = MAC_LIFS.to_micros() as u16;
 
         let tifs_us = match ifs {
-            Ifs::Aifs => DRIVER_AIFS,
-            Ifs::Sifs => DRIVER_SIFS,
-            Ifs::Lifs => DRIVER_LIFS,
-            Ifs::None => Duration::ZERO,
-        }
-        .ticks() as u16;
+            Ifs::Aifs => AIFS_US,
+            Ifs::Sifs => SIFS_US,
+            Ifs::Lifs => LIFS_US,
+            Ifs::None => 0,
+        };
 
         Self::radio().tifs.write(|w| w.tifs().variant(tifs_us));
     }
@@ -199,7 +197,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         _clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
     ) -> Self {
         #[cfg(feature = "rtos-trace")]
-        crate::trace::instrument_radio();
+        crate::radio::trace::instrument();
 
         // Disable and enable to reset peripheral
         radio.power.write(|w| w.power().disabled());

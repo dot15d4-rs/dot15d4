@@ -4,7 +4,7 @@ use dot15d4::{
     driver::{
         const_config::MAC_PAN_ID,
         frame::{RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
-        DriverConfig,
+        radio::DriverConfig,
     },
     mac::{
         frame::mpdu::MpduFrame,

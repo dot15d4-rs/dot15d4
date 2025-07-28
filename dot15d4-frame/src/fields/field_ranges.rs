@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, num::NonZero, ops::Range};
 
-use dot15d4_driver::{frame::AddressingRepr, DriverConfig};
+use dot15d4_driver::{frame::AddressingRepr, radio::DriverConfig};
 use dot15d4_util::{Error, Result};
 
 #[cfg(feature = "ies")]

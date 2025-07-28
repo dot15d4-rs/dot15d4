@@ -6,6 +6,7 @@ use crate::{
     config::Channel,
     constants::A_MAX_SIFS_FRAME_SIZE,
     frame::{AddressingFields, FrameControl, RadioFrame, RadioFrameSized, RadioFrameUnsized},
+    timer::SyntonizedInstant,
 };
 
 /// Tasks can be scheduled as fast as possible ("best effort") or at a
@@ -24,7 +25,7 @@ pub enum Timestamp {
     ///   local antenna.
     /// - Radio Off: Designates the time at which the radio will start to
     ///   ramp-down.
-    Scheduled(u64),
+    Scheduled(SyntonizedInstant),
 }
 
 /// Generic representation of a radio task.
