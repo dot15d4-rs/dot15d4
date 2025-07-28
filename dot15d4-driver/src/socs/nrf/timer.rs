@@ -8,7 +8,7 @@ use core::future::poll_fn;
 use core::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 use core::task::{Poll, Waker};
 
-use critical_section::Mutex;
+use critical_section::{CriticalSection, Mutex};
 use dot15d4_util::sync::CancellationGuard;
 use dot15d4_util::warn;
 use nrf52840_hal::pac::{self, interrupt, RTC0};
@@ -99,8 +99,8 @@ impl Alarms {
             self.pending.set(timestamp);
             true
         } else {
-            let previous = self.next.replace(timestamp);
-            debug_assert_eq!(previous, Self::OFF);
+            let overwritten_timestamp = self.next.replace(timestamp);
+            debug_assert_eq!(overwritten_timestamp, Self::OFF);
             false
         }
     }
@@ -108,8 +108,8 @@ impl Alarms {
     fn fire_pending_and_get_next(&self) -> u64 {
         let next = self.next.replace(Self::OFF);
         let fired = self.pending.replace(next);
-        let prev_fired = self.fired.replace(fired);
-        if prev_fired != Self::OFF {
+        let overwritten_fired = self.fired.replace(fired);
+        if overwritten_fired != Self::OFF {
             warn!("missed timer event")
         }
         next
@@ -122,7 +122,7 @@ impl Alarms {
 
 struct RtcDriver {
     /// Number of 2^23 periods elapsed since boot.
-    period: AtomicU32,
+    half_period: AtomicU32,
     /// Pending alarms.
     alarms: Mutex<Alarms>,
     /// Waker for the current alarm.
@@ -130,9 +130,11 @@ struct RtcDriver {
 }
 
 impl RtcDriver {
+    const THREE_QUARTERS_OF_RTC_PERIOD: u64 = 0xc00000;
+
     const fn new() -> Self {
         Self {
-            period: AtomicU32::new(0),
+            half_period: AtomicU32::new(0),
             alarms: Mutex::new(Alarms::new()),
             waker: Mutex::new(RefCell::new(None)),
         }
@@ -172,49 +174,59 @@ impl RtcDriver {
 
         if rtc.events_ovrflw.read().events_ovrflw().bit_is_set() {
             rtc.events_ovrflw.reset();
-            self.next_period();
+            self.increment_half_period();
         }
 
         if rtc.events_compare[3].read().events_compare().bit_is_set() {
             rtc.events_compare[3].reset();
-            self.next_period();
+            self.increment_half_period();
         }
 
         if rtc.events_compare[0].read().events_compare().bit_is_set() {
-            rtc.events_compare[0].reset();
+            // We don't reset the compare event here but only just before
+            // scheduling the next timeout: The timer may wrap in the meantime
+            // and trigger the compare event again.
             self.trigger_alarm();
         }
     }
 
     // Called exclusively from interrupt context.
-    fn next_period(&self) {
-        let next_period = self.period.load(Ordering::Relaxed) + 1;
-        self.period.store(next_period, Ordering::Relaxed);
-        let next_period_mask = (next_period as u64) << 23;
+    fn increment_half_period(&self) {
+        let next_half_period = self.half_period.load(Ordering::Relaxed) + 1;
+        self.half_period.store(next_half_period, Ordering::Relaxed);
+        let next_half_period_start = (next_half_period as u64) << 23;
 
-        // TODO: No critical section needed here as we're already in the
-        //       interrupt handler.
-        critical_section::with(|cs| {
-            let pending_alarm = self.alarms.borrow(cs).get_pending();
-            if pending_alarm < next_period_mask + 0xc00000 {
-                // Just enable the compare interrupt. set_alarm() has already
-                // set the correct CC value.
-                Self::rtc().intenset.write(|w| w.compare0().set_bit());
-            }
-        })
+        // A higher priority interrupt may schedule an alarm while we access it.
+        let pending_alarm = critical_section::with(|cs| self.alarms.borrow(cs).get_pending());
+        if pending_alarm < next_half_period_start + Self::THREE_QUARTERS_OF_RTC_PERIOD {
+            // Just enable the compare interrupt. set_alarm() has already
+            // set the correct CC value.
+            Self::rtc().intenset.write(|w| w.compare0().set_bit());
+        }
     }
 
     // Called exclusively from interrupt context.
     fn trigger_alarm(&self) {
-        Self::rtc().intenclr.write(|w| w.compare0().set_bit());
-
-        // TODO: No critical section needed here as we're already in the
-        //       interrupt handler.
+        // A higher priority interrupt may schedule an alarm while we access it.
         critical_section::with(|cs| {
+            let rtc = Self::rtc();
+
             let alarms = self.alarms.borrow(cs);
+            if self.now() < alarms.get_pending() {
+                // Spurious compare interrupt: If the COUNTER is N and the
+                // current CC register value is N+1 or N+2 when a new CC value
+                // is written, a match may trigger on the previous CC value
+                // before the new value takes effect, see nRF product
+                // specification.
+                rtc.events_compare[0].reset();
+                return;
+            }
+
+            rtc.intenclr.write(|w| w.compare0().set_bit());
+
             let next_alarm = alarms.fire_pending_and_get_next();
             if next_alarm != Alarms::OFF {
-                let overdue = !self.try_program_alarm(next_alarm);
+                let overdue = !self.try_program_alarm(next_alarm, cs);
                 if overdue {
                     // We lost an alarm. Clients will be able to discover this
                     // by comparing the fired timeout with the scheduled
@@ -231,76 +243,63 @@ impl RtcDriver {
         });
     }
 
-    fn try_program_alarm(&self, timestamp: u64) -> bool {
+    fn try_program_alarm(&self, timestamp: u64, _cs: CriticalSection) -> bool {
+        // The nRF product spec says: If the COUNTER is N, writing N or N+1 to a
+        // CC register may not trigger a COMPARE event.
+        //
+        // To work around this, we never write a timestamp smaller than N+3.
+        // N+2 is not safe because the RTC can tick from N to N+1 between
+        // calling now() and writing to the CC register.
+        const GUARD_TICKS: u64 = 3;
         let rtc = Self::rtc();
 
-        loop {
-            let now = self.now();
-            if timestamp <= now {
-                // If alarm timestamp has passed the alarm will not fire.
-                // Disarm the alarm and return `false` to indicate that.
+        let now = self.now();
+        if timestamp <= now + GUARD_TICKS {
+            // The alarm is overdue.
+            return false;
+        }
+
+        rtc.events_compare[0].reset();
+        rtc.cc[0].write(|w| w.compare().variant(timestamp as u32 & 0xFFFFFF));
+        if timestamp - now < Self::THREE_QUARTERS_OF_RTC_PERIOD {
+            // If the alarm is imminent (i.e. safely within the currently
+            // running RTC period), enable the timer interrupt.
+            rtc.intenset.write(|w| w.compare0().set_bit());
+
+            // Re-check that we're still inside the guard time after enabling
+            // the interrupt.
+            let was_safely_scheduled = self.now() + 2 > timestamp;
+            if !was_safely_scheduled {
+                // As we're inside a critical section we can still clear the
+                // interrupt and reset the event flag w/o risking that the
+                // timer's interrupt handler ran in the meantime.
                 rtc.intenclr.write(|w| w.compare0().set_bit());
-                return false;
-            }
-
-            // If it hasn't triggered yet, set it up in the compare channel.
-
-            // Write the CC value regardless of whether we're going to enable it
-            // now or not.  This way, when we enable it later, the right value
-            // is already set.
-
-            // The nRF docs say:
-            //    If the COUNTER is N, writing N or N+1 to a CC register may not
-            //    trigger a COMPARE event.
-            // To work around this, we never write a timestamp smaller than N+3.
-            // N+2 is not safe because rtc can tick from N to N+1 between
-            // calling now() and writing CC.
-
-            // Since the critical section does not guarantee that a higher prio
-            // interrupt causes this to be delayed, we need to re-check how much
-            // time actually passed after setting the alarm, and retry if we are
-            // within the unsafe interval still.
-            //
-            // TODO: This means that an alarm can be delayed for up to 2 ticks
-            //       (from t+1 to t+3).
-            //
-            // The alarm will not trigger *before* its scheduled time, though.
-            let safe_timestamp = timestamp.max(now + 3);
-            rtc.cc[0].write(|w| w.compare().variant(safe_timestamp as u32 & 0xFFFFFF));
-
-            let diff = timestamp - now;
-            if diff < 0xc00000 {
-                rtc.intenset.write(|w| w.compare0().set_bit());
-
-                // If we have not passed the timestamp, we can be sure the alarm will be invoked. Otherwise,
-                // we need to retry setting the alarm.
-                if self.now() + 2 <= timestamp {
-                    return true;
-                }
+                false
             } else {
-                // If it's too far in the future, don't setup the compare channel yet.
-                // It will be setup later by `next_period`.
-                rtc.intenclr.write(|w| w.compare0().set_bit());
-                return true;
+                true
             }
+        } else {
+            // If the alarm is too far into the future, don't enable the compare
+            // interrupt yet. It will be enabled later by `next_period()`.
+            true
         }
     }
 
     fn now(&self) -> u64 {
         // `period` MUST be read before `counter`, see comment at the top for details.
-        let period = self.period.load(Ordering::Relaxed);
+        let half_period = self.half_period.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
         let counter = Self::rtc().counter.read().counter().bits();
-        calc_now(period, counter)
+        calc_now(half_period, counter)
     }
 
     fn schedule_alarm(&self, at: u64) {
         critical_section::with(|cs| {
             let alarms = self.alarms.borrow(cs);
-            let pending_alarm_changed = alarms.schedule(at);
-            if pending_alarm_changed {
-                let overdue = !self.try_program_alarm(at);
-                if overdue {
+            let is_pending_alarm = alarms.schedule(at);
+            if is_pending_alarm {
+                let is_overdue = !self.try_program_alarm(at, cs);
+                if is_overdue {
                     alarms.fire_pending_and_get_next();
                 }
             }
@@ -347,10 +346,6 @@ fn RTC0() {
     rtos_trace::trace::isr_enter();
 
     DRIVER.on_interrupt();
-
-    RtcDriver::rtc()
-        .intenclr
-        .write(|w| unsafe { w.bits(0xffff_ffff) });
 
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_exit_to_scheduler();
