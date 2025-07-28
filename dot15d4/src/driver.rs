@@ -423,12 +423,15 @@ where
                     // Safety: Valid frames always have a frame control field.
                     let ack_request = preliminary_frame_info.frame_control.unwrap().ack_request();
                     let seq_nr = preliminary_frame_info.seq_nr;
-                    if ack_request && seq_nr.is_some() {
-                        self.send_ack(rx_driver, rx_task_response_token, seq_nr.unwrap(), ifs)
-                            .await
-                    } else {
-                        self.receive_frame(rx_driver, None, rx_task_response_token, ifs)
-                            .await
+                    match seq_nr {
+                        Some(seq_nr) if ack_request => {
+                            self.send_ack(rx_driver, rx_task_response_token, seq_nr, ifs)
+                                .await
+                        }
+                        _ => {
+                            self.receive_frame(rx_driver, None, rx_task_response_token, ifs)
+                                .await
+                        }
                     }
                 } else {
                     self.drop_invalid_frame(rx_driver, rx_task_response_token)

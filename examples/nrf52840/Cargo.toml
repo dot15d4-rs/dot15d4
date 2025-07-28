@@ -18,14 +18,13 @@ required-features = ["embassy-net"]
 cortex-m = { version = "0.7", features = [
     "inline-asm",
     "critical-section-single-core",
-] }
-cortex-m-rt = "0.7.0"
+], optional = true }
+cortex-m-rt = { version = "0.7.0", optional = true }
 dot15d4-driver = { version = "0.0.1", path = "../../dot15d4-driver", features = [
     "nrf52840",
 ] }
 dot15d4-util = { version = "0.0.1", path = "../../dot15d4-util" }
 embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
-    "arch-cortex-m",
     "executor-thread",
 ] }
 panic-probe = "1.0"
@@ -33,9 +32,7 @@ heapless = "0.8"
 static_cell = "2.1"
 
 # Required by embassy-net examples only:
-dot15d4-embassy = { version = "0.0.1", path = "../../dot15d4-embassy", features = [
-    "nrf52840",
-], optional = true }
+dot15d4-embassy = { version = "0.0.1", path = "../../dot15d4-embassy", optional = true }
 embassy-net = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
     "medium-ieee802154",
     "udp",
@@ -49,6 +46,15 @@ log = { version = "0.4", optional = true }
 rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
 
 [features]
+default = ["nrf52840", "embassy-net"]
+
+nrf52840 = [
+    "dep:cortex-m",
+    "dep:cortex-m-rt",
+    "embassy-executor/arch-cortex-m",
+    "dot15d4-embassy/nrf52840",
+]
+
 embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
 
 defmt = [
@@ -77,5 +83,5 @@ rtos-trace = [
     "log",
 ]
 
-_clippy-std = []
-_clippy-no-std = ["embassy-net", "rtos-trace"]
+_clippy-std = ["embassy-executor/arch-std"]
+_clippy-no-std = ["nrf52840", "embassy-net", "rtos-trace"]

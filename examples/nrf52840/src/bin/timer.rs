@@ -9,11 +9,11 @@ use dot15d4_driver::{
 };
 use embassy_executor::Spawner;
 
-type NrfTimer = Timer<NrfRadioDriver>;
-const TIMEOUT: Duration<NrfTimer> = Duration::<Milliseconds>::new(10).convert_into_rounding_up();
-
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
+    type NrfTimer = Timer<NrfRadioDriver>;
+    const TIMEOUT: Duration<NrfTimer> = Duration::<Milliseconds>::new(10).convert_into_rounding_up();
+
     let peripherals = pac::Peripherals::take().unwrap();
 
     // Enable the DC/DC converter
