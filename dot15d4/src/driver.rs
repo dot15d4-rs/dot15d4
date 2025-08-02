@@ -170,10 +170,6 @@ impl From<RadioTaskError<RadioTaskRx>> for DrvSvcResponse {
 pub const DRIVER_CHANNEL_CAPACITY: usize = 4;
 const DRIVER_CHANNEL_BACKLOG: usize = 1;
 
-/// We need distinct receivers for cancellable tasks (currently only Rx) and
-/// cancelling tasks (currently only Tx).
-const DRIVER_CHANNEL_CONSUMERS: usize = 2;
-
 /// To ensure progress, we give precedence of outbound tasks over inbound tasks.
 /// We therefore route these two classes of tasks into separate virtual
 /// channels.
@@ -206,7 +202,7 @@ pub type DriverRequestChannel = Channel<
     DrvSvcResponse,
     DRIVER_CHANNEL_CAPACITY,
     DRIVER_CHANNEL_BACKLOG,
-    DRIVER_CHANNEL_CONSUMERS,
+    1,
 >;
 pub type DriverRequestReceiver<'channel> = Receiver<
     'channel,
@@ -215,7 +211,7 @@ pub type DriverRequestReceiver<'channel> = Receiver<
     DrvSvcResponse,
     DRIVER_CHANNEL_CAPACITY,
     DRIVER_CHANNEL_BACKLOG,
-    DRIVER_CHANNEL_CONSUMERS,
+    1,
 >;
 pub type DriverRequestSender<'channel> = Sender<
     'channel,
@@ -224,7 +220,7 @@ pub type DriverRequestSender<'channel> = Sender<
     DrvSvcResponse,
     DRIVER_CHANNEL_CAPACITY,
     DRIVER_CHANNEL_BACKLOG,
-    DRIVER_CHANNEL_CONSUMERS,
+    1,
 >;
 
 /// We use this runtime state to prove that the radio can only be in three
