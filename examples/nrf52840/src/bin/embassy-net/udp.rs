@@ -4,10 +4,9 @@
 use panic_probe as _;
 
 use dot15d4_driver::{
-    radio::Timer,
-    socs::nrf::{export::*, NrfRadioDriver},
+    socs::nrf::{export::*, NrfRadioDriver, NrfRadioTimer},
     tasks::RadioDriver,
-    timer::{now, wait_until, SyntonizedDuration},
+    timer::{RadioTimerApi, RadioTimerResult, SyntonizedDuration},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -20,26 +19,15 @@ use embassy_net::{
 use heapless::Vec;
 use static_cell::StaticCell;
 
+const FRAME_PERIOD: SyntonizedDuration = SyntonizedDuration::millis(10);
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
     dot15d4_util::trace::instrument();
 
-    let peripherals = pac::Peripherals::take().unwrap();
-
-    // Enable the DC/DC converter
-    peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
-
-    // Enable external oscillators.
-    let clocks = Clocks::new(peripherals.CLOCK)
-        .enable_ext_hfosc()
-        .set_lfclk_src_external(LfOscConfiguration::NoExternalNoBypass)
-        .start_lfclk();
-
-    type NrfTimer = Timer<NrfRadioDriver>;
-    NrfTimer::init(peripherals.RTC0);
-
-    let radio = RadioDriver::new(peripherals.RADIO, clocks);
+    let (clocks, peripherals) = dot15d4_examples_nrf52840::config_peripherals();
+    let radio = RadioDriver::new(peripherals.radio, clocks);
     let buffer_allocator = mac_buffer_allocator!();
 
     static RADIO_STACK: StaticCell<Ieee802154Stack<NrfRadioDriver>> = StaticCell::new();
@@ -48,7 +36,7 @@ async fn main(spawner: Spawner) {
     let driver = radio_stack.driver();
 
     // We spawn the task that will control the CSMA task
-    let ieee802154_task = ieee802154_task(radio_stack, peripherals.RNG).unwrap();
+    let ieee802154_task = ieee802154_task(radio_stack, peripherals.rng).unwrap();
     #[cfg(feature = "rtos-trace")]
     ieee802154_task.metadata().set_name("dot15d4\0");
     spawner.spawn(ieee802154_task);
@@ -92,6 +80,9 @@ async fn main(spawner: Spawner) {
     );
     socket.bind(9400).unwrap();
 
+    let mut tx_count = 0;
+    let anchor_time = NrfRadioTimer::now();
+
     loop {
         // If we are 1 -> echo the result back
         if addr == 1 {
@@ -103,10 +94,12 @@ async fn main(spawner: Spawner) {
             socket.send_to(b"Hello, World !", ep).await.unwrap();
             let (_, _ep) = socket.recv_from(&mut buf).await.unwrap();
 
-            const TIMEOUT: SyntonizedDuration = SyntonizedDuration::millis(500);
-            let now = now::<NrfTimer>();
-            let instant = now + TIMEOUT;
-            wait_until::<NrfTimer>(instant).await;
+            tx_count += 1;
+            // Safety: The main task runs at lowest priority and won't be migrated.
+            let res = unsafe {
+                NrfRadioTimer::wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD)).await
+            };
+            debug_assert_eq!(res, RadioTimerResult::Ok);
         }
     }
 }

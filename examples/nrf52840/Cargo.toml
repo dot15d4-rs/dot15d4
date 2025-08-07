@@ -5,11 +5,6 @@ version = "0.0.1"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "embassy-net-udp-fast"
-path = "src/bin/embassy-net/udp-fast.rs"
-required-features = ["embassy-net"]
-
-[[bin]]
 name = "embassy-net-udp"
 path = "src/bin/embassy-net/udp.rs"
 required-features = ["embassy-net"]

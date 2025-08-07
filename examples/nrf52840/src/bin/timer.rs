@@ -4,34 +4,54 @@
 use panic_probe as _;
 
 use dot15d4_driver::{
-    radio::Timer,
-    socs::nrf::{export::*, NrfRadioDriver},
-    timer::{now, wait_until, SyntonizedDuration},
+    executor::InterruptExecutor,
+    socs::nrf::{executor, NrfRadioTimer},
+    timer::{HardwareSignal, Pin, RadioTimerApi, RadioTimerResult, SyntonizedDuration},
 };
+#[cfg(feature = "gpio-trace")]
+use dot15d4_examples_nrf52840::PIN_EXECUTOR;
+use dot15d4_examples_nrf52840::{config_peripherals, toggle_gpiote_pin, PIN_ALARM};
 use embassy_executor::Spawner;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    type NrfTimer = Timer<NrfRadioDriver>;
-    const TIMEOUT: SyntonizedDuration = SyntonizedDuration::millis(10);
+    let (_, peripherals) = config_peripherals();
 
-    let peripherals = pac::Peripherals::take().unwrap();
+    let toggle_alarm_pin = || {
+        toggle_gpiote_pin(&peripherals.gpiote, PIN_ALARM.gpiote_channel as usize);
+    };
 
-    // Enable the DC/DC converter
-    peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
+    #[cfg(feature = "gpio-trace")]
+    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    let executor = executor::swi0(
+        peripherals.swi0,
+        #[cfg(feature = "gpio-trace")]
+        &peripherals.gpiote,
+        #[cfg(feature = "gpio-trace")]
+        gpiote_trace_channel,
+    );
 
-    // Enable external oscillators.
-    let _ = Clocks::new(peripherals.CLOCK)
-        .enable_ext_hfosc()
-        .set_lfclk_src_external(LfOscConfiguration::NoExternalNoBypass)
-        .start_lfclk();
+    let timer_task = async {
+        let mut timeout = NrfRadioTimer::now();
+        for _ in 0..10 {
+            const DELAY: SyntonizedDuration = SyntonizedDuration::nanos(4 * 30518);
+            timeout += DELAY;
 
-    NrfTimer::init(peripherals.RTC0);
-    let anchor_time = now::<NrfTimer>();
-
-    let mut count = 0;
-    loop {
-        count += 1;
-        wait_until::<NrfTimer>(anchor_time + count * TIMEOUT).await;
+            // Safety: We run at lower priority than the timer interrupt and we
+            //         run from a single task.
+            let result = unsafe {
+                NrfRadioTimer::schedule_event(timeout, HardwareSignal::TogglePin(Pin::Pin0)).await
+            };
+            assert!(matches!(result, RadioTimerResult::Ok));
+        }
+        toggle_alarm_pin();
+    };
+    unsafe {
+        executor.spawn(timer_task).await;
     }
+
+    toggle_alarm_pin();
+
+    #[cfg(feature = "rtos-trace")]
+    rtos_trace::trace::stop();
 }

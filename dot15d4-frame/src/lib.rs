@@ -48,7 +48,7 @@ mod test {
             RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
         },
         radio::{DriverConfig, FcsTwoBytes},
-        timer::{RadioTimerApi, SyntonizedInstant},
+        timer::{HardwareSignal, RadioTimerApi, RadioTimerResult, SyntonizedInstant},
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
@@ -69,7 +69,14 @@ mod test {
             todo!()
         }
 
-        async fn wait_until(_: SyntonizedInstant) {
+        async unsafe fn wait_until(_: SyntonizedInstant) -> RadioTimerResult {
+            todo!()
+        }
+
+        async unsafe fn schedule_event(
+            _: SyntonizedInstant,
+            _: HardwareSignal,
+        ) -> RadioTimerResult {
             todo!()
         }
     }
