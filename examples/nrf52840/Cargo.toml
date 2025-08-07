@@ -74,6 +74,7 @@ log = [
     "dot15d4-util/log",
 ]
 
+gpio-trace = ["dot15d4-driver/gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "embassy-executor/rtos-trace",

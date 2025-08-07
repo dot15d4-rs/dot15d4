@@ -89,9 +89,8 @@ pub(crate) mod trace {
     pub const TASK_FALL_BACK: u32 = OFFSET.wrap(9);
 
     // Markers
-    pub const MISSED_ISR: u32 = OFFSET.wrap(0);
-    pub const TASK_RX_FRAME_STARTED: u32 = OFFSET.wrap(1);
-    pub const TASK_RX_FRAME_INFO: u32 = OFFSET.wrap(2);
+    pub const TASK_RX_FRAME_STARTED: u32 = OFFSET.wrap(0);
+    pub const TASK_RX_FRAME_INFO: u32 = OFFSET.wrap(1);
 
     /// Instruments the driver for task tracing.
     pub fn instrument() {
@@ -105,7 +104,6 @@ pub(crate) mod trace {
         rtos_trace::trace::task_new_stackless(TASK_TRANSITION_TO_TX, "Transition to TX\0", 0);
         rtos_trace::trace::task_new_stackless(TASK_TX_RUN, "Tx\0", 0);
         rtos_trace::trace::task_new_stackless(TASK_FALL_BACK, "Off (fallback)\0", 0);
-        rtos_trace::trace::name_marker(MISSED_ISR, "Missed ISR\0");
         rtos_trace::trace::name_marker(TASK_RX_FRAME_STARTED, "Frame Started\0");
         rtos_trace::trace::name_marker(TASK_RX_FRAME_INFO, "Preliminary Frame Info\0");
     }
