@@ -4,7 +4,7 @@ echo "CHECK(examples): ARM, default features"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf -- -D warnings
 
 echo "CHECK(examples): ARM, optional features"
-cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace -- -D warnings
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace,gpio-trace -- -D warnings
 
 echo "TEST(dot15d4-frame): no features"
 cargo test -p dot15d4-frame --no-default-features

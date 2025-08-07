@@ -24,6 +24,7 @@ impl rtos_trace::RtosTraceApplicationCallbacks for Application {
         systemview_target::send_system_desc_app_name!("dot15d4");
         systemview_target::send_system_desc_interrupt!(17, "RADIO");
         systemview_target::send_system_desc_interrupt!(27, "RTC0");
+        systemview_target::send_system_desc_interrupt!(36, "SWI0");
     }
 
     fn sysclock() -> u32 {
