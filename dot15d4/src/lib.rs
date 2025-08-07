@@ -2,13 +2,6 @@
 pub mod driver;
 pub mod mac;
 
-use dot15d4_driver::{
-    tasks::{
-        OffState, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx, TaskTx as RadioTaskTx,
-        TxState,
-    },
-    RadioDriverApi,
-};
 pub use dot15d4_util as util;
 
 pub mod export {
@@ -19,20 +12,23 @@ use rand_core::RngCore;
 
 use self::{
     driver::{
-        tasks::{RadioDriver, TaskOff},
-        DriverConfig, DriverRequestChannel, DriverService,
+        tasks::{
+            OffState, RadioDriver, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
+            TaskTx as RadioTaskTx, TxState,
+        },
+        DriverConfig, DriverRequestChannel, DriverService, RadioDriverApi,
     },
     mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
     util::sync::{mutex::Mutex, select, Either},
 };
 
 pub struct Device<RadioDriverImpl: DriverConfig, Rng> {
-    radio: RadioDriver<RadioDriverImpl, TaskOff>,
+    radio: RadioDriver<RadioDriverImpl, RadioTaskOff>,
     rng: Mutex<Rng>,
 }
 
 impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Device<RadioDriverImpl, Rng> {
-    pub fn new(radio: RadioDriver<RadioDriverImpl, TaskOff>, rng: Rng) -> Self {
+    pub fn new(radio: RadioDriver<RadioDriverImpl, RadioTaskOff>, rng: Rng) -> Self {
         Self {
             radio,
             rng: Mutex::new(rng),
