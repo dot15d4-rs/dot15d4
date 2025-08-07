@@ -24,6 +24,7 @@ nrf-hal-common = { version = "0.18", optional = true }
 
 log = { version = "0.4.21", optional = true }
 
+cty = { version = "0.2", optional = true }
 rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
 
 arbitrary = { version = "1.3.2", features = ["derive"], optional = true }
@@ -41,7 +42,7 @@ defmt = ["dot15d4-util/defmt"]
 gpio-trace = []
 
 # Activate for SystemView tracing
-rtos-trace = ["dep:rtos-trace", "log"]
+rtos-trace = ["dep:rtos-trace", "dep:cty", "log"]
 
 std = []
 fuzz = ["dep:arbitrary"]

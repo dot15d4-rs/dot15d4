@@ -1096,9 +1096,14 @@ where
         // Note: This is just a rough estimate with some safety margin for now.
         //       Precise timing requires timestamp and RX window support in the
         //       driver.
-        let timeout = RadioDriverImpl::Timer::wait_until(
-            RadioDriverImpl::Timer::now() + Self::DRIVER_RX_ACK_TIMEOUT,
-        );
+        // Safety: The driver service either runs from the main task or from a
+        //         low-priority service handler. We don't migrate this future
+        //         while polling it.
+        let timeout = unsafe {
+            RadioDriverImpl::Timer::wait_until(
+                RadioDriverImpl::Timer::now() + Self::DRIVER_RX_ACK_TIMEOUT,
+            )
+        };
 
         let next_task_ifs = Ifs::from_mpdu_length(tx_radio_frame.sdu_length().get());
         match select(rx_driver.frame_started(), timeout).await {
