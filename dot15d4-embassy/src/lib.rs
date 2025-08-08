@@ -17,9 +17,13 @@ pub mod trace {
         "Tracing cannot be enabled at the same time as defmt. Logs will be visible in the SystemView application if the 'log' feature is enabled."
     );
 
+    use dot15d4::util::trace::TraceOffset;
+
+    const OFFSET: TraceOffset = TraceOffset::Dot15d4Embassy;
+
     // Markers
-    pub const RX_TOKEN_CONSUMED: u32 = 102;
-    pub const TX_TOKEN_CONSUMED: u32 = 112;
+    pub const RX_TOKEN_CONSUMED: u32 = OFFSET.wrap(0);
+    pub const TX_TOKEN_CONSUMED: u32 = OFFSET.wrap(1);
 
     /// Instrument the library for tracing.
     pub(crate) fn instrument() {

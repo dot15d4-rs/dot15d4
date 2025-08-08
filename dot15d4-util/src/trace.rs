@@ -2,6 +2,21 @@ use systemview_target::SystemView;
 
 rtos_trace::global_trace! {SystemView}
 
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TraceOffset {
+    Dot15d4 = 100,
+    Dot15d4DriverExecutor = 200,
+    Dot15d4DriverRadio = 300,
+    Dot15d4Embassy = 400,
+}
+
+impl TraceOffset {
+    pub const fn wrap(&self, offset: u32) -> u32 {
+        *self as u32 + offset
+    }
+}
+
 struct Application;
 rtos_trace::global_application_callbacks! {Application}
 impl rtos_trace::RtosTraceApplicationCallbacks for Application {

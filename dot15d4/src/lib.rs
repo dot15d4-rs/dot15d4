@@ -99,23 +99,27 @@ where
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
+    use dot15d4_util::trace::TraceOffset;
+
     #[cfg(feature = "defmt")]
     compile_error!(
         "Tracing cannot be enabled at the same time as defmt. Logs will be visible in the SystemView application if the 'log' feature is enabled."
     );
 
+    const OFFSET: TraceOffset = TraceOffset::Dot15d4;
+
     // Tasks
-    pub const MAC_INDICATION: u32 = 0;
-    pub const MAC_REQUEST: u32 = 1;
+    pub const MAC_INDICATION: u32 = OFFSET.wrap(0);
+    pub const MAC_REQUEST: u32 = OFFSET.wrap(1);
 
     // Markers
-    pub const TX_FRAME: u32 = 0;
-    pub const TX_NACK: u32 = 1;
-    pub const TX_CCABUSY: u32 = 2;
-    pub const RX_FRAME: u32 = 3;
-    pub const RX_INVALID: u32 = 4;
-    pub const RX_CRC_ERROR: u32 = 5;
-    pub const RX_WINDOW_ENDED: u32 = 6;
+    pub const TX_FRAME: u32 = OFFSET.wrap(0);
+    pub const TX_NACK: u32 = OFFSET.wrap(1);
+    pub const TX_CCABUSY: u32 = OFFSET.wrap(2);
+    pub const RX_FRAME: u32 = OFFSET.wrap(3);
+    pub const RX_INVALID: u32 = OFFSET.wrap(4);
+    pub const RX_CRC_ERROR: u32 = OFFSET.wrap(5);
+    pub const RX_WINDOW_ENDED: u32 = OFFSET.wrap(6);
 
     /// Instrument the library for tracing.
     pub(crate) fn instrument() {

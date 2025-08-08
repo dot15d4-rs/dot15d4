@@ -69,25 +69,29 @@ pub trait RadioDriverApi {
 
 #[cfg(feature = "rtos-trace")]
 pub(crate) mod trace {
+    use dot15d4_util::trace::TraceOffset;
+
+    const OFFSET: TraceOffset = TraceOffset::Dot15d4DriverRadio;
+
     // Tasks
-    pub const TASK_OFF_SCHEDULE: u32 = 200;
-    pub const TASK_TRANSITION_TO_OFF: u32 = 201;
-    pub const TASK_OFF_RUN: u32 = 202;
+    pub const TASK_OFF_SCHEDULE: u32 = OFFSET.wrap(0);
+    pub const TASK_TRANSITION_TO_OFF: u32 = OFFSET.wrap(1);
+    pub const TASK_OFF_RUN: u32 = OFFSET.wrap(2);
 
-    pub const TASK_RX_SCHEDULE: u32 = 203;
-    pub const TASK_TRANSITION_TO_RX: u32 = 204;
-    pub const TASK_RX_RUN: u32 = 205;
+    pub const TASK_RX_SCHEDULE: u32 = OFFSET.wrap(3);
+    pub const TASK_TRANSITION_TO_RX: u32 = OFFSET.wrap(4);
+    pub const TASK_RX_RUN: u32 = OFFSET.wrap(5);
 
-    pub const TASK_TX_SCHEDULE: u32 = 206;
-    pub const TASK_TRANSITION_TO_TX: u32 = 207;
-    pub const TASK_TX_RUN: u32 = 208;
+    pub const TASK_TX_SCHEDULE: u32 = OFFSET.wrap(6);
+    pub const TASK_TRANSITION_TO_TX: u32 = OFFSET.wrap(7);
+    pub const TASK_TX_RUN: u32 = OFFSET.wrap(8);
 
-    pub const TASK_FALL_BACK: u32 = 209;
+    pub const TASK_FALL_BACK: u32 = OFFSET.wrap(9);
 
     // Markers
-    pub const MISSED_ISR: u32 = 200;
-    pub const TASK_RX_FRAME_STARTED: u32 = 201;
-    pub const TASK_RX_FRAME_INFO: u32 = 202;
+    pub const MISSED_ISR: u32 = OFFSET.wrap(0);
+    pub const TASK_RX_FRAME_STARTED: u32 = OFFSET.wrap(1);
+    pub const TASK_RX_FRAME_INFO: u32 = OFFSET.wrap(2);
 
     /// Instruments the driver for task tracing.
     pub fn instrument() {
