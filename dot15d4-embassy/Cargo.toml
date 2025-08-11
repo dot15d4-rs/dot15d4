@@ -25,7 +25,7 @@ embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-tr
     "time-driver-rtc1",
 ], optional = true, default-features = false }
 
-rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
+rtos-trace = { version = "0.2", optional = true }
 
 [features]
 nrf = []

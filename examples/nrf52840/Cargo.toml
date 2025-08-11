@@ -38,7 +38,7 @@ defmt = { version = "1.0", optional = true }
 defmt-rtt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 
-rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
+rtos-trace = { version = "0.2", optional = true }
 
 [features]
 default = ["nrf52840", "embassy-net"]

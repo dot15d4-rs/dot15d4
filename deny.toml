@@ -28,7 +28,6 @@ unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # TODO: Remove once our changes landed.
-    "https://gitlab.com/fgcfh/rtos-trace.git?branch=dev",
     "https://github.com/fg-cfh/embassy.git?branch=rtos-trace",
 ]
 
