@@ -11,6 +11,8 @@ use dot15d4_driver::{
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
 };
+#[cfg(feature = "gpio-trace")]
+use dot15d4_examples_nrf52840::PIN_EXECUTOR;
 use embassy_executor::Spawner;
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
@@ -27,7 +29,16 @@ async fn main(spawner: Spawner) {
     dot15d4_util::trace::instrument();
 
     let (clocks, peripherals) = dot15d4_examples_nrf52840::config_peripherals();
-    let radio = RadioDriver::new(peripherals.radio, clocks);
+    #[cfg(feature = "gpio-trace")]
+    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    let radio = RadioDriver::new(
+        peripherals.radio,
+        clocks,
+        #[cfg(feature = "gpio-trace")]
+        &peripherals.gpiote,
+        #[cfg(feature = "gpio-trace")]
+        gpiote_trace_channel,
+    );
     let buffer_allocator = mac_buffer_allocator!();
 
     static RADIO_STACK: StaticCell<Ieee802154Stack<NrfRadioDriver>> = StaticCell::new();

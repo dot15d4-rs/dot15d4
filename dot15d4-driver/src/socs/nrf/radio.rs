@@ -6,29 +6,22 @@
 //      enabling the interrupt.
 
 use core::{
-    cell::{RefCell, RefMut},
+    future::poll_fn,
     num::NonZero,
-    ops::Deref,
     sync::atomic::{compiler_fence, Ordering},
-    task::{Context, Poll, Waker},
+    task::Poll,
 };
 
-use critical_section::{with as with_cs, CriticalSection, Mutex};
 use dot15d4_util::{debug, frame::FramePdu, sync::CancellationGuard};
+#[cfg(feature = "gpio-trace")]
+use nrf52840_hal::pac::GPIOTE;
 use nrf52840_hal::{
     clocks::{ExternalOscillator, LfOscStarted},
-    pac::{
-        self,
-        generic::{Writable, W},
-        interrupt,
-        radio::{intenset::INTENSET_SPEC, state::STATE_A},
-    },
+    pac::{self, radio::state::STATE_A},
     Clocks,
 };
 use typenum::U;
 
-#[cfg(feature = "rtos-trace")]
-use crate::executor::trace::MISSED_ISR;
 #[cfg(feature = "rtos-trace")]
 use crate::radio::trace::{
     TASK_FALL_BACK, TASK_OFF_RUN, TASK_OFF_SCHEDULE, TASK_RX_FRAME_INFO, TASK_RX_FRAME_STARTED,
@@ -40,6 +33,7 @@ use crate::{
     constants::{
         DEFAULT_SFD, FCS_LEN, MAC_AIFS, MAC_LIFS, MAC_SIFS, PHY_HDR_LEN, PHY_MAX_PACKET_SIZE_127,
     },
+    executor::InterruptExecutor,
     frame::{AddressingFields, RadioFrame, RadioFrameSized},
     radio::{DriverConfig, FcsNone, RadioDriverApi},
     tasks::{
@@ -59,74 +53,15 @@ pub mod export {
     };
 }
 
-struct RadioInterruptHandler;
-
-// TODO: Replace with a fast pseudo-executor that is able to poll all purely
-//       interrupt-driven futures directly: run(), transition(),
-//       frame_started(), preliminary_frame_info(), etc.
-impl RadioInterruptHandler {
-    /// Private function not to be called from outside this struct.
-    ///
-    /// Safety: Not to be called recursively.
-    fn waker(cs: CriticalSection) -> RefMut<Option<Waker>> {
-        static WAKER: Mutex<RefCell<Option<Waker>>> = Mutex::new(RefCell::new(None));
-        WAKER.borrow_ref_mut(cs)
-    }
-
-    /// Checks or sets the waker in the given context to be woken when the radio
-    /// interrupt fires.
-    fn arm<F: FnOnce(&mut <INTENSET_SPEC as Writable>::Writer) -> &mut W<INTENSET_SPEC>>(
-        cx: &mut Context,
-        f: F,
-    ) {
-        with_cs(|cs| {
-            let mut waker = Self::waker(cs);
-            if let Some(waker) = waker.deref() {
-                debug_assert!(waker.will_wake(cx.waker()))
-            } else {
-                *waker = Some(cx.waker().clone());
-            }
-
-            NrfRadioDriver::radio().intenset.write(f);
-        });
-    }
-
-    /// To be called from a radio interrupt.
-    fn radio_interrupt() {
-        with_cs(|cs| {
-            let waker = Self::waker(cs).take();
-            if let Some(waker) = waker {
-                waker.wake();
-            } else {
-                #[cfg(feature = "rtos-trace")]
-                rtos_trace::trace::marker(MISSED_ISR);
-            }
-
-            NrfRadioDriver::radio()
-                .intenclr
-                .write(|w| unsafe { w.bits(0xffffffff) });
-        });
-    }
-}
-
-#[interrupt]
-fn RADIO() {
-    #[cfg(feature = "rtos-trace")]
-    rtos_trace::trace::isr_enter();
-
-    RadioInterruptHandler::radio_interrupt();
-
-    #[cfg(feature = "rtos-trace")]
-    rtos_trace::trace::isr_exit_to_scheduler();
-}
-
 /// This struct serves multiple purposes:
 /// 1. It provides access to private radio driver state across typestates of the
 ///    surrounding [`RadioDriver`].
 /// 2. It serves as a unique marker for the nRF-specific implementation of the
 ///    [`RadioDriver`].
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
-pub struct NrfRadioDriver;
+pub struct NrfRadioDriver {
+    executor: super::executor::radio::NrfInterruptExecutor,
+}
 
 impl DriverConfig for NrfRadioDriver {
     type Headroom = U<PHY_HDR_LEN>; // Headroom for the PHY header (packet length).
@@ -197,6 +132,8 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
     pub fn new(
         radio: pac::RADIO,
         _clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
+        #[cfg(feature = "gpio-trace")] gpiote: &GPIOTE,
+        #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
     ) -> Self {
         #[cfg(feature = "rtos-trace")]
         crate::radio::trace::instrument();
@@ -249,14 +186,16 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         // has been received.
         radio.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
 
-        // Clear and enable the radio interrupt
-        pac::NVIC::unpend(pac::Interrupt::RADIO);
-        // Safety: We're in early initialization, so there should be no
-        //         concurrent critical sections.
-        unsafe { pac::NVIC::unmask(pac::Interrupt::RADIO) };
-
         let mut driver = Self {
-            inner: NrfRadioDriver,
+            inner: NrfRadioDriver {
+                executor: *super::executor::radio(
+                    radio,
+                    #[cfg(feature = "gpio-trace")]
+                    gpiote,
+                    #[cfg(feature = "gpio-trace")]
+                    gpiote_trace_channel,
+                ),
+            },
             task: Some(TaskOff {
                 at: Timestamp::BestEffort,
             }),
@@ -357,17 +296,22 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
         rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_OFF);
 
         // Wait until the state enters.
-        core::future::poll_fn(|cx| {
-            let r = Self::radio();
-            if r.events_disabled.read().events_disabled().bit_is_set() {
-                r.events_disabled.reset();
-                Poll::Ready(())
-            } else {
-                RadioInterruptHandler::arm(cx, |w| w.disabled().set_bit());
-                Poll::Pending
-            }
-        })
-        .await;
+        unsafe {
+            self.inner
+                .executor
+                .spawn(poll_fn(|_| {
+                    let r = Self::radio();
+                    if r.events_disabled.read().events_disabled().bit_is_set() {
+                        r.intenclr.write(|w| w.disabled().set_bit());
+                        r.events_disabled.reset();
+                        Poll::Ready(())
+                    } else {
+                        r.intenset.write(|w| w.disabled().set_bit());
+                        Poll::Pending
+                    }
+                }))
+                .await;
+        }
 
         Ok(())
     }
@@ -407,6 +351,8 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         }
 
         let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             rx_task,
@@ -415,8 +361,6 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
 
                 // Ramp up the receiver and start packet reception immediately.
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-
-                dma_start_fence();
 
                 r.shorts.write(|w| {
                     w.rxready_start().enabled();
@@ -450,7 +394,10 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         }
 
         let cca = tx_task.cca;
+
         let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             tx_task,
@@ -458,8 +405,6 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 let r = Self::radio();
 
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-                dma_start_fence();
-
                 if cca {
                     r.shorts.write(|w| {
                         // Start CCA immediately after the receiver ramped up.
@@ -538,24 +483,29 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_RX);
 
         // Wait until the state enters.
-        core::future::poll_fn(|cx| {
-            let r = Self::radio();
-            if r.events_rxready.read().events_rxready().bit_is_set() {
-                r.events_rxready.reset();
-                Poll::Ready(())
-            } else {
-                // Double check state in case we're coming from another RX state
-                // (CCA).
-                match r.state.read().state().variant() {
-                    Some(STATE_A::RX | STATE_A::RX_IDLE) => Poll::Ready(()),
-                    _ => {
-                        RadioInterruptHandler::arm(cx, |w| w.rxready().set_bit());
-                        Poll::Pending
+        unsafe {
+            self.inner
+                .executor
+                .spawn(poll_fn(|_| {
+                    let r = Self::radio();
+                    if r.events_rxready.read().events_rxready().bit_is_set() {
+                        r.intenclr.write(|w| w.rxready().set_bit());
+                        r.events_rxready.reset();
+                        Poll::Ready(())
+                    } else {
+                        // Double check state in case we're coming from another RX state
+                        // (CCA).
+                        match r.state.read().state().variant() {
+                            Some(STATE_A::RX | STATE_A::RX_IDLE) => Poll::Ready(()),
+                            _ => {
+                                r.intenset.write(|w| w.rxready().set_bit());
+                                Poll::Pending
+                            }
+                        }
                     }
-                }
-            }
-        })
-        .await;
+                }))
+                .await;
+        }
 
         Ok(())
     }
@@ -567,78 +517,94 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_RUN);
 
-        let r = Self::radio();
+        let mut result: Option<Result<RxResult, RadioTaskError<TaskRx>>> = None;
 
-        let is_back_to_back_rx = r.shorts.read().end_start().is_enabled();
-        // Read the framestart event at the last possible moment to keep the
-        // risk of missing a frame minimal.
-        let reception_may_be_ongoing = r.events_framestart.read().events_framestart().bit_is_set();
-        let result = if reception_may_be_ongoing || is_back_to_back_rx {
-            // Ongoing reception or RX back-to-back.
+        unsafe {
+            self.inner
+                .executor
+                .spawn(async {
+                    let r = Self::radio();
 
-            // Wait until the remainder of the packet has been received and the
-            // receiver becomes idle.
-            core::future::poll_fn(|cx| {
-                if r.events_end.read().events_end().bit_is_set() {
-                    r.events_end.reset();
-                    // We reset the BCMATCH event here just in case we didn't
-                    // retrieve the preliminary frame info for the last RX
-                    // packet (e.g. if it was an ACK packet) and therefore also
-                    // didn't reset the event.
-                    r.events_bcmatch.reset();
-                    Poll::Ready(())
-                } else {
-                    RadioInterruptHandler::arm(cx, |w| w.end().set_bit());
-                    Poll::Pending
-                }
-            })
-            .await;
+                    let is_back_to_back_rx = r.shorts.read().end_start().is_enabled();
+                    // Read the framestart event at the last possible moment to keep the
+                    // risk of missing a frame minimal.
+                    let reception_may_be_ongoing =
+                        r.events_framestart.read().events_framestart().bit_is_set();
 
-            if r.events_crcerror.read().events_crcerror().bit_is_set() {
-                r.events_crcerror.reset();
+                    let inner_result = if reception_may_be_ongoing || is_back_to_back_rx {
+                        // Ongoing reception or RX back-to-back.
 
-                if rollback_on_crcerror {
-                    // When rolling back we're expected to place the radio in RX
-                    // mode again and receive the next packet into the same
-                    // buffer. Therefore restart the receiver unless it was
-                    // already started.
-                    if !is_back_to_back_rx {
-                        r.tasks_start.write(|w| w.tasks_start().set_bit());
-                    }
-                    Err(RadioTaskError::Task(RxError::CrcError))
-                } else {
-                    let rx_task = self.task.take().unwrap();
-                    Ok(RxResult::CrcError(rx_task.radio_frame))
-                }
-            } else {
-                r.events_crcok.reset();
-                dma_end_fence();
+                        // Wait until the remainder of the packet has been received and the
+                        // receiver becomes idle.
+                        poll_fn(|_| {
+                            if r.events_end.read().events_end().bit_is_set() {
+                                r.intenclr.write(|w| w.end().set_bit());
+                                r.events_end.reset();
+                                // We reset the BCMATCH event here just in case we didn't
+                                // retrieve the preliminary frame info for the last RX
+                                // packet (e.g. if it was an ACK packet) and therefore also
+                                // didn't reset the event.
+                                r.events_bcmatch.reset();
+                                Poll::Ready(())
+                            } else {
+                                r.intenset.write(|w| w.end().set_bit());
+                                Poll::Pending
+                            }
+                        })
+                        .await;
 
-                // The CRC has been checked so the frame must have a non-zero
-                // size saved in the headroom of the nRF packet (PHY header).
-                let rx_task = self.task.take().unwrap();
-                let sdu_length_wo_fcs =
-                    NonZero::new(rx_task.radio_frame.pdu_ref()[0] as u16 - FCS_LEN as u16)
-                        .expect("invalid length");
+                        dma_end_fence();
 
-                Ok(RxResult::Frame(
-                    rx_task.radio_frame.with_size(sdu_length_wo_fcs),
-                ))
-            }
-        } else {
-            // Otherwise: Cancel the ongoing task and leave the receiver in idle
-            // state.
-            r.tasks_stop.write(|w| w.tasks_stop().set_bit());
+                        if r.events_crcerror.read().events_crcerror().bit_is_set() {
+                            r.events_crcerror.reset();
 
-            let rx_task = self.task.take().unwrap();
-            Ok(RxResult::RxWindowEnded(rx_task.radio_frame))
-        };
+                            if rollback_on_crcerror {
+                                // When rolling back we're expected to place the radio in RX
+                                // mode again and receive the next packet into the same
+                                // buffer. Therefore restart the receiver unless it was
+                                // already started.
+                                if !is_back_to_back_rx {
+                                    r.tasks_start.write(|w| w.tasks_start().set_bit());
+                                }
+                                Err(RadioTaskError::Task(RxError::CrcError))
+                            } else {
+                                let rx_task = self.task.take().unwrap();
+                                Ok(RxResult::CrcError(rx_task.radio_frame))
+                            }
+                        } else {
+                            r.events_crcok.reset();
 
-        // Clear the framestart flag _after_ the receiver became idle to avoid
-        // race conditions.
-        r.events_framestart.reset();
+                            // The CRC has been checked so the frame must have a non-zero
+                            // size saved in the headroom of the nRF packet (PHY header).
+                            let rx_task = self.task.take().unwrap();
+                            let sdu_length_wo_fcs = NonZero::new(
+                                rx_task.radio_frame.pdu_ref()[0] as u16 - FCS_LEN as u16,
+                            )
+                            .expect("invalid length");
 
-        result
+                            Ok(RxResult::Frame(
+                                rx_task.radio_frame.with_size(sdu_length_wo_fcs),
+                            ))
+                        }
+                    } else {
+                        // Otherwise: Cancel the ongoing task and leave the receiver in idle
+                        // state.
+                        r.tasks_stop.write(|w| w.tasks_stop().set_bit());
+
+                        let rx_task = self.task.take().unwrap();
+                        Ok(RxResult::RxWindowEnded(rx_task.radio_frame))
+                    };
+
+                    // Clear the framestart flag _after_ the receiver became idle to avoid
+                    // race conditions.
+                    r.events_framestart.reset();
+
+                    result = Some(inner_result);
+                })
+                .await;
+        }
+
+        result.unwrap()
     }
 
     fn exit(&mut self) -> Result<(), SchedulingError> {
@@ -651,135 +617,74 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
 impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
     async fn frame_started(&mut self) {
-        let r = Self::radio();
+        unsafe {
+            self.inner
+                .executor
+                .spawn(async {
+                    let r = Self::radio();
 
-        let cleanup_on_drop = CancellationGuard::new(|| {
-            r.intenclr.write(|w| w.framestart().set_bit());
-        });
+                    let cleanup_on_drop = CancellationGuard::new(|| {
+                        r.intenclr.write(|w| w.framestart().set_bit());
+                    });
 
-        core::future::poll_fn(|cx| {
-            if r.events_framestart.read().events_framestart().bit_is_set() {
-                // Do not clear the framestart event as it is used in the RX run()
-                // method.
-                Poll::Ready(())
-            } else {
-                RadioInterruptHandler::arm(cx, |w| w.framestart().set_bit());
-                Poll::Pending
-            }
-        })
-        .await;
+                    poll_fn(|_| {
+                        if r.events_framestart.read().events_framestart().bit_is_set() {
+                            // Do not clear the framestart event as it is used in the RX run()
+                            // method.
+                            r.intenclr.write(|w| w.framestart().set_bit());
+                            Poll::Ready(())
+                        } else {
+                            r.intenset.write(|w| w.framestart().set_bit());
+                            Poll::Pending
+                        }
+                    })
+                    .await;
 
-        drop(cleanup_on_drop);
+                    cleanup_on_drop.inactivate();
+                })
+                .await;
+        }
 
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::marker(TASK_RX_FRAME_STARTED);
     }
 
     async fn preliminary_frame_info(&mut self) -> PreliminaryFrameInfo<'_> {
-        let radio_frame = &self.task.as_ref().unwrap().radio_frame;
-
-        let r = Self::radio();
-
-        let cleanup_on_drop = CancellationGuard::new(|| {
-            r.intenclr.write(|w| {
-                w.bcmatch().set_bit();
-                w.end().set_bit()
-            });
-            // Do not clear the end event as it is used in the RX run() method.
-            r.tasks_bcstop.write(|w| w.tasks_bcstop().set_bit());
-            r.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
-        });
-
         // Wait until the frame control field has been received.
-        const FC_LEN: u8 = 2;
-        const SEQ_NR_LEN: u8 = 1;
-        let frame_control = core::future::poll_fn(|cx| {
-            if r.events_bcmatch.read().events_bcmatch().bit_is_set() {
-                r.events_bcmatch.reset();
+        const FC_LEN: usize = 2;
+        const SEQ_NR_LEN: usize = 1;
 
-                // Safety: The bit counter match guarantees that the frame
-                //         control field has been received.
-                let fc_and_addressing_repr = unsafe { radio_frame.fc_and_addressing_repr() };
-                // TODO: Deal with error result.
-                let (fc, addressing_repr) = fc_and_addressing_repr.unwrap();
-                let (seq_nr_len, seq_nr_offset) = if fc.sequence_number_suppression() {
-                    (0, None)
-                } else {
-                    (SEQ_NR_LEN, Some(FC_LEN as usize))
-                };
+        let mut preliminary_frame_info: Option<PreliminaryFrameInfo> = None;
 
-                // Note: BCMATCH counts are calculated relative to the MPDU
-                //       (i.e. w/o headroom).
-                let addressing_fields_lengths = addressing_repr.addressing_fields_lengths();
-                let (fc, addressing_info, bcc_bytes) =
-                    if let Ok(addressing_fields_lengths) = addressing_fields_lengths {
-                        let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths;
-                        (
-                            Some(fc),
-                            Some((addressing_repr, (FC_LEN + seq_nr_len) as usize)),
-                            Some((FC_LEN + seq_nr_len + dst_pan_id_len + dst_addr_len) as usize),
-                        )
-                    } else {
-                        (
-                            Some(fc),
-                            None,
-                            seq_nr_offset.map(|seq_nr_offset| seq_nr_offset + SEQ_NR_LEN as usize),
-                        )
-                    };
+        let capture_preliminary_frame_info = async {
+            let r = Self::radio();
 
-                if let Some(bcc) = bcc_bytes {
-                    r.bcc.write(|w| w.bcc().variant((bcc as u32) << 3));
-                }
-
-                return Poll::Ready(Ok((
-                    fc,
-                    seq_nr_offset,
-                    addressing_info,
-                    bcc_bytes.is_some(),
-                )));
-            }
-
-            if r.events_end.read().events_end().bit_is_set() {
+            let cleanup_on_drop = CancellationGuard::new(|| {
+                r.intenclr.write(|w| {
+                    w.bcmatch().set_bit();
+                    w.end().set_bit()
+                });
                 // Do not clear the end event as it is used in the RX run()
                 // method.
-                return Poll::Ready(Err(()));
-            }
-
-            RadioInterruptHandler::arm(cx, |w| {
-                w.bcmatch().set_bit();
-                w.end().set_bit()
+                r.tasks_bcstop.write(|w| w.tasks_bcstop().set_bit());
+                r.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
+                r.events_bcmatch.reset();
             });
-            Poll::Pending
-        })
-        .await;
 
-        if frame_control.is_err() {
-            return PreliminaryFrameInfo {
-                mpdu_length: 0,
-                frame_control: None,
-                seq_nr: None,
-                addressing_fields: None,
-            };
-        }
-
-        let (frame_control, seq_nr_offset, addressing_info, bcc_set) = frame_control.unwrap();
-
-        // Wait until the sequence number and/or destination address fields have
-        // been received.
-        if bcc_set {
-            let bcmatch = core::future::poll_fn(|cx| {
-                if r.events_bcmatch.read().events_bcmatch().bit_is_set() {
+            let ended = poll_fn(|_| {
+                let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
+                if bcmatch || r.events_end.read().events_end().bit_is_set() {
+                    // Do not clear the end event as it is used below and in
+                    // the RX run() method.
+                    r.intenclr.write(|w| {
+                        w.bcmatch().set_bit();
+                        w.end().set_bit()
+                    });
                     r.events_bcmatch.reset();
-                    return Poll::Ready(Ok(()));
+                    return Poll::Ready(!bcmatch);
                 }
 
-                if r.events_end.read().events_end().bit_is_set() {
-                    // Do not clear the end event as it is used in the RX run()
-                    // method.
-                    return Poll::Ready(Err(()));
-                }
-
-                RadioInterruptHandler::arm(cx, |w| {
+                r.intenset.write(|w| {
                     w.bcmatch().set_bit();
                     w.end().set_bit()
                 });
@@ -787,42 +692,132 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             })
             .await;
 
-            if bcmatch.is_err() {
-                return PreliminaryFrameInfo {
-                    mpdu_length: 0,
-                    frame_control: None,
+            dma_end_fence();
+
+            if ended && r.events_crcerror.read().events_crcerror().bit_is_set() {
+                return;
+            }
+
+            let radio_frame = &self.task.as_ref().unwrap().radio_frame;
+
+            // Safety: The bit counter match guarantees that the frame
+            //         control field has been received.
+            let fc_and_addressing_repr = unsafe { radio_frame.fc_and_addressing_repr() };
+
+            if fc_and_addressing_repr.is_err() {
+                return;
+            }
+
+            let (frame_control, addressing_repr) = fc_and_addressing_repr.unwrap();
+            let addressing_fields_lengths = addressing_repr.addressing_fields_lengths();
+
+            if addressing_fields_lengths.is_err() {
+                return;
+            }
+
+            let seq_nr_len = if frame_control.sequence_number_suppression() {
+                0
+            } else {
+                SEQ_NR_LEN
+            };
+
+            let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths.unwrap();
+            let dst_len = (dst_pan_id_len + dst_addr_len) as usize;
+
+            let pdu_ref = radio_frame.pdu_ref();
+            let mpdu_length = pdu_ref[0] as u16;
+
+            if seq_nr_len == 0 && dst_len == 0 {
+                preliminary_frame_info = Some(PreliminaryFrameInfo {
+                    mpdu_length,
+                    frame_control: Some(frame_control),
                     seq_nr: None,
                     addressing_fields: None,
-                };
+                });
+                return;
             }
-        }
 
-        drop(cleanup_on_drop);
+            let ended = if !ended {
+                // Note: BCMATCH counts are calculated relative to the MPDU
+                //       (i.e. w/o headroom).
+                let bcc = ((FC_LEN + seq_nr_len + dst_len) as u32) << 3;
 
-        let pdu_ref = radio_frame.pdu_ref();
-        let mpdu_length = pdu_ref[0] as u16;
+                // Wait until the sequence number and/or destination address
+                // fields have been received.
+                r.bcc.write(|w| w.bcc().variant(bcc));
 
-        // Safety: The bit counter guarantees that all bytes up to the
-        //         addressing fields have been received.
-        const HEADROOM: usize = 1;
-        let seq_nr = seq_nr_offset.map(|seq_nr_offset| pdu_ref[HEADROOM + seq_nr_offset]);
-        let addressing_fields = addressing_info
-            .map(|(addressing_repr, addressing_offset)| {
-                let addressing_offset = HEADROOM + addressing_offset;
-                let addressing_bytes = &pdu_ref[addressing_offset..];
-                unsafe { AddressingFields::new_unchecked(addressing_bytes, addressing_repr).ok() }
-            })
-            .unwrap_or_default();
+                poll_fn(|_| {
+                    let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
+                    if bcmatch || r.events_end.read().events_end().bit_is_set() {
+                        // Do not clear the end event as it is used in the RX run()
+                        // method. The remaining cleanup will be done by the
+                        // cancel guard.
+                        return Poll::Ready(!bcmatch);
+                    }
+
+                    r.intenset.write(|w| {
+                        w.bcmatch().set_bit();
+                        w.end().set_bit()
+                    });
+                    Poll::Pending
+                })
+                .await
+            } else {
+                true
+            };
+
+            drop(cleanup_on_drop);
+
+            dma_end_fence();
+
+            if ended {
+                if r.events_crcerror.read().events_crcerror().bit_is_set() {
+                    return;
+                } else {
+                    debug_assert!(r.events_crcok.read().events_crcok().bit_is_set());
+                }
+            }
+
+            const HEADROOM: usize = 1;
+
+            let seq_nr_offset = HEADROOM + FC_LEN;
+            let seq_nr = if frame_control.sequence_number_suppression() {
+                None
+            } else {
+                Some(pdu_ref[seq_nr_offset])
+            };
+
+            let addressing_offset = seq_nr_offset + seq_nr_len;
+            let addressing_bytes = &pdu_ref[addressing_offset..];
+
+            // Safety: The bit counter guarantees that all bytes up to the
+            //         addressing fields have been received.
+            let addressing_fields =
+                unsafe { AddressingFields::new_unchecked(addressing_bytes, addressing_repr).ok() };
+
+            preliminary_frame_info = Some(PreliminaryFrameInfo {
+                mpdu_length,
+                frame_control: Some(frame_control),
+                seq_nr,
+                addressing_fields,
+            });
+        };
+        unsafe {
+            self.inner
+                .executor
+                .spawn(capture_preliminary_frame_info)
+                .await
+        };
 
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::marker(TASK_RX_FRAME_INFO);
 
-        PreliminaryFrameInfo {
-            mpdu_length,
-            frame_control,
-            seq_nr,
-            addressing_fields,
-        }
+        preliminary_frame_info.unwrap_or(PreliminaryFrameInfo {
+            mpdu_length: 0,
+            frame_control: None,
+            seq_nr: None,
+            addressing_fields: None,
+        })
     }
 
     fn schedule_rx(
@@ -839,6 +834,8 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         }
 
         let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             rx_task,
@@ -846,7 +843,6 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 let r = Self::radio();
 
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-                dma_start_fence();
 
                 // Enable back-to-back packet reception.
                 //
@@ -907,6 +903,8 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         // PACKETPTR is double buffered so we don't cause a race by setting it
         // while reception might still be ongoing.
         let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             tx_task,
@@ -914,7 +912,6 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 let r = Self::radio();
 
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-                dma_start_fence();
 
                 Self::set_ifs(ifs);
 
@@ -1056,16 +1053,21 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
         }
 
         // Wait until the state enters.
-        core::future::poll_fn(|cx| {
-            if r.events_txready.read().events_txready().bit_is_set() {
-                r.events_txready.reset();
-                Poll::Ready(())
-            } else {
-                RadioInterruptHandler::arm(cx, |w| w.txready().set_bit());
-                Poll::Pending
-            }
-        })
-        .await;
+        unsafe {
+            self.inner
+                .executor
+                .spawn(poll_fn(|_| {
+                    if r.events_txready.read().events_txready().bit_is_set() {
+                        r.intenclr.write(|w| w.txready().set_bit());
+                        r.events_txready.reset();
+                        Poll::Ready(())
+                    } else {
+                        r.intenset.write(|w| w.txready().set_bit());
+                        Poll::Pending
+                    }
+                }))
+                .await;
+        }
 
         Ok(())
     }
@@ -1074,21 +1076,29 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_RUN);
 
-        let r = Self::radio();
-
         // Wait until the task completed.
-        core::future::poll_fn(|cx| {
-            if r.events_end.read().events_end().bit_is_set() {
-                r.events_end.reset();
-                r.events_framestart.reset();
-                let tx_task = self.task.take().unwrap();
-                Poll::Ready(Ok(TxResult::Sent(tx_task.radio_frame)))
-            } else {
-                RadioInterruptHandler::arm(cx, |w| w.end().set_bit());
-                Poll::Pending
-            }
-        })
-        .await
+        unsafe {
+            self.inner
+                .executor
+                .spawn(poll_fn(|_| {
+                    let r = Self::radio();
+                    if r.events_end.read().events_end().bit_is_set() {
+                        r.intenclr.write(|w| w.end().set_bit());
+                        r.events_end.reset();
+                        r.events_framestart.reset();
+                        Poll::Ready(())
+                    } else {
+                        r.intenset.write(|w| w.end().set_bit());
+                        Poll::Pending
+                    }
+                }))
+                .await;
+        }
+
+        dma_end_fence();
+
+        let tx_task = self.task.take().unwrap();
+        Ok(TxResult::Sent(tx_task.radio_frame))
     }
 
     fn exit(&mut self) -> Result<(), SchedulingError> {
@@ -1111,6 +1121,8 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
         }
 
         let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             rx_task,
@@ -1118,7 +1130,6 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 let r = Self::radio();
 
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-                dma_start_fence();
 
                 Self::set_ifs(ifs);
 
@@ -1198,7 +1209,10 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
         }
 
         let cca = tx_task.cca;
+
         let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        dma_start_fence();
+
         RadioTransition::new(
             self,
             tx_task,
@@ -1208,7 +1222,6 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 let r = Self::radio();
 
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-                dma_start_fence();
 
                 Self::set_ifs(ifs);
 
@@ -1337,18 +1350,32 @@ fn prepare_tx_frame(radio_frame: &mut RadioFrame<RadioFrameSized>) -> u32 {
     radio_frame.as_ptr() as u32
 }
 
-/// NOTE: Must be preceded by a volatile write operation to the DMA pointer.
-///
-/// TODO: Is this actually correct?
-/// Also see <https://github.com/rust-lang/unsafe-code-guidelines/issues/260>.
+/// This method must be called after all normal memory write accesses to the
+/// buffer and before the volatile write operation passing the buffer pointer to
+/// DMA hardware.
 fn dma_start_fence() {
+    // Note the explanation re using compiler fences with volatile accesses
+    // rather than atomics in
+    // <https://docs.rust-embedded.org/embedonomicon/dma.html>. The example
+    // there is basically correct except that the fence should be placed before
+    // passing the pointer to the hardware, not after.
+    //
+    // Other relevant sources:
+    // - Interaction between volatile and fence:
+    //   <https://github.com/rust-lang/unsafe-code-guidelines/issues/260>
+    // - RFC re volatile access - including DMA discussions:
+    //   <https://github.com/rust-lang/unsafe-code-guidelines/issues/321#issuecomment-2894697770>
+    // - Compiler fence and DMA:
+    //   <https://users.rust-lang.org/t/compiler-fence-dma/132027/39>
+    // - asm! as memory barrier:
+    //   <https://users.rust-lang.org/t/how-to-correctly-use-asm-as-memory-barrier-llvm-question/132105>
+    // - Why asm! cannot (yet) be used as a barrier:
+    //   <https://github.com/rust-lang/rust/issues/144351>
     compiler_fence(Ordering::Release);
 }
 
-/// NOTE: Must be followed by a volatile read operation to the DMA pointer.
-///
-/// TODO: Is this actually correct?
-/// Also see <https://github.com/rust-lang/unsafe-code-guidelines/issues/260>.
+/// This method must be called after any volatile read operation confirming that
+/// the DMA has finished and before normal memory read accesses to the buffer.
 fn dma_end_fence() {
     compiler_fence(Ordering::Acquire);
 }
