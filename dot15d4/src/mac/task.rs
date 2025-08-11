@@ -9,9 +9,8 @@ use crate::driver::{DrvSvcRequest, DrvSvcResponse};
 /// [`MacTaskEvent::Timeout`] in case a response is not received in time from
 /// the driver service.
 ///
-/// The task is instantiated, entered (see [`MacTaskEvent::Entry`]), driven and
-/// optionally forced to exit (see [`MacTaskEvent::Exit`]) by the MAC service in
-/// its role as an a MAC task executor.
+/// The task is instantiated, entered (see [`MacTaskEvent::Entry`]) and driven
+/// by the MAC service in its role as a MAC task executor.
 pub trait MacTask {
     /// A task MAY produce intermediate and final results while being executed.
     type Result;
@@ -24,8 +23,6 @@ pub trait MacTask {
     /// - [`MacTaskEvent::Entry`]: The task has just been initialized.
     /// - [`MacTaskEvent::DrvSvcResponse`]: The driver service returned a
     ///   response to a pending request from the state machine.
-    /// - [`MacTaskEvent::Timeout`]: The transition timed out.
-    /// - [`MacTaskEvent::Poll`]: The task previously returned
     fn step(self, event: MacTaskEvent) -> MacTaskTransition<Self>
     where
         Self: Sized;
@@ -72,8 +69,5 @@ pub enum MacTaskTransition<Task: MacTask> {
 
     /// Signals to the executor that the state machine exited, possibly with a
     /// final result.
-    ///
-    /// This transition SHALL be mandatory in case the MAC task is stepped with
-    /// an [`MacTaskEvent::Exit`] event.
     Terminated(Task::Result),
 }
