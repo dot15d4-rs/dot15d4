@@ -699,7 +699,9 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
                 // Safety: The bit counter match guarantees that the frame
                 //         control field has been received.
-                let (fc, addressing_repr) = unsafe { radio_frame.fc_and_addressing_repr() };
+                let fc_and_addressing_repr = unsafe { radio_frame.fc_and_addressing_repr() };
+                // TODO: Deal with error result.
+                let (fc, addressing_repr) = fc_and_addressing_repr.unwrap();
                 let (seq_nr_len, seq_nr_offset) = if fc.sequence_number_suppression() {
                     (0, None)
                 } else {
@@ -708,10 +710,8 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
                 // Note: BCMATCH counts are calculated relative to the MPDU
                 //       (i.e. w/o headroom).
-                let (fc, addressing_info, bcc_bytes) = if let Some(addressing_repr) =
-                    addressing_repr
-                {
-                    let addressing_fields_lengths = addressing_repr.addressing_fields_lengths();
+                let addressing_fields_lengths = addressing_repr.addressing_fields_lengths();
+                let (fc, addressing_info, bcc_bytes) =
                     if let Ok(addressing_fields_lengths) = addressing_fields_lengths {
                         let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths;
                         (
@@ -725,14 +725,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                             None,
                             seq_nr_offset.map(|seq_nr_offset| seq_nr_offset + SEQ_NR_LEN as usize),
                         )
-                    }
-                } else {
-                    (
-                        None,
-                        None,
-                        seq_nr_offset.map(|seq_nr_offset| seq_nr_offset + SEQ_NR_LEN as usize),
-                    )
-                };
+                    };
 
                 if let Some(bcc) = bcc_bytes {
                     r.bcc.write(|w| w.bcc().variant((bcc as u32) << 3));

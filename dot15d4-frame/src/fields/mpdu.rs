@@ -340,15 +340,9 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithFrameContr
     pub fn parse_addressing(
         self,
     ) -> SimplifiedResult<MpduParser<ReadOnlyMpdu, MpduWithAddressing>> {
-        let addressing = match AddressingRepr::from_frame_control(self.frame_control()) {
-            Ok(result) => result,
-            Err(_) => return Err(Error),
-        };
-        let mpdu_field_ranges = if let Some(addressing) = addressing {
-            match self.mpdu_field_ranges.with_addressing(addressing) {
-                Ok(result) => result,
-                Err(_) => return Err(Error),
-            }
+        let addressing = AddressingRepr::from_frame_control(self.frame_control())?;
+        let mpdu_field_ranges = if addressing.addressing_fields_length()? > 0 {
+            self.mpdu_field_ranges.with_addressing(addressing)?
         } else {
             self.mpdu_field_ranges.without_addressing()
         };
@@ -369,15 +363,9 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>>
     pub fn parse_addressing_mut(
         self,
     ) -> SimplifiedResult<MpduParser<ReadWriteMpdu, MpduWithAddressing>> {
-        let addressing = match AddressingRepr::from_frame_control(self.frame_control()) {
-            Ok(result) => result,
-            Err(_) => return Err(Error),
-        };
-        let mpdu_field_ranges = if let Some(addressing) = addressing {
-            match self.mpdu_field_ranges.with_addressing(addressing) {
-                Ok(result) => result,
-                Err(_) => return Err(Error),
-            }
+        let addressing = AddressingRepr::from_frame_control(self.frame_control())?;
+        let mpdu_field_ranges = if addressing.addressing_fields_length()? > 0 {
+            self.mpdu_field_ranges.with_addressing(addressing)?
         } else {
             self.mpdu_field_ranges.without_addressing()
         };
@@ -438,8 +426,7 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduParsedUpToAddressing>
     /// Read-only addressing field access.
     pub fn addressing_fields(&self) -> SimplifiedResult<Option<AddressingFields<&[u8]>>> {
         let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr =
-            AddressingRepr::from_frame_control(self.frame_control())?.ok_or(Error)?;
+        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
 
         // Safety: Addressing representation and range are both synced with the
         //         frame control field.
@@ -464,8 +451,7 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAd
         &mut self,
     ) -> SimplifiedResult<Option<AddressingFields<&mut [u8]>>> {
         let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr =
-            AddressingRepr::from_frame_control(self.frame_control())?.ok_or(Error)?;
+        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
 
         // Safety: Addressing representation and range are both synced with the
         //         frame control field.
@@ -486,8 +472,7 @@ impl<'mpdu, State: MpduParsedUpToAddressing> MpduParser<&'mpdu MpduFrame, State>
     /// MPDU's addressing fields instead.
     pub fn into_addressing_fields(self) -> SimplifiedResult<Option<AddressingFields<&'mpdu [u8]>>> {
         let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr =
-            AddressingRepr::from_frame_control(self.frame_control())?.ok_or(Error)?;
+        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
 
         // Safety: Addressing representation and range are both synced with the
         //         frame control field.

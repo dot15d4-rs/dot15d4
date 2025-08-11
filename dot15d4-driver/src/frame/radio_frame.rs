@@ -3,6 +3,7 @@ use core::{fmt::Debug, marker::PhantomData, mem, num::NonZero, ops::Range, ptr};
 use dot15d4_util::{
     allocator::{BufferAllocator, BufferToken, IntoBuffer},
     frame::{Frame, FramePdu},
+    Result,
 };
 
 use crate::{
@@ -86,10 +87,10 @@ impl<State> RadioFrame<State> {
     /// # Safety
     ///
     /// See [`Self::frame_control()`].
-    pub unsafe fn fc_and_addressing_repr(&self) -> (FrameControl<[u8; 2]>, Option<AddressingRepr>) {
+    pub unsafe fn fc_and_addressing_repr(&self) -> Result<(FrameControl<[u8; 2]>, AddressingRepr)> {
         let fc = self.fc();
-        let addressing_repr = AddressingRepr::from_frame_control(fc.clone()).unwrap_or_default();
-        (fc, addressing_repr)
+        let addressing_repr = AddressingRepr::from_frame_control(fc.clone())?;
+        Ok((fc, addressing_repr))
     }
 
     pub fn max_frame_length_wo_fcs(&self) -> u16 {
