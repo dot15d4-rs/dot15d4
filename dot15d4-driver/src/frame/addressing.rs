@@ -757,7 +757,7 @@ impl AddressingRepr {
     /// Safety: The frame version and addressing modes must be known.
     pub fn from_frame_control<Bytes: AsRef<[u8]>>(
         frame_control: FrameControl<Bytes>,
-    ) -> Result<Option<Self>> {
+    ) -> Result<Self> {
         let dst = frame_control.dst_addressing_mode();
         let src = frame_control.src_addressing_mode();
         let frame_version = frame_control.frame_version();
@@ -815,11 +815,6 @@ impl AddressingRepr {
         };
 
         let addressing = Self::new(dst, src, pan_ids_equal, pan_id_compression);
-        let addressing = if addressing.addressing_fields_length()? == 0 {
-            None
-        } else {
-            Some(addressing)
-        };
         Ok(addressing)
     }
 
