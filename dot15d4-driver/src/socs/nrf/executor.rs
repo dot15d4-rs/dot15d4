@@ -362,3 +362,4 @@ macro_rules! nrf_interrupt_executor {
 }
 
 nrf_interrupt_executor!(swi0, SWI0_EGU0, SWI0);
+nrf_interrupt_executor!(radio, RADIO, RADIO);
