@@ -489,7 +489,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         )
     }
 
-    async fn switch_off() -> Self {
+    async fn switch_off(inner: NrfRadioDriver) -> Self {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_FALL_BACK);
 
@@ -497,7 +497,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             at: Timestamp::BestEffort,
         });
         let mut off_state = Self {
-            inner: NrfRadioDriver,
+            inner,
             task: off_task,
         };
 

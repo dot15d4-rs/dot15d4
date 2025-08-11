@@ -499,7 +499,7 @@ pub trait OffState<RadioDriverImpl>: RadioState<TaskOff> {
     /// state under all conditions. If this is not possible, it SHALL panic.
     ///
     /// Note: May panic.
-    fn switch_off() -> impl Future<Output = Self>;
+    fn switch_off(inner: RadioDriverImpl) -> impl Future<Output = Self>;
 }
 
 pub struct PreliminaryFrameInfo<'frame> {
@@ -885,7 +885,7 @@ where
         };
         let next_state_entry = next_state.transition().await;
 
-        let fallback = |next_task_error, prev_task_result| async {
+        let fallback = |next_task_error, prev_task_result, inner| async {
             #[cfg(feature = "rtos-trace")]
             rtos_trace::trace::task_exec_end();
 
@@ -893,14 +893,14 @@ where
                 RadioTransitionResult {
                     prev_task_result,
                     prev_state: PhantomData,
-                    this_state: RadioDriver::<RadioDriverImpl, TaskOff>::switch_off().await,
+                    this_state: RadioDriver::<RadioDriverImpl, TaskOff>::switch_off(inner).await,
                 },
                 next_task_error,
             )
         };
 
         if let Err(next_task_error) = (self.cleanup)() {
-            return fallback(next_task_error, prev_task_result).await;
+            return fallback(next_task_error, prev_task_result, next_state.inner).await;
         }
 
         match next_state_entry {
@@ -909,7 +909,9 @@ where
                 prev_state: PhantomData,
                 this_state: next_state,
             }),
-            Err(next_task_error) => fallback(next_task_error, prev_task_result).await,
+            Err(next_task_error) => {
+                fallback(next_task_error, prev_task_result, next_state.inner).await
+            }
         }
     }
 }
@@ -996,7 +998,10 @@ where
                 RadioTransitionResult {
                     prev_task_result,
                     prev_state: PhantomData,
-                    this_state: RadioDriver::<RadioDriverImpl, TaskOff>::switch_off().await,
+                    this_state: RadioDriver::<RadioDriverImpl, TaskOff>::switch_off(
+                        self.from_radio.inner,
+                    )
+                    .await,
                 },
                 next_task_error,
             );
