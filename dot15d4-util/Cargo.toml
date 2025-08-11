@@ -15,8 +15,8 @@ typenum = "1.18"
 defmt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 
-rtos-trace = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", optional = true }
-systemview-target = { git = "https://gitlab.com/fgcfh/rtos-trace.git", branch = "dev", features = [
+rtos-trace = { version = "0.2", optional = true }
+systemview-target = { version = "0.2", features = [
     "log",
     "callbacks-app",
     "callbacks-os",  # required for embassy integration
