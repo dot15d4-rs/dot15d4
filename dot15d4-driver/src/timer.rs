@@ -70,7 +70,7 @@ pub struct TimedSignal {
 }
 
 impl TimedSignal {
-    pub fn new(instant: SyntonizedInstant, signal: HardwareSignal) -> Self {
+    pub const fn new(instant: SyntonizedInstant, signal: HardwareSignal) -> Self {
         Self { instant, signal }
     }
 }
