@@ -119,6 +119,13 @@ impl Alarm {
 const NUM_ALARM_CHANNELS: usize = AlarmChannel::NumAlarmChannels as usize;
 const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] = [AlarmChannel::Cpu, AlarmChannel::Event];
 
+#[repr(u8)]
+enum InitializationState {
+    Uninitialized,
+    Initializing,
+    Initialized,
+}
+
 /// The nRF radio timer implements a shared, globally syntonized, monotonic,
 /// overflow-protected uptime "wall clock". It combines a low-energy RTC sleep
 /// timer peripheral with a high-resolution wake-up TIMER peripheral.
@@ -129,7 +136,9 @@ const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] = [AlarmChannel::Cpu, A
 // Safety: As we are on the single-core nRF platform we don't need to
 //         synchronize atomic operations via CPU memory barriers. It is
 //         sufficient to place appropriate compiler fences.
-pub struct NrfRadioTimer {
+struct State {
+    init_state: AtomicU8,
+
     /// Number of half counter periods elapsed since boot.
     ///
     /// Safety: This needs to be atomic as it will be shared between the
@@ -139,6 +148,8 @@ pub struct NrfRadioTimer {
     half_period: AtomicU32,
 
     /// Independent alarm channels supported by the RTC driver.
+    ///
+    /// Safety: Alarms are Sync.
     alarms: [Alarm; NUM_ALARM_CHANNELS],
 
     /// The PPI channel used for GPIO event triggering.
@@ -148,7 +159,7 @@ pub struct NrfRadioTimer {
     ppi_gpiote_out_channel: AtomicUsize,
 }
 
-impl NrfRadioTimer {
+impl State {
     const RTC_FREQUENCY: TimerRateU32<32_768> = TimerRateU32::from_raw(1);
 
     const RTC_THREE_QUARTERS_PERIOD: u64 = 0xc00000;
@@ -157,6 +168,7 @@ impl NrfRadioTimer {
 
     const fn new() -> Self {
         Self {
+            init_state: AtomicU8::new(InitializationState::Uninitialized as u8),
             half_period: AtomicU32::new(0),
             alarms: [Alarm::new(), Alarm::new()],
             ppi_gpiote_out_channel: AtomicUsize::new(0),
@@ -178,12 +190,13 @@ impl NrfRadioTimer {
         unsafe { Peripherals::steal() }.PPI
     }
 
-    /// Takes exclusive ownership of the RTC peripheral and initializes the
-    /// driver.
+    /// Takes exclusive ownership of the RTC and TIMER peripherals and
+    /// initializes the driver.
     ///
     /// This must be called during early initialization before any concurrent
     /// critical sections may be active.
     pub fn init(
+        &self,
         rtc: RTC0,
         timer: TIMER0,
         gpiote: &GPIOTE,
@@ -194,6 +207,13 @@ impl NrfRadioTimer {
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::instrument();
 
+        assert_eq!(
+            STATE
+                .init_state
+                .swap(InitializationState::Initializing as u8, Ordering::AcqRel),
+            InitializationState::Uninitialized as u8
+        );
+
         debug_assert!(ppi_gpiote_out_channel <= 19);
         let gpiote_out_task = gpiote.tasks_out[gpiote_channel].as_ptr();
         ppi.ch[ppi_gpiote_out_channel]
@@ -203,7 +223,7 @@ impl NrfRadioTimer {
         // Safety: The channel has been asserted to be in range.
         ppi.chenset
             .write(|w| unsafe { w.bits(1 << ppi_gpiote_out_channel) });
-        INSTANCE
+        STATE
             .ppi_gpiote_out_channel
             .store(ppi_gpiote_out_channel, Ordering::Relaxed);
 
@@ -242,6 +262,17 @@ impl NrfRadioTimer {
         //         concurrent critical sections.
         unsafe { NVIC::unmask(interrupt::RTC0) };
         unsafe { NVIC::unmask(interrupt::TIMER0) };
+
+        STATE
+            .init_state
+            .store(InitializationState::Initialized as u8, Ordering::Release);
+    }
+
+    fn assert_initialized(&self) {
+        debug_assert_eq!(
+            self.init_state.load(Ordering::Acquire),
+            InitializationState::Initialized as u8
+        );
     }
 
     /// Sets the alarm's RTC and TIMER ticks.
@@ -495,7 +526,7 @@ impl NrfRadioTimer {
         // is not safe because the RTC can tick from N to N+1 between calling
         // now() and writing to the CC register.
         let rtc_now_tick = self.rtc_now_tick();
-        if rtc_tick <= rtc_now_tick + NrfRadioTimer::RTC_GUARD_TICKS {
+        if rtc_tick <= rtc_now_tick + State::RTC_GUARD_TICKS {
             self.fire_alarm(channel);
             return RadioTimerResult::Overdue;
         }
@@ -709,14 +740,14 @@ impl NrfRadioTimer {
     }
 }
 
-static INSTANCE: NrfRadioTimer = NrfRadioTimer::new();
+static STATE: State = State::new();
 
 #[interrupt]
 fn RTC0() {
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_enter();
 
-    INSTANCE.on_rtc_interrupt();
+    STATE.on_rtc_interrupt();
 
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_exit();
@@ -727,10 +758,39 @@ fn TIMER0() {
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_enter();
 
-    INSTANCE.on_timer_interrupt();
+    STATE.on_timer_interrupt();
 
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_exit();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NrfRadioTimer {
+    // Private field to inhibit direct instantiation.
+    inner: (),
+}
+
+impl NrfRadioTimer {
+    /// Instantiate the timer for the first time. Consumes the required
+    /// peripherals. Further copies can then be created.
+    pub fn new(
+        rtc: RTC0,
+        timer: TIMER0,
+        gpiote: &GPIOTE,
+        gpiote_channel: usize,
+        ppi: &PPI,
+        ppi_gpiote_out_channel: usize,
+    ) -> Self {
+        STATE.init(
+            rtc,
+            timer,
+            gpiote,
+            gpiote_channel,
+            ppi,
+            ppi_gpiote_out_channel,
+        );
+        Self { inner: () }
+    }
 }
 
 // Tick-to-ns conversion (and back).
@@ -740,7 +800,7 @@ impl NrfRadioTimer {
     const MAX_NS: u128 = u64::MAX as u128;
     const NS_PER_S: u128 = 1_000_000_000;
     const MAX_RTC_TICKS: u64 =
-        ((Self::MAX_NS * NrfRadioTimer::RTC_FREQUENCY.to_Hz() as u128) / Self::NS_PER_S) as u64;
+        ((Self::MAX_NS * State::RTC_FREQUENCY.to_Hz() as u128) / Self::NS_PER_S) as u64;
 
     const fn rtc_tick_to_instant(rtc_tick: u64) -> SyntonizedInstant {
         debug_assert!(rtc_tick <= Self::MAX_RTC_TICKS);
@@ -753,7 +813,7 @@ impl NrfRadioTimer {
         //              = (ticks * (10^9 / 2^15)) ns
         //              = (ticks * (5^9 / 2^6)) ns
         //              = ((ticks * 5^9) >> 6) ns
-        const _: () = assert!(NrfRadioTimer::RTC_FREQUENCY.to_Hz() == 2_u32.pow(15));
+        const _: () = assert!(State::RTC_FREQUENCY.to_Hz() == 2_u32.pow(15));
 
         // Safety: Representing MAX_RTC_TICKS requires 50 bits. Multiplying by
         //         5^9 requires another 21 bits. We therefore have to calculate
@@ -845,26 +905,33 @@ impl NrfRadioTimer {
 }
 
 impl RadioTimerApi for NrfRadioTimer {
-    fn now() -> SyntonizedInstant {
-        let rtc_tick = INSTANCE.rtc_now_tick();
+    fn now(&self) -> SyntonizedInstant {
+        STATE.assert_initialized();
+
+        let rtc_tick = STATE.rtc_now_tick();
         Self::rtc_tick_to_instant(rtc_tick)
     }
 
-    async unsafe fn wait_until(instant: SyntonizedInstant) -> RadioTimerResult {
+    async unsafe fn wait_until(&self, instant: SyntonizedInstant) -> RadioTimerResult {
+        STATE.assert_initialized();
+
         let (rtc_tick, _) = Self::instant_to_alarm_ticks(instant);
 
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::record_schedule_alarm(instant.ticks() as u32, rtc_tick as u32);
 
-        INSTANCE
+        STATE
             .wait_for_alarm(rtc_tick, 0, AlarmChannel::Cpu, None)
             .await
     }
 
     async unsafe fn schedule_event(
+        &self,
         instant: SyntonizedInstant,
         signal: HardwareSignal,
     ) -> RadioTimerResult {
+        STATE.assert_initialized();
+
         let (rtc_tick, remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
 
         #[cfg(feature = "rtos-trace")]
@@ -874,7 +941,7 @@ impl RadioTimerApi for NrfRadioTimer {
             remaining_timer_ticks as u32,
         );
 
-        INSTANCE
+        STATE
             .wait_for_alarm(
                 rtc_tick,
                 remaining_timer_ticks,

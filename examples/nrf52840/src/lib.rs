@@ -58,8 +58,9 @@ pub struct AvailablePeripherals {
 }
 
 pub fn config_peripherals() -> (
-    Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
     AvailablePeripherals,
+    Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
+    NrfRadioTimer,
 ) {
     let peripherals = Peripherals::take().unwrap();
     let core_peripherals = CorePeripherals::take().unwrap();
@@ -82,7 +83,7 @@ pub fn config_peripherals() -> (
         PpiChannel::RtcTickGpiote as usize,
     );
 
-    NrfRadioTimer::init(
+    let timer = NrfRadioTimer::new(
         peripherals.RTC0,
         peripherals.TIMER0,
         &peripherals.GPIOTE,
@@ -97,7 +98,7 @@ pub fn config_peripherals() -> (
         rng: peripherals.RNG,
         swi0: peripherals.SWI0,
     };
-    (clocks, available_peripherals)
+    (available_peripherals, clocks, timer)
 }
 
 fn config_reset(uicr: &UICR, nvmc: &NVMC, scb: &SCB) {

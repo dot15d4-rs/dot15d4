@@ -23,12 +23,11 @@ use self::{
     frame::{
         is_frame_valid_and_for_us, RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
     },
-    radio::{DriverConfig, RadioDriverApi},
+    radio::{DriverConfig, RadioDriver, RadioDriverApi},
     tasks::{
-        CompletedRadioTransition, ExternalRadioTransition, Ifs, OffResult, OffState, RadioDriver,
-        RadioTask, RadioTaskError, RxError, RxResult, RxState, SelfRadioTransition,
-        TaskOff as RadioTaskOff, TaskRx as RadioTaskRx, TaskTx as RadioTaskTx, Timestamp, TxResult,
-        TxState,
+        CompletedRadioTransition, ExternalRadioTransition, Ifs, OffResult, OffState, RadioTask,
+        RadioTaskError, RxError, RxResult, RxState, SelfRadioTransition, TaskOff as RadioTaskOff,
+        TaskRx as RadioTaskRx, TaskTx as RadioTaskTx, Timestamp, TxResult, TxState,
     },
     timer::{RadioTimerApi, SymbolsOQpsk250Duration, SyntonizedDuration},
 };
@@ -228,7 +227,7 @@ pub type DriverRequestSender<'channel> = Sender<
 /// different states when looping. This allows us to implement the scheduler as
 /// an event loop while still reaping all benefits of a behaviorally typed radio
 /// driver.
-enum DriverState<RadioDriverImpl> {
+enum DriverState<RadioDriverImpl: DriverConfig> {
     /// We are currently sending a frame.
     Tx(
         RadioDriver<RadioDriverImpl, RadioTaskTx>,
@@ -248,7 +247,7 @@ enum DriverState<RadioDriverImpl> {
 
 /// Structure managing a given driver implementation. Knows about and manages
 /// individual driver capabilities and exposes a unified API to the MAC service.
-pub struct DriverService<'svc, RadioDriverImpl> {
+pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
     /// The current radio driver state.
     driver_state: Cell<Option<DriverState<RadioDriverImpl>>>,
 
@@ -1099,11 +1098,9 @@ where
         // Safety: The driver service either runs from the main task or from a
         //         low-priority service handler. We don't migrate this future
         //         while polling it.
-        let timeout = unsafe {
-            RadioDriverImpl::Timer::wait_until(
-                RadioDriverImpl::Timer::now() + Self::DRIVER_RX_ACK_TIMEOUT,
-            )
-        };
+        // TODO: Replace with timed Rx.
+        let timer = rx_driver.timer();
+        let timeout = unsafe { timer.wait_until(timer.now() + Self::DRIVER_RX_ACK_TIMEOUT) };
 
         let next_task_ifs = Ifs::from_mpdu_length(tx_radio_frame.sdu_length().get());
         match select(rx_driver.frame_started(), timeout).await {

@@ -54,14 +54,14 @@ pub enum HardwareSignal {
     TogglePin(Pin),
 }
 
-pub trait RadioTimerApi: Sized {
+pub trait RadioTimerApi: Copy {
     /// Returns the current syntonized instant.
     ///
     /// Note: This method involves the CPU and therefore will always introduce
     ///       some latency. The timer might have ticked concurrently in the
     ///       meantime and/or a syntonization event not reflected in the
     ///       returned value might have arrived.
-    fn now() -> SyntonizedInstant;
+    fn now(&self) -> SyntonizedInstant;
 
     /// Waits until the given instant, then wakes the current task. Only the
     /// sleep timer will be used, keeps the high-precision timer off.
@@ -85,7 +85,10 @@ pub trait RadioTimerApi: Sized {
     ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
     ///   subsequent invocations of the method, though.
     #[allow(dead_code)]
-    unsafe fn wait_until(instant: SyntonizedInstant) -> impl Future<Output = RadioTimerResult>;
+    unsafe fn wait_until(
+        &self,
+        instant: SyntonizedInstant,
+    ) -> impl Future<Output = RadioTimerResult>;
 
     /// Schedule a hardware event, i.e. programs a signal to be sent over the
     /// event bus at a precise instant.
@@ -112,6 +115,7 @@ pub trait RadioTimerApi: Sized {
     ///   subsequent invocations of the method, though.
     ///
     unsafe fn schedule_event(
+        &self,
         instant: SyntonizedInstant,
         signal: HardwareSignal,
     ) -> impl Future<Output = RadioTimerResult>;

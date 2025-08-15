@@ -63,17 +63,19 @@ mod test {
         repr::{MpduRepr, SeqNrRepr},
         MpduWithIes,
     };
+    #[derive(Clone, Copy)]
     struct FakeRadioTimer;
     impl RadioTimerApi for FakeRadioTimer {
-        fn now() -> SyntonizedInstant {
+        fn now(&self) -> SyntonizedInstant {
             todo!()
         }
 
-        async unsafe fn wait_until(_: SyntonizedInstant) -> RadioTimerResult {
+        async unsafe fn wait_until(&self, _: SyntonizedInstant) -> RadioTimerResult {
             todo!()
         }
 
         async unsafe fn schedule_event(
+            &self,
             _: SyntonizedInstant,
             _: HardwareSignal,
         ) -> RadioTimerResult {
