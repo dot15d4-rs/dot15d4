@@ -94,9 +94,10 @@ impl From<DrvSvcTaskRx> for DrvSvcRequest {
 /// Represents a driver service task error.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DrvSvcTaskError<Task: DriverServiceTask> {
-    /// Any interaction with the radio may fail and clients will have to deal
-    /// with this.
-    RadioError,
+    /// The task could not be scheduled in time.
+    ///
+    /// Recovers the task that could not be scheduled.
+    SchedulingError(Task),
 
     /// The driver service task itself failed.
     Task(Task::Error),
@@ -124,7 +125,9 @@ impl From<OffResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskOff>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskOff>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Off(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(off_task) => {
+                DrvSvcResponse::Off(Err(DrvSvcTaskError::SchedulingError(off_task)))
+            }
             RadioTaskError::Task(off_error) => {
                 DrvSvcResponse::Off(Err(DrvSvcTaskError::Task(off_error)))
             }
@@ -141,7 +144,9 @@ impl From<TxResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskTx>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskTx>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Tx(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(tx_task) => {
+                DrvSvcResponse::Tx(Err(DrvSvcTaskError::SchedulingError(tx_task)))
+            }
             RadioTaskError::Task(tx_error) => {
                 DrvSvcResponse::Tx(Err(DrvSvcTaskError::Task(tx_error)))
             }
@@ -158,7 +163,9 @@ impl From<RxResult> for DrvSvcResponse {
 impl From<RadioTaskError<RadioTaskRx>> for DrvSvcResponse {
     fn from(value: RadioTaskError<RadioTaskRx>) -> Self {
         match value {
-            RadioTaskError::Scheduling(_) => DrvSvcResponse::Rx(Err(DrvSvcTaskError::RadioError)),
+            RadioTaskError::Scheduling(rx_task) => {
+                DrvSvcResponse::Rx(Err(DrvSvcTaskError::SchedulingError(rx_task)))
+            }
             RadioTaskError::Task(rx_error) => {
                 DrvSvcResponse::Rx(Err(DrvSvcTaskError::Task(rx_error)))
             }
@@ -481,7 +488,7 @@ where
 
         match rx_driver
             .schedule_tx(tx_ack_task, Ifs::Aifs, true)
-            .execute_transition()
+            .complete_and_transition()
             .await
         {
             // CRC ok: Send the received frame back to the client and update the
@@ -590,7 +597,7 @@ where
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                     match rx_driver
                         .schedule_tx(tx_task, next_task_ifs, false)
-                        .execute_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -634,7 +641,7 @@ where
                     // scheduling RX back-to-back is ok.
                     match rx_driver
                         .schedule_rx(rx_task, false)
-                        .execute_transition()
+                        .run_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -664,7 +671,7 @@ where
                     },
                     true,
                 )
-                .execute_transition()
+                .complete_and_transition()
                 .await
             {
                 CompletedRadioTransition::Entered(transition_result) => {
@@ -726,7 +733,7 @@ where
         };
         match rx_driver
             .schedule_rx(rx_task, false)
-            .execute_transition()
+            .run_and_transition()
             .await
         {
             CompletedRadioTransition::Entered(transition_result) => {
@@ -813,7 +820,7 @@ where
                 let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                 match rx_driver
                     .schedule_tx(tx_task, Ifs::None, false)
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -876,7 +883,7 @@ where
                 };
                 match rx_driver
                     .schedule_off(off_task, false)
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -955,7 +962,7 @@ where
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                     match tx_driver
                         .schedule_tx(tx_task, next_task_ifs)
-                        .execute_transition()
+                        .run_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -1006,7 +1013,7 @@ where
                 DrvSvcRequest::Rx(rx_task) => {
                     match tx_driver
                         .schedule_rx(rx_task, next_task_ifs)
-                        .execute_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -1034,7 +1041,7 @@ where
                     .schedule_off(RadioTaskOff {
                         at: Timestamp::BestEffort,
                     })
-                    .execute_transition()
+                    .complete_and_transition()
                     .await
                 {
                     CompletedRadioTransition::Entered(transition_result) => {
@@ -1074,7 +1081,7 @@ where
         };
         let (mut rx_driver, tx_radio_frame) = match tx_driver
             .schedule_rx(rx_ack_task, Ifs::None)
-            .execute_transition()
+            .complete_and_transition()
             .await
         {
             CompletedRadioTransition::Entered(transition_result) => {
@@ -1148,7 +1155,11 @@ where
                 DrvSvcRequest::Tx(tx_task) => {
                     let tx_task_ack_seq_nr = tx_task.radio_frame.ack_seq_num();
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
-                    match off_driver.schedule_tx(tx_task).execute_transition().await {
+                    match off_driver
+                        .schedule_tx(tx_task)
+                        .complete_and_transition()
+                        .await
+                    {
                         CompletedRadioTransition::Entered(transition_result) => {
                             let tx_driver = transition_result.this_state;
                             break (
@@ -1170,7 +1181,11 @@ where
                     }
                 }
                 DrvSvcRequest::Rx(rx_task) => {
-                    match off_driver.schedule_rx(rx_task).execute_transition().await {
+                    match off_driver
+                        .schedule_rx(rx_task)
+                        .complete_and_transition()
+                        .await
+                    {
                         CompletedRadioTransition::Entered(transition_result) => {
                             let rx_driver = transition_result.this_state;
                             break (DriverState::Rx(rx_driver), next_response_token);

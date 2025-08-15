@@ -129,7 +129,7 @@ pub trait RadioDriverApi {
 ///      scheduled. Not defined in the UML standard but required in practice to
 ///      pre-program the transition effect or to trigger the subsequent state's
 ///      entry behavior or do activity.
-///   2. "on_task_complete": Executes when the transition is actually triggered
+///   2. "on_completed": Executes when the transition is actually triggered
 ///      (either on "do activity" completion or immediately when the "do
 ///      activity" already finished). Albeit similar, this does NOT corresponds
 ///      to UML's notion of a transition effect as it is executed _before_ any
