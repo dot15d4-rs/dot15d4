@@ -1,5 +1,3 @@
-use rand_core::RngCore;
-
 use crate::{driver::radio::DriverConfig, mac::MacService};
 
 #[allow(dead_code)]
@@ -12,7 +10,7 @@ pub enum PurgeError {
 }
 
 #[allow(dead_code)]
-impl<'svc, Rng: RngCore, RadioDriverImpl: DriverConfig> MacService<'svc, Rng, RadioDriverImpl> {
+impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// Allows a higher layer to purge an MSDU from the transaction
     /// queue.
     async fn purge_request(&mut self) -> Result<PurgeConfirm, PurgeError> {

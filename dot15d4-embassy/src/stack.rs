@@ -5,7 +5,6 @@ use dot15d4::{
         radio::{DriverConfig, RadioDriver, RadioDriverApi},
         tasks::{OffState, RxState, TaskOff, TaskRx, TaskTx, TxState},
     },
-    export::*,
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},
     Device,
 };
@@ -71,10 +70,10 @@ where
     RadioDriver<RadioDriverImpl, TaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
-    pub async fn run<Rng: RngCore>(&self, rng: Rng) -> ! {
+    pub async fn run(&self) -> ! {
         let radio = self.radio.take().expect("already running");
         let timer = radio.timer();
-        let device = Device::new(radio, rng);
+        let device = Device::new(radio);
         device
             .run(
                 self.buffer_allocator,

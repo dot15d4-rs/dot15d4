@@ -49,7 +49,6 @@ pub mod export {
     pub use nrf52840_hal::{
         clocks::{Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted},
         pac,
-        rng::Rng,
     };
 }
 

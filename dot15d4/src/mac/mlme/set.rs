@@ -1,9 +1,7 @@
-#![allow(dead_code)]
-use rand_core::RngCore;
-
 use crate::{driver::radio::DriverConfig, mac::MacService};
 
 pub enum SetError {
+    #[allow(dead_code)]
     InvalidParameter,
 }
 
@@ -17,7 +15,7 @@ pub enum SetRequestAttribute {
 }
 
 #[allow(dead_code)]
-impl<'svc, Rng: RngCore, RadioDriverImpl: DriverConfig> MacService<'svc, Rng, RadioDriverImpl> {
+impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// Used by the next higher layer to attempt to write the given value to
     /// the indicated MAC PIB attribute.
     ///
