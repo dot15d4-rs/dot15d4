@@ -5,7 +5,7 @@ use panic_probe as _;
 
 use dot15d4_driver::{
     radio::RadioDriver,
-    socs::nrf::{export::*, NrfRadioDriver},
+    socs::nrf::NrfRadioDriver,
     timer::{RadioTimerApi, RadioTimerResult, SyntonizedDuration},
 };
 use dot15d4_embassy::{
@@ -48,7 +48,7 @@ async fn main(spawner: Spawner) {
     let driver = radio_stack.driver();
 
     // We spawn the task that will control the CSMA task
-    let ieee802154_task = ieee802154_task(radio_stack, peripherals.rng).unwrap();
+    let ieee802154_task = ieee802154_task(radio_stack).unwrap();
     #[cfg(feature = "rtos-trace")]
     ieee802154_task.metadata().set_name("dot15d4\0");
     spawner.spawn(ieee802154_task);
@@ -120,12 +120,8 @@ async fn main(spawner: Spawner) {
 
 /// Run Radio stack in the background
 #[embassy_executor::task]
-async fn ieee802154_task(
-    radio_stack: &'static Ieee802154Stack<NrfRadioDriver>,
-    p_rng: pac::RNG,
-) -> ! {
-    let rng = Rng::new(p_rng);
-    radio_stack.run(rng).await
+async fn ieee802154_task(radio_stack: &'static Ieee802154Stack<NrfRadioDriver>) -> ! {
+    radio_stack.run().await
 }
 
 #[embassy_executor::task]

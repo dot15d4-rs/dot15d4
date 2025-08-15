@@ -3,8 +3,7 @@
 use dot15d4_driver::socs::nrf::{
     export::{
         pac::{
-            CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, PPI, RADIO, RNG, RTC0, SCB, SWI0,
-            UICR,
+            CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, PPI, RADIO, RTC0, SCB, SWI0, UICR,
         },
         Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
     },
@@ -53,7 +52,6 @@ pub const PIN_TICK: GpioteConfig = GpioteConfig::new(GpioteChannel::Tick, GpioPo
 pub struct AvailablePeripherals {
     pub gpiote: GPIOTE,
     pub radio: RADIO,
-    pub rng: RNG,
     pub swi0: SWI0,
 }
 
@@ -95,7 +93,6 @@ pub fn config_peripherals() -> (
     let available_peripherals = AvailablePeripherals {
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
-        rng: peripherals.RNG,
         swi0: peripherals.SWI0,
     };
     (available_peripherals, clocks, timer)

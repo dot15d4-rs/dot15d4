@@ -1,8 +1,6 @@
 #![allow(dead_code)]
 use core::ops::RangeInclusive;
 
-use rand_core::RngCore;
-
 use crate::{driver::radio::DriverConfig, mac::MacService};
 
 pub enum ScanType {
@@ -39,7 +37,7 @@ pub enum ScanError {
     InvalidParameter,
 }
 
-impl<'svc, Rng: RngCore, RadioDriverImpl: DriverConfig> MacService<'svc, Rng, RadioDriverImpl> {
+impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// Initiates a channel scan over a given set of channels.
     pub(crate) async fn mlme_scan_request(
         &self,

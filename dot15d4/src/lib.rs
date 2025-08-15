@@ -4,12 +4,6 @@ pub mod mac;
 
 pub use dot15d4_util as util;
 
-pub mod export {
-    pub use rand_core::RngCore;
-}
-
-use rand_core::RngCore;
-
 use self::{
     driver::{
         radio::{DriverConfig, RadioDriver, RadioDriverApi},
@@ -20,31 +14,27 @@ use self::{
         DriverRequestChannel, DriverService,
     },
     mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
-    util::sync::{mutex::Mutex, select, Either},
+    util::sync::{select, Either},
 };
 
-pub struct Device<RadioDriverImpl: DriverConfig, Rng> {
+pub struct Device<RadioDriverImpl: DriverConfig> {
     radio: RadioDriver<RadioDriverImpl, RadioTaskOff>,
-    rng: Mutex<Rng>,
 }
 
-impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Device<RadioDriverImpl, Rng> {
-    pub fn new(radio: RadioDriver<RadioDriverImpl, RadioTaskOff>, rng: Rng) -> Self {
-        Self {
-            radio,
-            rng: Mutex::new(rng),
-        }
+impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl> {
+    pub fn new(radio: RadioDriver<RadioDriverImpl, RadioTaskOff>) -> Self {
+        Self { radio }
     }
 }
 
-impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Device<RadioDriverImpl, Rng>
+impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl>
 where
     RadioDriver<RadioDriverImpl, RadioTaskOff>: OffState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, RadioTaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, RadioTaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
     pub async fn run<'upper_layer>(
-        mut self,
+        self,
         buffer_allocator: MacBufferAllocator,
         request_receiver: MacRequestReceiver<'upper_layer>,
         indication_sender: MacIndicationSender<'upper_layer>,
@@ -59,9 +49,8 @@ where
             driver_service_channel.receiver(),
             buffer_allocator,
         );
-        let mut mac_service = MacService::<'_, Rng, RadioDriverImpl>::new(
+        let mut mac_service = MacService::<'_, RadioDriverImpl>::new(
             timer,
-            &mut self.rng,
             buffer_allocator,
             request_receiver,
             indication_sender,
