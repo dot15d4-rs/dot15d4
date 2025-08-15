@@ -2,8 +2,8 @@ use core::{cell::Cell, marker::PhantomData};
 
 use dot15d4::{
     driver::{
-        radio::{DriverConfig, RadioDriverApi},
-        tasks::{OffState, RadioDriver, RxState, TaskOff, TaskRx, TaskTx, TxState},
+        radio::{DriverConfig, RadioDriver, RadioDriverApi},
+        tasks::{OffState, RxState, TaskOff, TaskRx, TaskTx, TxState},
     },
     export::*,
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},
@@ -73,12 +73,14 @@ where
 {
     pub async fn run<Rng: RngCore>(&self, rng: Rng) -> ! {
         let radio = self.radio.take().expect("already running");
+        let timer = radio.timer();
         let device = Device::new(radio, rng);
         device
             .run(
                 self.buffer_allocator,
                 self.request_channel.receiver(),
                 self.indication_channel.sender(),
+                timer,
             )
             .await
     }

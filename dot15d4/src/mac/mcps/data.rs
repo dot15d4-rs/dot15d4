@@ -112,6 +112,7 @@ impl DataRequest {
         }
     }
 }
+
 pub struct TxOptions<'mpdu> {
     mpdu: &'mpdu mut MpduFrame,
 }

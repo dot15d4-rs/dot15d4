@@ -12,9 +12,9 @@ use rand_core::RngCore;
 
 use self::{
     driver::{
-        radio::{DriverConfig, RadioDriverApi},
+        radio::{DriverConfig, RadioDriver, RadioDriverApi},
         tasks::{
-            OffState, RadioDriver, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
+            OffState, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
             TaskTx as RadioTaskTx, TxState,
         },
         DriverRequestChannel, DriverService,
@@ -48,6 +48,7 @@ where
         buffer_allocator: MacBufferAllocator,
         request_receiver: MacRequestReceiver<'upper_layer>,
         indication_sender: MacIndicationSender<'upper_layer>,
+        timer: RadioDriverImpl::Timer,
     ) -> ! {
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
@@ -59,6 +60,7 @@ where
             buffer_allocator,
         );
         let mut mac_service = MacService::<'_, Rng, RadioDriverImpl>::new(
+            timer,
             &mut self.rng,
             buffer_allocator,
             request_receiver,

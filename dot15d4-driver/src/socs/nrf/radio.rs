@@ -35,15 +35,15 @@ use crate::{
     },
     executor::InterruptExecutor,
     frame::{AddressingFields, RadioFrame, RadioFrameSized},
-    radio::{DriverConfig, FcsNone, RadioDriverApi},
+    radio::{DriverConfig, FcsNone, RadioDriver, RadioDriverApi},
     tasks::{
-        ExternalRadioTransition, Ifs, OffResult, OffState, PreliminaryFrameInfo, RadioDriver,
-        RadioState, RadioTaskError, RadioTransition, RxError, RxResult, RxState, SchedulingError,
+        ExternalRadioTransition, Ifs, OffResult, OffState, PreliminaryFrameInfo, RadioState,
+        RadioTaskError, RadioTransition, RxError, RxResult, RxState, SchedulingError,
         SelfRadioTransition, TaskOff, TaskRx, TaskTx, Timestamp, TxError, TxResult, TxState,
     },
 };
 
-use super::NrfRadioTimer;
+use super::{executor::radio::NrfInterruptExecutor, timer::NrfRadioTimer};
 
 pub mod export {
     pub use nrf52840_hal::{
@@ -58,9 +58,9 @@ pub mod export {
 ///    surrounding [`RadioDriver`].
 /// 2. It serves as a unique marker for the nRF-specific implementation of the
 ///    [`RadioDriver`].
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NrfRadioDriver {
-    executor: super::executor::radio::NrfInterruptExecutor,
+    executor: NrfInterruptExecutor,
 }
 
 impl DriverConfig for NrfRadioDriver {
@@ -132,6 +132,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
     pub fn new(
         radio: pac::RADIO,
         _clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
+        timer: NrfRadioTimer,
         #[cfg(feature = "gpio-trace")] gpiote: &GPIOTE,
         #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
     ) -> Self {
@@ -199,6 +200,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             task: Some(TaskOff {
                 at: Timestamp::BestEffort,
             }),
+            timer,
         };
 
         driver.set_sfd(DEFAULT_SFD);
@@ -434,15 +436,17 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         )
     }
 
-    async fn switch_off(inner: NrfRadioDriver) -> Self {
+    async fn switch_off<AnyState>(any_state: RadioDriver<NrfRadioDriver, AnyState>) -> Self {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_FALL_BACK);
 
         let off_task = Some(TaskOff {
             at: Timestamp::BestEffort,
         });
+        let RadioDriver { inner, timer, .. } = any_state;
         let mut off_state = Self {
             inner,
+            timer,
             task: off_task,
         };
 

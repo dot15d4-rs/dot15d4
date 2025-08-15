@@ -5,7 +5,7 @@ use panic_probe as _;
 
 use dot15d4_driver::{
     executor::InterruptExecutor,
-    socs::nrf::{executor, NrfRadioTimer},
+    socs::nrf::executor,
     timer::{HardwareSignal, Pin, RadioTimerApi, RadioTimerResult, SyntonizedDuration},
 };
 #[cfg(feature = "gpio-trace")]
@@ -15,7 +15,7 @@ use embassy_executor::Spawner;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    let (_, peripherals) = config_peripherals();
+    let (peripherals, _, timer) = config_peripherals();
 
     let toggle_alarm_pin = || {
         toggle_gpiote_pin(&peripherals.gpiote, PIN_ALARM.gpiote_channel as usize);
@@ -32,7 +32,7 @@ async fn main(_spawner: Spawner) {
     );
 
     let timer_task = async {
-        let mut timeout = NrfRadioTimer::now();
+        let mut timeout = timer.now();
         for _ in 0..10 {
             const DELAY: SyntonizedDuration = SyntonizedDuration::nanos(4 * 30518);
             timeout += DELAY;
@@ -40,7 +40,9 @@ async fn main(_spawner: Spawner) {
             // Safety: We run at lower priority than the timer interrupt and we
             //         run from a single task.
             let result = unsafe {
-                NrfRadioTimer::schedule_event(timeout, HardwareSignal::TogglePin(Pin::Pin0)).await
+                timer
+                    .schedule_event(timeout, HardwareSignal::TogglePin(Pin::Pin0))
+                    .await
             };
             assert!(matches!(result, RadioTimerResult::Ok));
         }
