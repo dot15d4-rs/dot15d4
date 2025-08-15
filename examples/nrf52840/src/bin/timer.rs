@@ -39,11 +39,9 @@ async fn main(_spawner: Spawner) {
 
             // Safety: We run at lower priority than the timer interrupt and we
             //         run from a single task.
-            let result = unsafe {
-                timer
-                    .schedule_event(timeout, HardwareSignal::TogglePin(Pin::Pin0))
-                    .await
-            };
+            let result =
+                unsafe { timer.wait_until(timeout, Some(HardwareSignal::GpioToggle(Pin::Pin0))) }
+                    .await;
             assert!(matches!(result, RadioTimerResult::Ok));
         }
         toggle_alarm_pin();

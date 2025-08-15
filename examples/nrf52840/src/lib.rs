@@ -84,9 +84,7 @@ pub fn config_peripherals() -> (
     let timer = NrfRadioTimer::new(
         peripherals.RTC0,
         peripherals.TIMER0,
-        &peripherals.GPIOTE,
         PIN_ALARM.gpiote_channel as usize,
-        &peripherals.PPI,
         PpiChannel::TimerGpiote as usize,
     );
 

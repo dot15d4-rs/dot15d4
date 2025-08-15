@@ -110,7 +110,7 @@ async fn main(spawner: Spawner) {
             // Safety: The main task runs at lowest priority and won't be migrated.
             let res = unsafe {
                 timer
-                    .wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD))
+                    .wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD), None)
                     .await
             };
             debug_assert_eq!(res, RadioTimerResult::Ok);

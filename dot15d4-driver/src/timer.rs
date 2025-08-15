@@ -50,8 +50,29 @@ pub enum Pin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HardwareSignal {
-    /// A signal to toggle the given output pin.
-    TogglePin(Pin),
+    /// Toggle the given output pin.
+    GpioToggle(Pin),
+
+    /// Enable radio reception.
+    RadioRxEnable,
+
+    /// Enable radio transmission.
+    RadioTxEnable,
+
+    /// Disable radio reception/transmission.
+    RadioDisable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimedSignal {
+    pub instant: SyntonizedInstant,
+    pub signal: HardwareSignal,
+}
+
+impl TimedSignal {
+    pub fn new(instant: SyntonizedInstant, signal: HardwareSignal) -> Self {
+        Self { instant, signal }
+    }
 }
 
 pub trait RadioTimerApi: Copy {
@@ -64,7 +85,13 @@ pub trait RadioTimerApi: Copy {
     fn now(&self) -> SyntonizedInstant;
 
     /// Waits until the given instant, then wakes the current task. Only the
-    /// sleep timer will be used, keeps the high-precision timer off.
+    /// sleep timer will be used.
+    ///
+    /// If an additional signal is provided, then that signal will be triggered
+    /// precisely at the requested time. This option uses the high-precision
+    /// timer.
+    ///
+    /// If no signal is provided, keeps the high-precision timer off.
     ///
     /// Implementations SHALL be cancel-safe. Cancelling the future will cancel
     /// the alarm.
@@ -88,6 +115,7 @@ pub trait RadioTimerApi: Copy {
     unsafe fn wait_until(
         &self,
         instant: SyntonizedInstant,
+        signal: Option<HardwareSignal>,
     ) -> impl Future<Output = RadioTimerResult>;
 
     /// Schedule a hardware event, i.e. programs a signal to be sent over the
@@ -97,28 +125,14 @@ pub trait RadioTimerApi: Copy {
     /// hardware level without CPU intervention. Uses the high-precision timer.
     /// Exact timing specifications are implementation dependent.
     ///
-    /// The method blocks asynchronously until the event was executed.
-    ///
-    /// Implementations SHALL be cancel-safe. Cancelling the future will cancel
-    /// the alarm.
-    ///
-    /// Note: Cancellation may race with the timer interrupt, so if the future
-    ///       is cancelled very close to expiry it may be that the signal will
-    ///       still be produced.
+    /// The method does not block.
     ///
     /// # Safety
     ///
     /// - This method SHALL be called from a context that runs at lower priority
     ///   than the timer interrupt(s).
-    /// - The resulting future SHALL always be polled with the same waker, i.e.
-    ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
-    ///   subsequent invocations of the method, though.
     ///
-    unsafe fn schedule_event(
-        &self,
-        instant: SyntonizedInstant,
-        signal: HardwareSignal,
-    ) -> impl Future<Output = RadioTimerResult>;
+    unsafe fn schedule_event(&self, timed_signal: TimedSignal) -> RadioTimerResult;
 }
 
 #[cfg(feature = "rtos-trace")]
