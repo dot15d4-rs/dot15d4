@@ -59,7 +59,7 @@ pub struct Pib {
 
 impl Default for Pib {
     fn default() -> Self {
-        use dot15d4_driver::const_config::*;
+        use crate::driver::const_config::*;
 
         Self {
             extended_address: None,

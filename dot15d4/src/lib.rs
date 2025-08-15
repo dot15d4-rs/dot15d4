@@ -90,7 +90,7 @@ where
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
-    use dot15d4_util::trace::TraceOffset;
+    use crate::util::trace::TraceOffset;
 
     #[cfg(feature = "defmt")]
     compile_error!(
