@@ -1100,7 +1100,7 @@ where
         //         while polling it.
         // TODO: Replace with timed Rx.
         let timer = rx_driver.timer();
-        let timeout = unsafe { timer.wait_until(timer.now() + Self::DRIVER_RX_ACK_TIMEOUT) };
+        let timeout = unsafe { timer.wait_until(timer.now() + Self::DRIVER_RX_ACK_TIMEOUT, None) };
 
         let next_task_ifs = Ifs::from_mpdu_length(tx_radio_frame.sdu_length().get());
         match select(rx_driver.frame_started(), timeout).await {
