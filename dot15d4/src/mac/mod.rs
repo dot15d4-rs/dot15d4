@@ -150,7 +150,43 @@ macro_rules! mac_svc_tasks {
 
 mac_svc_tasks!(DataRequest, DataIndication);
 
-#[allow(dead_code)]
+const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS;
+
+struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
+    // MAC request tasks are indexed by the message slots of the corresponding
+    // MAC requests (0..UL_NUM_PARALLEL_REQUESTS).
+    //
+    // MAC indication tasks use the higher indices
+    // (UL_NUM_PARALLEL_REQUESTS..UL_NUM_PARALLEL_REQUESTS +
+    // MAC_NUM_PARALLEL_INDICATIONS).
+    //
+    // We need an additional indication background task so that we can
+    // efficiently use the driver service's pipelining capability.
+    mac_svc_tasks: [Option<MacSvcTask<'state, RadioDriverImpl>>; NUM_MAC_SVC_TASKS],
+
+    // Outstanding driver requests will be pushed to this vector and polled for
+    // responses.
+    outstanding_driver_requests: heapless::Vec<PollingResponseToken, DRIVER_CHANNEL_CAPACITY>,
+
+    // A driver-to-MAC message index: The index corresponds to the driver
+    // message slot, the content to the corresponding MAC request slot.
+    driver_msg_slot_to_task_index: [usize; DRIVER_CHANNEL_CAPACITY],
+
+    // Response tokens for outstanding MAC requests.
+    outstanding_mac_requests: [Option<ResponseToken>; MAC_NUM_PARALLEL_REQUEST_TASKS],
+}
+
+impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
+    fn new() -> Self {
+        Self {
+            mac_svc_tasks: [const { None }; NUM_MAC_SVC_TASKS],
+            outstanding_driver_requests: heapless::Vec::new(),
+            driver_msg_slot_to_task_index: [0; DRIVER_CHANNEL_CAPACITY],
+            outstanding_mac_requests: [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS],
+        }
+    }
+}
+
 /// A structure exposing MAC sublayer services such as MLME and MCPS. This runs
 /// the main event loop that handles interactions between an upper layer and the
 /// PHY sublayer. It uses channels to communicate with upper layer tasks and
@@ -200,43 +236,9 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     /// returns a response it will be used to drive the corresponding state
     /// machine.
     pub async fn run(&mut self) -> ! {
-        // MAC request tasks are indexed by the message slots of the
-        // corresponding MAC requests (0..UL_NUM_PARALLEL_REQUESTS).
-        //
-        // MAC indication tasks use the higher indices
-        // (UL_NUM_PARALLEL_REQUESTS..UL_NUM_PARALLEL_REQUESTS +
-        // MAC_NUM_PARALLEL_INDICATIONS).
-        //
-        // We need an additional indication background tasks so that we can
-        // efficiently use the driver service's pipelining capability.
-        let mut mac_svc_tasks: [Option<MacSvcTask<RadioDriverImpl>>;
-            MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS] =
-            [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS];
+        let mut state = MacServiceState::new();
 
-        // Outstanding driver requests will be pushed to this vector and polled
-        // for responses.
-        let mut outstanding_driver_requests: heapless::Vec<
-            PollingResponseToken,
-            DRIVER_CHANNEL_CAPACITY,
-        > = heapless::Vec::new();
-
-        // A driver-to-MAC message index: The index corresponds to the driver
-        // message slot, the content to the corresponding MAC request slot.
-        let mut driver_msg_slot_to_task_index: [usize; DRIVER_CHANNEL_CAPACITY] =
-            [0; DRIVER_CHANNEL_CAPACITY];
-
-        // Response tokens for outstanding MAC requests.
-        let mut outstanding_mac_requests: [Option<ResponseToken>; MAC_NUM_PARALLEL_REQUEST_TASKS] =
-            [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS];
-
-        let first_mac_indication_task_index =
-            mac_svc_tasks.len() - MAC_NUM_PARALLEL_INDICATION_TASKS;
-        self.create_indication_tasks(
-            first_mac_indication_task_index,
-            &mut mac_svc_tasks,
-            &mut driver_msg_slot_to_task_index,
-            &mut outstanding_driver_requests,
-        );
+        self.create_indication_tasks(&mut state);
 
         let mut consumer_token = self
             .request_receiver
@@ -248,21 +250,18 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 self.request_receiver
                     .wait_for_request(&mut consumer_token, &()),
                 self.driver_request_sender
-                    .wait_for_response(&mut outstanding_driver_requests),
+                    .wait_for_response(&mut state.outstanding_driver_requests),
             )
             .await
             {
                 // Upper layer: A MAC request was received. Create the corresponding task and kick it off.
                 Either::First((mac_request_response_token, mac_request)) => {
                     let mac_request_task_index = mac_request_response_token.message_slot() as usize;
-                    outstanding_mac_requests[mac_request_task_index] =
+                    state.outstanding_mac_requests[mac_request_task_index] =
                         Some(mac_request_response_token);
                     let mac_request_task = self.create_request_task(mac_request);
                     self.step_task(
-                        &mut mac_svc_tasks,
-                        &mut driver_msg_slot_to_task_index,
-                        &mut outstanding_driver_requests,
-                        Some(&mut outstanding_mac_requests),
+                        &mut state,
                         mac_request_task_index,
                         mac_request_task,
                         MacTaskEvent::Entry,
@@ -274,34 +273,19 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                     msg_slot: driver_msg_slot,
                 }) => {
                     let mac_svc_task_index =
-                        driver_msg_slot_to_task_index[driver_msg_slot as usize];
+                        state.driver_msg_slot_to_task_index[driver_msg_slot as usize];
                     let mac_task_event = MacTaskEvent::DrvSvcResponse(driver_response);
-                    let mac_svc_task = mac_svc_tasks[mac_svc_task_index].take().unwrap();
+                    let mac_svc_task = state.mac_svc_tasks[mac_svc_task_index].take().unwrap();
 
-                    self.step_task(
-                        &mut mac_svc_tasks,
-                        &mut driver_msg_slot_to_task_index,
-                        &mut outstanding_driver_requests,
-                        Some(&mut outstanding_mac_requests),
-                        mac_svc_task_index,
-                        mac_svc_task,
-                        mac_task_event,
-                    );
+                    self.step_task(&mut state, mac_svc_task_index, mac_svc_task, mac_task_event);
                 }
             };
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn step_task<'tasks>(
         &self,
-        mac_svc_tasks: &mut [Option<MacSvcTask<'tasks, RadioDriverImpl>>],
-        driver_msg_slot_to_task_index: &mut [usize],
-        outstanding_driver_requests: &mut heapless::Vec<
-            PollingResponseToken,
-            DRIVER_CHANNEL_CAPACITY,
-        >,
-        outstanding_mac_requests: Option<&mut [Option<ResponseToken>]>,
+        state: &mut MacServiceState<'tasks, RadioDriverImpl>,
         mac_svc_task_index: usize,
         mac_svc_task: MacSvcTask<'tasks, RadioDriverImpl>,
         event: MacTaskEvent,
@@ -319,12 +303,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 let driver_response_token = self
                     .driver_request_sender
                     .send_request_polling_response(driver_msg_token, driver_request);
-                driver_msg_slot_to_task_index[driver_response_token.message_slot() as usize] =
-                    mac_svc_task_index;
-                outstanding_driver_requests
+                state.driver_msg_slot_to_task_index
+                    [driver_response_token.message_slot() as usize] = mac_svc_task_index;
+                state
+                    .outstanding_driver_requests
                     .push(driver_response_token)
                     .unwrap();
-                mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
+                state.mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
                 debug_assert!({
                     if intermediate_result.is_some() {
                         // Only indications may produce intermediate results.
@@ -350,7 +335,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             if is_mac_request {
                 self.handle_request_task_result(
                     task_result,
-                    outstanding_mac_requests.unwrap()[mac_svc_task_index]
+                    state.outstanding_mac_requests[mac_svc_task_index]
                         .take()
                         .unwrap(),
                 );
@@ -360,28 +345,20 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         }
     }
 
-    fn create_indication_tasks<'tasks>(
-        &self,
-        first_mac_indication_task_index: usize,
-        mac_svc_tasks: &mut [Option<MacSvcTask<'tasks, RadioDriverImpl>>],
-        driver_msg_slot_to_task_index: &mut [usize],
-        outstanding_driver_requests: &mut heapless::Vec<
-            PollingResponseToken,
-            DRIVER_CHANNEL_CAPACITY,
-        >,
-    ) where
+    fn create_indication_tasks<'tasks>(&self, state: &mut MacServiceState<'tasks, RadioDriverImpl>)
+    where
         'svc: 'tasks,
     {
-        for mac_indication_task_index in first_mac_indication_task_index..mac_svc_tasks.len() {
+        const FIRST_MAC_INDICATION_TASK_INDEX: usize =
+            NUM_MAC_SVC_TASKS - MAC_NUM_PARALLEL_INDICATION_TASKS;
+
+        for mac_indication_task_index in FIRST_MAC_INDICATION_TASK_INDEX..NUM_MAC_SVC_TASKS {
             let mac_indication_task =
                 MacSvcTask::DataIndication(DataIndicationTask::<'tasks, RadioDriverImpl>::new(
                     self.buffer_allocator,
                 ));
             self.step_task(
-                mac_svc_tasks,
-                driver_msg_slot_to_task_index,
-                outstanding_driver_requests,
-                None,
+                state,
                 mac_indication_task_index,
                 mac_indication_task,
                 MacTaskEvent::Entry,
