@@ -6,7 +6,7 @@ use panic_probe as _;
 use dot15d4_driver::{
     radio::RadioDriver,
     socs::nrf::NrfRadioDriver,
-    timer::{RadioTimerApi, RadioTimerResult, SyntonizedDuration},
+    timer::{LocalClockDuration, RadioTimerApi, RadioTimerResult},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -21,7 +21,7 @@ use embassy_net::{
 use heapless::Vec;
 use static_cell::StaticCell;
 
-const FRAME_PERIOD: SyntonizedDuration = SyntonizedDuration::millis(10);
+const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {

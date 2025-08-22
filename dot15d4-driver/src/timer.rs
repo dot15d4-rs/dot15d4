@@ -18,8 +18,8 @@ pub const O_QPSK_FREQUENCY: u32 = 62_500;
 pub type SymbolsOQpsk250Instant = Instant<u64, 1, 62_500>;
 pub type SymbolsOQpsk250Duration = Duration<u64, 1, 62_500>;
 
-pub type SyntonizedInstant = Instant<u64, 1, 1_000_000_000>;
-pub type SyntonizedDuration = NanosDurationU64;
+pub type LocalClockInstant = Instant<u64, 1, 1_000_000_000>;
+pub type LocalClockDuration = NanosDurationU64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RadioTimerResult {
@@ -65,24 +65,23 @@ pub enum HardwareSignal {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimedSignal {
-    pub instant: SyntonizedInstant,
+    pub instant: LocalClockInstant,
     pub signal: HardwareSignal,
 }
 
 impl TimedSignal {
-    pub const fn new(instant: SyntonizedInstant, signal: HardwareSignal) -> Self {
+    pub const fn new(instant: LocalClockInstant, signal: HardwareSignal) -> Self {
         Self { instant, signal }
     }
 }
 
 pub trait RadioTimerApi: Copy {
-    /// Returns the current syntonized instant.
+    /// Returns the current instant of the local radio clock.
     ///
     /// Note: This method involves the CPU and therefore will always introduce
     ///       some latency. The timer might have ticked concurrently in the
-    ///       meantime and/or a syntonization event not reflected in the
-    ///       returned value might have arrived.
-    fn now(&self) -> SyntonizedInstant;
+    ///       meantime.
+    fn now(&self) -> LocalClockInstant;
 
     /// Waits until the given instant, then wakes the current task. Only the
     /// sleep timer will be used.
@@ -114,7 +113,7 @@ pub trait RadioTimerApi: Copy {
     #[allow(dead_code)]
     unsafe fn wait_until(
         &self,
-        instant: SyntonizedInstant,
+        instant: LocalClockInstant,
         signal: Option<HardwareSignal>,
     ) -> impl Future<Output = RadioTimerResult>;
 

@@ -48,7 +48,7 @@ mod test {
             RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
         },
         radio::{DriverConfig, FcsTwoBytes},
-        timer::{HardwareSignal, RadioTimerApi, RadioTimerResult, SyntonizedInstant, TimedSignal},
+        timer::{HardwareSignal, LocalClockInstant, RadioTimerApi, RadioTimerResult, TimedSignal},
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
@@ -66,13 +66,13 @@ mod test {
     #[derive(Clone, Copy)]
     struct FakeRadioTimer;
     impl RadioTimerApi for FakeRadioTimer {
-        fn now(&self) -> SyntonizedInstant {
+        fn now(&self) -> LocalClockInstant {
             todo!()
         }
 
         async unsafe fn wait_until(
             &self,
-            _: SyntonizedInstant,
+            _: LocalClockInstant,
             _: Option<HardwareSignal>,
         ) -> RadioTimerResult {
             todo!()
