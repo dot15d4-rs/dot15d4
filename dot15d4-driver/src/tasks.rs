@@ -7,7 +7,7 @@ use crate::{
     constants::A_MAX_SIFS_FRAME_SIZE,
     frame::{AddressingFields, FrameControl, RadioFrame, RadioFrameSized, RadioFrameUnsized},
     radio::DriverConfig,
-    timer::{SyntonizedInstant, TimedSignal},
+    timer::{LocalClockInstant, TimedSignal},
 };
 
 use super::radio::RadioDriver;
@@ -15,7 +15,7 @@ use super::radio::RadioDriver;
 /// Tasks can be scheduled as fast as possible ("best effort") or at a
 /// well-defined tick of the local radio clock ("scheduled").
 ///
-/// The timestamp is represented as a [`SyntonizedInstant`] in terms of the
+/// The timestamp is represented as a [`LocalClockInstant`] in terms of the
 /// radio driver's local timer, i.e. the timestamp must already have been
 /// compensated for clock drift.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -30,7 +30,7 @@ pub enum Timestamp {
     /// Usually the timestamp will be related to the RMARKER of a frame. For all
     /// PHYs the RMARKER is defined to be the time when the beginning of the
     /// first symbol following the SFD of the frame is at the local antenna.
-    Scheduled(SyntonizedInstant),
+    Scheduled(LocalClockInstant),
 }
 
 /// Generic representation of a radio task.

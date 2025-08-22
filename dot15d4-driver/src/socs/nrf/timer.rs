@@ -17,7 +17,7 @@ use fugit::TimerRateU32;
 use nrf52840_pac::{interrupt, Peripherals, GPIOTE, NVIC, PPI, RADIO, RTC0, TIMER0};
 
 use crate::timer::{
-    HardwareSignal, RadioTimerApi, RadioTimerResult, SyntonizedDuration, SyntonizedInstant,
+    HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi, RadioTimerResult,
     TimedSignal,
 };
 
@@ -128,9 +128,9 @@ enum InitializationState {
     Initialized,
 }
 
-/// The nRF radio timer implements a shared, globally syntonized, monotonic,
-/// overflow-protected uptime "wall clock". It combines a low-energy RTC sleep
-/// timer peripheral with a high-resolution wake-up TIMER peripheral.
+/// The nRF radio timer implements a local (i.e. non-syntonized), monotonic,
+/// overflow-protected uptime clock. It combines a low-energy RTC sleep timer
+/// peripheral with a high-resolution wake-up TIMER peripheral.
 ///
 /// The timer can trigger asynchronous CPU wake-ups and PPI-backed hardware
 /// signals.
@@ -877,7 +877,7 @@ impl NrfRadioTimer {
     const MAX_RTC_TICKS: u64 =
         ((Self::MAX_NS * State::RTC_FREQUENCY.to_Hz() as u128) / Self::NS_PER_S) as u64;
 
-    const fn rtc_tick_to_instant(rtc_tick: u64) -> SyntonizedInstant {
+    const fn rtc_tick_to_instant(rtc_tick: u64) -> LocalClockInstant {
         debug_assert!(rtc_tick <= Self::MAX_RTC_TICKS);
 
         // To keep tick-to-ns conversion cheap we avoid division while
@@ -899,11 +899,11 @@ impl NrfRadioTimer {
         // Safety: We checked above that the number of ticks given is less than
         //         the max ticks that are still representable in nanoseconds.
         //         Therefore casting down will always succeed.
-        SyntonizedInstant::from_ticks(ns as u64)
+        LocalClockInstant::from_ticks(ns as u64)
     }
 
     #[allow(dead_code)]
-    const fn timer_ticks_to_duration(timer_ticks: u32) -> SyntonizedDuration {
+    const fn timer_ticks_to_duration(timer_ticks: u32) -> LocalClockDuration {
         // timestamp_ns = ticks * (1 / timer_frequency_hz) * 10^9 ns/s
         //              = ticks * (1 / 16 MHz) * 10^9 ns/s
         //              = (ticks * ((2^3 * 5^3 * 10^6) / (2^4 * 10^6))) ns
@@ -920,10 +920,10 @@ impl NrfRadioTimer {
         // Safety: We checked above that the number of ticks given is less than
         //         the max ticks that are still representable in nanoseconds.
         //         Therefore casting down will always succeed.
-        SyntonizedDuration::from_ticks(ns)
+        LocalClockDuration::from_ticks(ns)
     }
 
-    const fn instant_to_alarm_ticks(ns: SyntonizedInstant) -> (u64, u16) {
+    const fn instant_to_alarm_ticks(ns: LocalClockInstant) -> (u64, u16) {
         // To keep ns-to-tick conversion cheap we avoid division while
         // minimizing rounding errors:
         //
@@ -980,7 +980,7 @@ impl NrfRadioTimer {
 }
 
 impl RadioTimerApi for NrfRadioTimer {
-    fn now(&self) -> SyntonizedInstant {
+    fn now(&self) -> LocalClockInstant {
         STATE.assert_initialized();
 
         let rtc_tick = STATE.rtc_now_tick();
@@ -989,7 +989,7 @@ impl RadioTimerApi for NrfRadioTimer {
 
     async unsafe fn wait_until(
         &self,
-        instant: SyntonizedInstant,
+        instant: LocalClockInstant,
         signal: Option<HardwareSignal>,
     ) -> RadioTimerResult {
         STATE.assert_initialized();
@@ -1045,7 +1045,7 @@ impl RadioTimerApi for NrfRadioTimer {
 //       prove proper "constification" of the conversion functions.
 const _: () = {
     let (rtc_tick, remaining_timer_ticks) =
-        NrfRadioTimer::instant_to_alarm_ticks(SyntonizedInstant::from_ticks(u64::MAX));
+        NrfRadioTimer::instant_to_alarm_ticks(LocalClockInstant::from_ticks(u64::MAX));
     assert!(rtc_tick == NrfRadioTimer::MAX_RTC_TICKS);
 
     // One RTC tick is ~30517 ns, the rounding error must be less.

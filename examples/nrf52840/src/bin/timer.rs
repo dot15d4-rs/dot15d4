@@ -6,7 +6,7 @@ use panic_probe as _;
 use dot15d4_driver::{
     executor::InterruptExecutor,
     socs::nrf::executor,
-    timer::{HardwareSignal, Pin, RadioTimerApi, RadioTimerResult, SyntonizedDuration},
+    timer::{HardwareSignal, LocalClockDuration, Pin, RadioTimerApi, RadioTimerResult},
 };
 #[cfg(feature = "gpio-trace")]
 use dot15d4_examples_nrf52840::PIN_EXECUTOR;
@@ -34,7 +34,7 @@ async fn main(_spawner: Spawner) {
     let timer_task = async {
         let mut timeout = timer.now();
         for _ in 0..10 {
-            const DELAY: SyntonizedDuration = SyntonizedDuration::nanos(4 * 30518);
+            const DELAY: LocalClockDuration = LocalClockDuration::nanos(4 * 30518);
             timeout += DELAY;
 
             // Safety: We run at lower priority than the timer interrupt and we

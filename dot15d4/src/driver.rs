@@ -29,7 +29,7 @@ use self::{
         RadioTaskError, RxError, RxResult, RxState, SelfRadioTransition, TaskOff as RadioTaskOff,
         TaskRx as RadioTaskRx, TaskTx as RadioTaskTx, Timestamp, TxResult, TxState,
     },
-    timer::{RadioTimerApi, SymbolsOQpsk250Duration, SyntonizedDuration},
+    timer::{LocalClockDuration, RadioTimerApi, SymbolsOQpsk250Duration},
 };
 
 pub use dot15d4_driver::*;
@@ -289,7 +289,7 @@ where
     /// therefore consists of:
     /// t_ACK = 12 symbols (MAC_AIFS) + 10 symbols (SHR) + 2 symbols (PHR)
     ///       = 24 symbols = 384µs.
-    const DRIVER_RX_ACK_TIMEOUT: SyntonizedDuration = {
+    const DRIVER_RX_ACK_TIMEOUT: LocalClockDuration = {
         const SHR_DURATION: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(10);
         const PHR_DURATION: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(2);
         // Note: the add operation cannot be used in const context, that's why

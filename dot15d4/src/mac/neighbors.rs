@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::driver::timer::SyntonizedInstant;
+use crate::driver::timer::LocalClockInstant;
 
 pub enum TableError {
     Full,
@@ -24,7 +24,7 @@ pub trait MacNeighbor {
     /// The IEEE 8012.15.4 address of the neighbor.
     fn address(&self) -> [u8; 8];
     /// Time of last transmission of a packet by the neighbor.
-    fn last_tx(&self) -> SyntonizedInstant;
+    fn last_tx(&self) -> LocalClockInstant;
     /// Estimated transmission count when communicating with the neighbor.
     fn etx(&self) -> u32;
     /// Link quality indicator
@@ -34,7 +34,7 @@ pub trait MacNeighbor {
     /// Number of packets received
     fn num_rx(&self) -> u32;
     /// Set the time of last transmission of a packet by the neighbor.
-    fn set_last_tx(&mut self, instant: SyntonizedInstant);
+    fn set_last_tx(&mut self, instant: LocalClockInstant);
     /// Set the Estimated transmission count.
     fn set_etx(&mut self, etx: u32);
     /// Set the link quality indicator.
@@ -47,12 +47,12 @@ pub trait MacNeighbor {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::driver::timer::SyntonizedInstant;
+    use crate::driver::timer::LocalClockInstant;
 
     use super::MacNeighbor;
     pub(crate) struct TestNeighbor {
         address: [u8; 8],
-        last_tx: SyntonizedInstant,
+        last_tx: LocalClockInstant,
         etx: u32,
         n_tx: u32,
         n_rx: u32,
@@ -63,7 +63,7 @@ pub mod tests {
         fn default() -> Self {
             Self {
                 address: [0; 8],
-                last_tx: SyntonizedInstant::from_ticks(0),
+                last_tx: LocalClockInstant::from_ticks(0),
                 etx: 2,
                 n_tx: 0,
                 n_rx: 0,
@@ -86,7 +86,7 @@ pub mod tests {
             self.address
         }
 
-        fn last_tx(&self) -> SyntonizedInstant {
+        fn last_tx(&self) -> LocalClockInstant {
             self.last_tx
         }
 
@@ -106,7 +106,7 @@ pub mod tests {
             self.n_rx
         }
 
-        fn set_last_tx(&mut self, instant: SyntonizedInstant) {
+        fn set_last_tx(&mut self, instant: LocalClockInstant) {
             self.last_tx = instant;
         }
 
