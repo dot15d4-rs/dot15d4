@@ -641,7 +641,7 @@ where
                     // scheduling RX back-to-back is ok.
                     match rx_driver
                         .schedule_rx(rx_task, false)
-                        .run_and_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {
@@ -733,7 +733,7 @@ where
         };
         match rx_driver
             .schedule_rx(rx_task, false)
-            .run_and_transition()
+            .complete_and_transition()
             .await
         {
             CompletedRadioTransition::Entered(transition_result) => {
@@ -962,7 +962,7 @@ where
                     let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
                     match tx_driver
                         .schedule_tx(tx_task, next_task_ifs)
-                        .run_and_transition()
+                        .complete_and_transition()
                         .await
                     {
                         CompletedRadioTransition::Entered(transition_result) => {

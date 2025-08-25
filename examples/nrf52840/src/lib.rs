@@ -1,10 +1,9 @@
 #![no_std]
 
 use dot15d4::driver::socs::nrf::{
+    executor::{self as executor, swi0::NrfInterruptExecutor},
     export::{
-        pac::{
-            CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, PPI, RADIO, RTC0, SCB, SWI0, UICR,
-        },
+        pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, PPI, RADIO, RTC0, SCB, UICR},
         Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
     },
     NrfRadioTimer,
@@ -16,24 +15,57 @@ pub enum GpioPort {
     P1,
 }
 
+use GpioPort::*;
+
+/// GPIOTE channel allocation across example applications.
+///
+/// A maximum of eight channels is available.
+#[derive(Clone, Copy)]
 pub enum GpioteChannel {
-    Alarm,
+    /// Interrupt executor tracing.
     Executor,
+
+    /// Timer alarm tracing.
+    Alarm,
+
+    /// Timer tick tracing.
     Tick,
+
+    /// Outbound synchronization signal, e.g. for initial timer synchronization
+    /// across devices.
+    SyncOut,
+
+    /// Inbound synchronization signal, e.g. for initial timer synchronization
+    /// across devices.
+    SyncIn,
 }
+use GpioteChannel::*;
+
+pub enum GpioteDirection {
+    In,
+    Out,
+}
+use GpioteDirection::*;
 
 pub struct GpioteConfig {
     pub gpiote_channel: GpioteChannel,
     pub port: GpioPort,
     pub pin: u8,
+    pub direction: GpioteDirection,
 }
 
 impl GpioteConfig {
-    const fn new(gpiote_channel: GpioteChannel, port: GpioPort, pin: u8) -> Self {
+    const fn new(
+        gpiote_channel: GpioteChannel,
+        port: GpioPort,
+        pin: u8,
+        direction: GpioteDirection,
+    ) -> Self {
         Self {
             gpiote_channel,
             port,
             pin,
+            direction,
         }
     }
 }
@@ -44,15 +76,20 @@ enum PpiChannel {
     RtcTickGpiote,
 }
 
-pub const PIN_ALARM: GpioteConfig = GpioteConfig::new(GpioteChannel::Alarm, GpioPort::P0, 27);
 #[cfg(feature = "gpio-trace")]
-pub const PIN_EXECUTOR: GpioteConfig = GpioteConfig::new(GpioteChannel::Executor, GpioPort::P0, 26);
-pub const PIN_TICK: GpioteConfig = GpioteConfig::new(GpioteChannel::Tick, GpioPort::P0, 2);
+pub const PIN_EXECUTOR: GpioteConfig = GpioteConfig::new(Executor, P0, 26, Out);
+
+// Timer-related tracing pins.
+pub const PIN_ALARM: GpioteConfig = GpioteConfig::new(Alarm, P0, 27, Out);
+pub const PIN_TICK: GpioteConfig = GpioteConfig::new(Tick, P0, 2, Out);
+
+// Cross-device synchronization pins.
+pub const PIN_SYNC_IN: GpioteConfig = GpioteConfig::new(SyncIn, P0, 2, In);
+pub const PIN_SYNC_OUT: GpioteConfig = GpioteConfig::new(SyncOut, P0, 2, Out);
 
 pub struct AvailablePeripherals {
     pub gpiote: GPIOTE,
     pub radio: RADIO,
-    pub swi0: SWI0,
 }
 
 pub fn config_peripherals() -> (
@@ -69,10 +106,11 @@ pub fn config_peripherals() -> (
     peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
 
     let clocks = config_clock(peripherals.CLOCK);
-    config_gpiote(&peripherals.GPIOTE, PIN_ALARM);
     #[cfg(feature = "gpio-trace")]
-    config_gpiote(&peripherals.GPIOTE, PIN_EXECUTOR);
-    config_gpiote(&peripherals.GPIOTE, PIN_TICK);
+    config_gpiote(&peripherals.GPIOTE, &PIN_EXECUTOR);
+    for pin in [&PIN_ALARM, &PIN_TICK, &PIN_SYNC_IN, &PIN_SYNC_OUT] {
+        config_gpiote(&peripherals.GPIOTE, pin);
+    }
     config_tick_ppi(
         &peripherals.PPI,
         &peripherals.GPIOTE,
@@ -91,7 +129,6 @@ pub fn config_peripherals() -> (
     let available_peripherals = AvailablePeripherals {
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
-        swi0: peripherals.SWI0,
     };
     (available_peripherals, clocks, timer)
 }
@@ -138,10 +175,10 @@ fn config_clock(clock: CLOCK) -> Clocks<ExternalOscillator, ExternalOscillator, 
         .start_lfclk()
 }
 
-fn config_gpiote(gpiote: &GPIOTE, config: GpioteConfig) {
+pub fn config_gpiote(gpiote: &GPIOTE, config: &GpioteConfig) {
     gpiote.config[config.gpiote_channel as usize].write(|w| {
         w.mode().task();
-        w.port().bit(matches!(config.port, GpioPort::P1));
+        w.port().bit(matches!(config.port, P1));
         w.psel().variant(config.pin);
         w.polarity().toggle()
     });
@@ -169,4 +206,19 @@ fn config_tick_ppi(
 
 pub fn toggle_gpiote_pin(gpiote: &GPIOTE, gpiote_channel: usize) {
     gpiote.tasks_out[gpiote_channel].write(|w| w.tasks_out().set_bit());
+}
+
+pub fn swi_executor(_gpiote: &GPIOTE) -> &'static mut NrfInterruptExecutor {
+    // Safety: We don't expose SWI0 as available peripheral, so we can own it
+    //         here.
+    let swi = unsafe { Peripherals::steal() }.SWI0;
+    #[cfg(feature = "gpio-trace")]
+    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    executor::swi0(
+        swi,
+        #[cfg(feature = "gpio-trace")]
+        _gpiote,
+        #[cfg(feature = "gpio-trace")]
+        gpiote_trace_channel,
+    )
 }
