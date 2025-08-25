@@ -840,7 +840,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             }
 
             let (frame_control, addressing_repr) = fc_and_addressing_repr.unwrap();
-            let addressing_fields_lengths = addressing_repr.addressing_fields_lengths();
+            let addressing_fields_lengths = addressing_repr.try_addressing_fields_lengths();
 
             if addressing_fields_lengths.is_err() {
                 return;
@@ -921,16 +921,17 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             let addressing_offset = seq_nr_offset + seq_nr_len;
             let addressing_bytes = &pdu_ref[addressing_offset..];
 
-            // Safety: The bit counter guarantees that all bytes up to the
+            // Safety: We checked that we do actually have addressing fields.
+            //         The bit counter guarantees that all bytes up to the
             //         addressing fields have been received.
             let addressing_fields =
-                unsafe { AddressingFields::new_unchecked(addressing_bytes, addressing_repr).ok() };
+                unsafe { AddressingFields::new_unchecked(addressing_bytes, addressing_repr) };
 
             preliminary_frame_info = Some(PreliminaryFrameInfo {
                 mpdu_length,
                 frame_control: Some(frame_control),
                 seq_nr,
-                addressing_fields,
+                addressing_fields: Some(addressing_fields),
             });
         };
         unsafe {

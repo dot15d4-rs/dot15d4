@@ -100,12 +100,9 @@ impl MpduFieldRanges<MpduWithFrameControl> {
     pub(crate) const fn with_addressing(
         &self,
         addressing: AddressingRepr,
-    ) -> Result<MpduFieldRanges<MpduWithAddressing>> {
-        let addressing_fields_length = match addressing.addressing_fields_length() {
-            Ok(len) => len,
-            Err(e) => return Err(e),
-        };
-        Ok(self.next_state(self.offset_addressing.get() + addressing_fields_length as u8))
+    ) -> MpduFieldRanges<MpduWithAddressing> {
+        let addressing_fields_length = addressing.addressing_fields_length();
+        self.next_state(self.offset_addressing.get() + addressing_fields_length as u8)
     }
 
     pub(crate) const fn without_addressing(&self) -> MpduFieldRanges<MpduWithAddressing> {
@@ -196,12 +193,12 @@ impl MpduFieldRanges<MpduWithSecurity> {
         &self,
         ies: IeListRepr,
         frame_payload_length: u16,
-    ) -> Result<MpduFieldRanges<MpduWithAllFields>> {
+    ) -> MpduFieldRanges<MpduWithAllFields> {
         let ies_length = match ies.ies_length(frame_payload_length > 0) {
             Ok(len) => len,
-            Err(e) => return Err(e),
+            Err(_) => panic!(),
         };
-        Ok(self.next_state::<Config>(ies_length, frame_payload_length))
+        self.next_state::<Config>(ies_length, frame_payload_length)
     }
 
     /// Call this method to configure information elements when the frame
@@ -219,7 +216,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
     ///
     /// See [`dot15d4_driver::frame::RadioFrame::sdu_wo_fcs_length()`].
     #[cfg(feature = "ies")]
-    pub(crate) const fn with_ies_and_mpdu_length<Config: DriverConfig>(
+    pub(crate) const fn try_with_ies_and_mpdu_length<Config: DriverConfig>(
         &self,
         ies: IeListRepr,
         mpdu_length_wo_fcs: u16,
@@ -230,7 +227,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
         }
         let mpdu_ies_and_payload_length = mpdu_length_wo_fcs - mpdu_less_ies_and_payload_length;
         let (ies_length, frame_payload_length) =
-            match ies.ies_and_frame_payload_length(mpdu_ies_and_payload_length) {
+            match ies.try_ies_and_frame_payload_length(mpdu_ies_and_payload_length) {
                 Ok(frame_payload_length) => frame_payload_length,
                 Err(e) => return Err(e),
             };
@@ -256,7 +253,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
     /// bytes consumed by the MAC header and MAC payload without the MAC footer.
     ///
     /// See [`dot15d4_driver::frame::RadioFrame::sdu_wo_fcs_length()`].
-    pub(crate) const fn without_ies_with_mpdu_length<Config: DriverConfig>(
+    pub(crate) const fn try_without_ies_with_mpdu_length<Config: DriverConfig>(
         &self,
         mpdu_length_wo_fcs: u16,
     ) -> Result<MpduFieldRanges<MpduWithAllFields>> {
@@ -317,7 +314,7 @@ impl<State> MpduFieldRanges<State> {
     const FRAME_CONTROL_LEN: u16 = 2;
 
     /// The buffer range containing the frame control field.
-    pub(crate) const fn range_frame_control(&self) -> Range<usize> {
+    pub(crate) const fn try_range_frame_control(&self) -> Range<usize> {
         let offset_frame_control = self.offset_frame_control as usize;
         offset_frame_control..self.offset_seq_nr().get() as usize
     }
@@ -336,7 +333,7 @@ impl<State> MpduFieldRanges<State> {
 /// [`MpduParsedUpToAddressing`].
 impl<State: MpduParsedUpToAddressing> MpduFieldRanges<State> {
     /// The buffer range containing all addressing fields.
-    pub(crate) const fn range_addressing(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_addressing(&self) -> Option<Range<usize>> {
         let offset_addressing = self.offset_addressing.get() as usize;
 
         #[cfg(feature = "security")]
@@ -358,7 +355,7 @@ impl<State: MpduParsedUpToAddressing> MpduFieldRanges<State> {
 /// [`MpduParsedUpToSecurity`].
 impl<State: MpduParsedUpToSecurity> MpduFieldRanges<State> {
     /// The buffer range containing the auxiliary security header.
-    pub(crate) const fn range_aux_sec_header(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_aux_sec_header(&self) -> Option<Range<usize>> {
         #[cfg(feature = "security")]
         return {
             let offset_aux_sec_hdr = self.offset_aux_sec_hdr.unwrap().get() as usize;
@@ -383,7 +380,7 @@ impl<State: MpduParsedUpToSecurity> MpduFieldRanges<State> {
 /// access to all sub-fields.
 impl MpduFieldRanges<MpduWithAllFields> {
     /// The buffer range containing information elements.
-    pub(crate) const fn range_ies(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_ies(&self) -> Option<Range<usize>> {
         #[cfg(feature = "ies")]
         return {
             let offset_ies = self.offset_ies.unwrap().get() as usize;
@@ -415,7 +412,7 @@ impl MpduFieldRanges<MpduWithAllFields> {
     }
 
     /// The buffer range containing the frame payload.
-    pub(crate) const fn range_frame_payload(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_frame_payload(&self) -> Option<Range<usize>> {
         let start_frame_payload = self.offset_frame_payload() as usize;
         let end_frame_payload = self.offset_frame_payload_end() as usize;
         if start_frame_payload == end_frame_payload {
@@ -426,7 +423,7 @@ impl MpduFieldRanges<MpduWithAllFields> {
     }
 
     /// The buffer range containing the MIC.
-    pub(crate) const fn range_mic(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_mic(&self) -> Option<Range<usize>> {
         #[cfg(feature = "security")]
         return {
             let next_offset = self.offset_fcs.unwrap().get() as usize;
@@ -442,7 +439,7 @@ impl MpduFieldRanges<MpduWithAllFields> {
     }
 
     /// The buffer range containing the FCS.
-    pub(crate) const fn range_fcs(&self) -> Option<Range<usize>> {
+    pub(crate) const fn try_range_fcs(&self) -> Option<Range<usize>> {
         let offset_fcs = self.offset_fcs.unwrap().get() as usize;
         let next_offset = self.offset_remainder.unwrap().get() as usize;
         if offset_fcs == next_offset {

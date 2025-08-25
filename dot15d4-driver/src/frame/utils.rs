@@ -31,13 +31,15 @@ pub fn is_frame_valid_and_for_us(
     let addressing_fields = addressing_fields.as_ref().unwrap();
 
     // Check destination PAN id.
-    let dst_pan_id = addressing_fields.dst_pan_id().unwrap_or(BROADCAST_PAN_ID);
+    let dst_pan_id = addressing_fields
+        .try_dst_pan_id()
+        .unwrap_or(BROADCAST_PAN_ID);
     if *dst_pan_id.as_ref() != *MAC_PAN_ID.as_ref() && dst_pan_id != BROADCAST_PAN_ID {
         return false;
     }
 
     // Check destination address.
-    let dst_addr = addressing_fields.dst_address();
+    let dst_addr = addressing_fields.try_dst_address();
     match dst_addr {
         Some(dst_addr) => {
             if dst_addr == Address::<&[u8]>::BROADCAST_ADDR {

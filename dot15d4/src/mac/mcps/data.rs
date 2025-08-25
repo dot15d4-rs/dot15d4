@@ -66,9 +66,8 @@ impl DataRequest {
         self.mpdu
             .reader()
             .parse_addressing()?
-            .into_addressing_fields()?
-            .ok_or(Error)?
-            .into_dst_pan_id()
+            .try_into_addressing_fields()?
+            .try_into_dst_pan_id()
             .ok_or(Error)
     }
 
@@ -79,9 +78,8 @@ impl DataRequest {
         self.mpdu
             .writer()
             .parse_addressing_mut()?
-            .addressing_fields_mut()?
-            .ok_or(Error)?
-            .dst_pan_id_mut()
+            .try_addressing_fields_mut()?
+            .try_dst_pan_id_mut()
             .ok_or(Error)?
             .set_le_bytes(pan_id.as_ref());
         Ok(())
@@ -91,9 +89,8 @@ impl DataRequest {
         self.mpdu
             .reader()
             .parse_addressing()?
-            .into_addressing_fields()?
-            .ok_or(Error)?
-            .into_dst_address()
+            .try_into_addressing_fields()?
+            .try_into_dst_address()
             .ok_or(Error)
     }
 
@@ -102,8 +99,11 @@ impl DataRequest {
         dst_addr: &Address<Bytes>,
     ) -> SimplifiedResult<()> {
         let mut writer = self.mpdu.writer().parse_addressing_mut()?;
-        let mut addr_fields = writer.addressing_fields_mut()?.ok_or(Error)?;
-        addr_fields.dst_address_mut().ok_or(Error)?.set(dst_addr)
+        let mut addr_fields = writer.try_addressing_fields_mut()?;
+        addr_fields
+            .try_dst_address_mut()
+            .ok_or(Error)?
+            .try_set(dst_addr)
     }
 
     pub fn tx_options(&mut self) -> TxOptions<'_> {

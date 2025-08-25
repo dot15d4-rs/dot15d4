@@ -235,7 +235,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         {
             let mpdu_ies_and_payload_length = mpdu_length_wo_fcs - mpdu_less_ies_and_payload_length;
             self.ies
-                .ies_and_frame_payload_length(mpdu_ies_and_payload_length)
+                .try_ies_and_frame_payload_length(mpdu_ies_and_payload_length)
         }
 
         #[cfg(not(feature = "ies"))]
@@ -256,7 +256,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         let mut len = FRAME_CONTROL_LEN + self.seq_nr.length();
 
         len += match &self.addressing {
-            Some(addressing) => match addressing.addressing_fields_length() {
+            Some(addressing) => match addressing.try_addressing_fields_length() {
                 Ok(addressing_fields_length) => addressing_fields_length,
                 e => return e,
             },

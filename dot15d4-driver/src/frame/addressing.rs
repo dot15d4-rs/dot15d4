@@ -246,6 +246,10 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> PanId<Bytes> {
     pub fn set_u16(&mut self, pan_id: u16) {
         self.as_mut().clone_from_slice(&pan_id.to_le_bytes());
     }
+
+    pub fn set<Src: AsRef<[u8]>>(&mut self, src: &PanId<Src>) {
+        self.set_le_bytes(src.as_ref());
+    }
 }
 
 impl<Bytes: AsRef<[u8]>> AsRef<[u8]> for PanId<Bytes> {
@@ -375,7 +379,7 @@ impl<Bytes: AsRef<[u8]>> Address<Bytes> {
     ///       extended-to-short address map - at least on the coordinator.
     ///
     /// Note: This is not an IEEE 802.15.4 standard feature.
-    pub fn to_short(&self) -> Option<Address<&[u8]>> {
+    pub fn try_into_short_address(&self) -> Option<Address<&[u8]>> {
         match self {
             Address::Short(le_bytes) => Some(Address::Short(ShortAddress::new(le_bytes.as_ref()))),
             // Safety: The slice always has the correct size.
@@ -405,7 +409,10 @@ impl<Bytes: AsMut<[u8]>> Address<Bytes> {
         }
     }
 
-    pub fn set<Src: AsRef<[u8]>>(&mut self, src: &Address<Src>) -> Result<()> {
+    /// Tries to set an address from another address.
+    ///
+    /// Fails if the addresses are not of the same type.
+    pub fn try_set<Src: AsRef<[u8]>>(&mut self, src: &Address<Src>) -> Result<()> {
         let src = src.as_le_bytes();
         let dst = self.as_le_bytes_mut();
         if src.len() != dst.len() {
@@ -415,6 +422,18 @@ impl<Bytes: AsMut<[u8]>> Address<Bytes> {
         dst.copy_from_slice(src);
 
         Ok(())
+    }
+
+    /// Sets an address from another address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the addresses are not of the same type.
+    pub fn set<Src: AsRef<[u8]>>(&mut self, src: &Address<Src>) {
+        let src = src.as_le_bytes();
+        let dst = self.as_le_bytes_mut();
+
+        dst.copy_from_slice(src);
     }
 }
 
@@ -484,19 +503,19 @@ impl<Bytes: AsRef<[u8]>> core::fmt::Display for AddressingFields<Bytes> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         writeln!(f, "Addressing Fields")?;
 
-        if let Some(dst_pan_id) = self.dst_pan_id() {
+        if let Some(dst_pan_id) = self.try_dst_pan_id() {
             writeln!(f, "  dst pan id: {:0x}", dst_pan_id.into_u16())?;
         }
 
-        if let Some(dst_addr) = self.dst_address() {
+        if let Some(dst_addr) = self.try_dst_address() {
             writeln!(f, "  dst address: {dst_addr}")?;
         }
 
-        if let Some(src_pan_id) = self.src_pan_id() {
+        if let Some(src_pan_id) = self.try_src_pan_id() {
             writeln!(f, "  src pan id: {:0x}", src_pan_id.into_u16())?;
         }
 
-        if let Some(src_addr) = self.src_address() {
+        if let Some(src_addr) = self.try_src_address() {
             writeln!(f, "  src address: {src_addr}")?;
         }
 
@@ -513,11 +532,25 @@ impl<Bytes: AsRef<[u8]>> AddressingFields<Bytes> {
     /// This function will check the length of the buffer to ensure it is large
     /// enough to contain the addressing fields. If the buffer is too small, an
     /// error will be returned.
-    pub fn new(le_bytes: Bytes, repr: AddressingRepr) -> Result<Self> {
-        let expected_len = repr.addressing_fields_length()? as usize;
+    pub fn try_new(le_bytes: Bytes, repr: AddressingRepr) -> Result<Self> {
+        let expected_len = repr.try_addressing_fields_length()? as usize;
         if le_bytes.as_ref().len() != expected_len {
             return Err(Error);
         }
+
+        // Safety: We checked the length of the given bytes buffer.
+        unsafe { Ok(Self::new_unchecked(le_bytes, repr)) }
+    }
+
+    /// Create a new [`AddressingFields`] reader/writer from a given
+    /// little-endian bytes slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer is too small.
+    pub fn new(le_bytes: Bytes, repr: AddressingRepr) -> Self {
+        let expected_len = repr.addressing_fields_length() as usize;
+        debug_assert_eq!(le_bytes.as_ref().len(), expected_len);
 
         // Safety: We checked the length of the given bytes buffer.
         unsafe { Self::new_unchecked(le_bytes, repr) }
@@ -528,24 +561,25 @@ impl<Bytes: AsRef<[u8]>> AddressingFields<Bytes> {
     ///
     /// # Safety
     ///
-    /// Requires the length of the bytes buffer to match the address
-    /// representation exactly.
-    pub unsafe fn new_unchecked(le_bytes: Bytes, repr: AddressingRepr) -> Result<Self> {
+    /// - Requires a valid addressing representation.
+    /// - Requires the length of the bytes buffer to match the address
+    ///   representation exactly.
+    pub unsafe fn new_unchecked(le_bytes: Bytes, repr: AddressingRepr) -> Self {
         let [dst_pan_id_len, dst_addr_len, src_pan_id_len, src_addr_len] =
-            repr.addressing_fields_lengths()?;
+            repr.addressing_fields_lengths();
 
         let dst_addr_offset = dst_pan_id_len;
         let src_pan_id_offset = dst_addr_offset + dst_addr_len;
         let src_addr_offset = src_pan_id_offset + src_pan_id_len;
         let last_byte = src_addr_offset + src_addr_len;
 
-        Ok(Self {
+        Self {
             dst_addr_offset,
             src_pan_id_offset,
             src_addr_offset,
             last_byte,
             le_bytes,
-        })
+        }
     }
 
     /// Return the length of the Addressing Fields in octets.
@@ -557,26 +591,26 @@ impl<Bytes: AsRef<[u8]>> AddressingFields<Bytes> {
     }
 
     /// Return the IEEE 802.15.4 destination [`Address`] if not absent.
-    pub fn dst_address(&self) -> Option<Address<&[u8]>> {
-        self.addr_from_range(self.dst_addr_range())
+    pub fn try_dst_address(&self) -> Option<Address<&[u8]>> {
+        self.try_addr_from_range(self.dst_addr_range())
     }
 
     /// Return the IEEE 802.15.4 source [`Address`] if not absent.
-    pub fn src_address(&self) -> Option<Address<&[u8]>> {
-        self.addr_from_range(self.src_addr_range())
+    pub fn try_src_address(&self) -> Option<Address<&[u8]>> {
+        self.try_addr_from_range(self.src_addr_range())
     }
 
     /// Return the IEEE 802.15.4 destination PAN ID if not elided.
-    pub fn dst_pan_id(&self) -> Option<PanId<&[u8]>> {
-        self.pan_id_from_range(self.dst_pan_id_range())
+    pub fn try_dst_pan_id(&self) -> Option<PanId<&[u8]>> {
+        self.try_pan_id_from_range(self.dst_pan_id_range())
     }
 
     /// Return the IEEE 802.15.4 source PAN ID if not elided.
-    pub fn src_pan_id(&self) -> Option<PanId<&[u8]>> {
-        self.pan_id_from_range(self.src_pan_id_range())
+    pub fn try_src_pan_id(&self) -> Option<PanId<&[u8]>> {
+        self.try_pan_id_from_range(self.src_pan_id_range())
     }
 
-    fn addr_from_range(&self, range: Range<usize>) -> Option<Address<&[u8]>> {
+    fn try_addr_from_range(&self, range: Range<usize>) -> Option<Address<&[u8]>> {
         let addr = &self.le_bytes.as_ref()[range];
         match addr.len() {
             0 => Some(Address::Absent),
@@ -587,7 +621,7 @@ impl<Bytes: AsRef<[u8]>> AddressingFields<Bytes> {
         }
     }
 
-    fn pan_id_from_range(&self, range: Range<usize>) -> Option<PanId<&[u8]>> {
+    fn try_pan_id_from_range(&self, range: Range<usize>) -> Option<PanId<&[u8]>> {
         let pan_id = &self.le_bytes.as_ref()[range];
         match pan_id.len() {
             0 => None,
@@ -616,30 +650,30 @@ impl<Bytes: AsRef<[u8]>> AddressingFields<Bytes> {
 
 impl<'bytes> AddressingFields<&'bytes [u8]> {
     /// Return the IEEE 802.15.4 destination [`Address`] if not absent.
-    pub fn into_dst_address(self) -> Option<Address<&'bytes [u8]>> {
+    pub fn try_into_dst_address(self) -> Option<Address<&'bytes [u8]>> {
         let dst_addr_range = self.dst_addr_range();
-        self.into_addr_from_range(dst_addr_range)
+        self.try_into_addr_from_range(dst_addr_range)
     }
 
     /// Return the IEEE 802.15.4 source [`Address`] if not absent.
-    pub fn into_src_address(self) -> Option<Address<&'bytes [u8]>> {
+    pub fn try_into_src_address(self) -> Option<Address<&'bytes [u8]>> {
         let src_addr_range = self.src_addr_range();
-        self.into_addr_from_range(src_addr_range)
+        self.try_into_addr_from_range(src_addr_range)
     }
 
     /// Return the IEEE 802.15.4 destination PAN ID if not elided.
-    pub fn into_dst_pan_id(self) -> Option<PanId<&'bytes [u8]>> {
+    pub fn try_into_dst_pan_id(self) -> Option<PanId<&'bytes [u8]>> {
         let dst_pan_id_range = self.dst_pan_id_range();
-        self.into_pan_id_from_range(dst_pan_id_range)
+        self.try_into_pan_id_from_range(dst_pan_id_range)
     }
 
     /// Return the IEEE 802.15.4 source PAN ID if not elided.
-    pub fn into_src_pan_id(self) -> Option<PanId<&'bytes [u8]>> {
+    pub fn try_into_src_pan_id(self) -> Option<PanId<&'bytes [u8]>> {
         let src_pan_id_range = self.src_pan_id_range();
-        self.into_pan_id_from_range(src_pan_id_range)
+        self.try_into_pan_id_from_range(src_pan_id_range)
     }
 
-    fn into_addr_from_range(self, range: Range<usize>) -> Option<Address<&'bytes [u8]>> {
+    fn try_into_addr_from_range(self, range: Range<usize>) -> Option<Address<&'bytes [u8]>> {
         let addr = &self.le_bytes[range];
         match addr.len() {
             0 => Some(Address::Absent),
@@ -650,7 +684,7 @@ impl<'bytes> AddressingFields<&'bytes [u8]> {
         }
     }
 
-    fn into_pan_id_from_range(self, range: Range<usize>) -> Option<PanId<&'bytes [u8]>> {
+    fn try_into_pan_id_from_range(self, range: Range<usize>) -> Option<PanId<&'bytes [u8]>> {
         let pan_id = &self.le_bytes[range];
         match pan_id.len() {
             0 => None,
@@ -663,26 +697,62 @@ impl<'bytes> AddressingFields<&'bytes [u8]> {
 
 impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> AddressingFields<Bytes> {
     /// Return the IEEE 802.15.4 destination [`Address`] if not absent.
-    pub fn dst_address_mut(&mut self) -> Option<Address<&mut [u8]>> {
-        self.addr_from_range_mut(self.dst_addr_range())
+    pub fn try_dst_address_mut(&mut self) -> Option<Address<&mut [u8]>> {
+        self.try_addr_from_range_mut(self.dst_addr_range())
+    }
+
+    /// Return the IEEE 802.15.4 destination [`Address`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the destination address is absent.
+    pub fn dst_address_mut(&mut self) -> Address<&mut [u8]> {
+        self.try_dst_address_mut().unwrap()
     }
 
     /// Return the IEEE 802.15.4 source [`Address`] if not absent.
-    pub fn src_address_mut(&mut self) -> Option<Address<&mut [u8]>> {
-        self.addr_from_range_mut(self.src_addr_range())
+    pub fn try_src_address_mut(&mut self) -> Option<Address<&mut [u8]>> {
+        self.try_addr_from_range_mut(self.src_addr_range())
+    }
+
+    /// Return the IEEE 802.15.4 source [`Address`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the source address is absent.
+    pub fn src_address_mut(&mut self) -> Address<&mut [u8]> {
+        self.try_src_address_mut().unwrap()
     }
 
     /// Return the IEEE 802.15.4 destination PAN ID if not elided.
-    pub fn dst_pan_id_mut(&mut self) -> Option<PanId<&mut [u8]>> {
-        self.pan_id_from_range_mut(self.dst_pan_id_range())
+    pub fn try_dst_pan_id_mut(&mut self) -> Option<PanId<&mut [u8]>> {
+        self.try_pan_id_from_range_mut(self.dst_pan_id_range())
+    }
+
+    /// Return the IEEE 802.15.4 destination PAN ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the destination PAN ID is elided.
+    pub fn dst_pan_id_mut(&mut self) -> PanId<&mut [u8]> {
+        self.try_dst_pan_id_mut().unwrap()
     }
 
     /// Return the IEEE 802.15.4 source PAN ID if not elided.
-    pub fn src_pan_id_mut(&mut self) -> Option<PanId<&mut [u8]>> {
-        self.pan_id_from_range_mut(self.src_pan_id_range())
+    pub fn try_src_pan_id_mut(&mut self) -> Option<PanId<&mut [u8]>> {
+        self.try_pan_id_from_range_mut(self.src_pan_id_range())
     }
 
-    fn addr_from_range_mut(&mut self, range: Range<usize>) -> Option<Address<&mut [u8]>> {
+    /// Return the IEEE 802.15.4 source PAN ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the source PAN ID is elided.
+    pub fn src_pan_id_mut(&mut self) -> PanId<&mut [u8]> {
+        self.try_src_pan_id_mut().unwrap()
+    }
+
+    fn try_addr_from_range_mut(&mut self, range: Range<usize>) -> Option<Address<&mut [u8]>> {
         let addr = &mut self.le_bytes.as_mut()[range];
         match addr.len() {
             0 => Some(Address::Absent),
@@ -693,7 +763,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> AddressingFields<Bytes> {
         }
     }
 
-    fn pan_id_from_range_mut(&mut self, range: Range<usize>) -> Option<PanId<&mut [u8]>> {
+    fn try_pan_id_from_range_mut(&mut self, range: Range<usize>) -> Option<PanId<&mut [u8]>> {
         let pan_id = &mut self.le_bytes.as_mut()[range];
         match pan_id.len() {
             0 => None,
@@ -755,7 +825,7 @@ impl AddressingRepr {
     }
 
     /// Safety: The frame version and addressing modes must be known.
-    pub fn from_frame_control<Bytes: AsRef<[u8]>>(
+    pub fn try_from_frame_control<Bytes: AsRef<[u8]>>(
         frame_control: FrameControl<Bytes>,
     ) -> Result<Self> {
         let dst = frame_control.dst_addressing_mode();
@@ -818,18 +888,6 @@ impl AddressingRepr {
         Ok(addressing)
     }
 
-    /// Addressing fields length
-    pub const fn addressing_fields_length(&self) -> Result<u16> {
-        if let Ok([dst_pan_id_len, dst_addr_len, src_pan_id_len, src_addr_len]) =
-            self.addressing_fields_lengths()
-        {
-            // fast const-compat calculation
-            Ok((dst_pan_id_len + dst_addr_len + src_pan_id_len + src_addr_len) as u16)
-        } else {
-            Err(Error)
-        }
-    }
-
     /// Pan ID compression
     pub const fn pan_id_compression(&self) -> bool {
         match self.pan_id_compression {
@@ -855,8 +913,70 @@ impl AddressingRepr {
         self.src
     }
 
+    /// Returns [dst_pan_id_len, dst_address_len, src_pan_id_len,
+    /// src_address_len] for a valid addressing representation.
+    ///
+    /// Fails if the addressing representation is invalid.
+    pub const fn try_addressing_fields_lengths(&self) -> Result<[u8; 4]> {
+        if let Ok((dst_pan_id_present, dst_address_mode, src_pan_id_present, src_address_mode)) =
+            self.try_address_present_flags()
+        {
+            Ok([
+                if dst_pan_id_present { 2 } else { 0 },
+                dst_address_mode.length() as u8,
+                if src_pan_id_present { 2 } else { 0 },
+                src_address_mode.length() as u8,
+            ])
+        } else {
+            Err(Error)
+        }
+    }
+
+    /// Returns [dst_pan_id_len, dst_address_len, src_pan_id_len,
+    /// src_address_len] for a valid addressing representation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the addressing representation is invalid.
+    pub const fn addressing_fields_lengths(&self) -> [u8; 4] {
+        if let Ok(addressing_field_lengths) = self.try_addressing_fields_lengths() {
+            addressing_field_lengths
+        } else {
+            panic!()
+        }
+    }
+
+    /// Tries to calculate the addressing fields length.
+    ///
+    /// Fails if the addressing representation is invalid.
+    pub const fn try_addressing_fields_length(&self) -> Result<u16> {
+        if let Ok([dst_pan_id_len, dst_addr_len, src_pan_id_len, src_addr_len]) =
+            self.try_addressing_fields_lengths()
+        {
+            // fast const-compat calculation
+            Ok((dst_pan_id_len + dst_addr_len + src_pan_id_len + src_addr_len) as u16)
+        } else {
+            Err(Error)
+        }
+    }
+
+    /// Calculates the addressing fields length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the addressing representation is invalid.
+    pub const fn addressing_fields_length(&self) -> u16 {
+        if let Ok(addressing_fields_length) = self.try_addressing_fields_length() {
+            addressing_fields_length
+        } else {
+            panic!()
+        }
+    }
+
     /// Returns (dst_pan_id_present, dst_address_mode, src_pan_id_present, src_address_mode)
-    const fn address_present_flags(&self) -> Result<(bool, AddressingMode, bool, AddressingMode)> {
+    const fn try_address_present_flags(
+        &self,
+    ) -> Result<(bool, AddressingMode, bool, AddressingMode)> {
         use AddressingMode::*;
         match self.pan_id_compression {
             // IEEE 802.15.4-2006 or earlier.
@@ -923,23 +1043,8 @@ impl AddressingRepr {
             }
         }
     }
-
-    /// Returns [dst_pan_id_len, dst_address_len, src_pan_id_len, src_address_len]
-    pub const fn addressing_fields_lengths(&self) -> Result<[u8; 4]> {
-        if let Ok((dst_pan_id_present, dst_address_mode, src_pan_id_present, src_address_mode)) =
-            self.address_present_flags()
-        {
-            Ok([
-                if dst_pan_id_present { 2 } else { 0 },
-                dst_address_mode.length() as u8,
-                if src_pan_id_present { 2 } else { 0 },
-                src_address_mode.length() as u8,
-            ])
-        } else {
-            Err(Error)
-        }
-    }
 }
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -1047,14 +1152,14 @@ mod tests {
     }
 
     #[test]
-    fn address_present_flags() {
+    fn try_address_present_flags() {
         use AddressingMode::*;
 
         macro_rules! check {
             (($compression:expr, $dst:ident, $src:ident, $pan_ids_equal: literal) -> $expected:expr) => {
                 assert_eq!(
                     AddressingRepr::new($dst, $src, $pan_ids_equal, $compression)
-                        .address_present_flags()
+                        .try_address_present_flags()
                         .ok(),
                     $expected
                 );
