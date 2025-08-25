@@ -15,10 +15,7 @@ cortex-m = { version = "0.7", features = [
     "critical-section-single-core",
 ], optional = true }
 cortex-m-rt = { version = "0.7.0", optional = true }
-dot15d4-driver = { version = "0.0.1", path = "../../dot15d4-driver", features = [
-    "nrf52840",
-] }
-dot15d4-util = { version = "0.0.1", path = "../../dot15d4-util" }
+dot15d4 = { version = "0.1.2", path = "../../dot15d4" }
 embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
     "executor-thread",
 ] }
@@ -47,7 +44,7 @@ nrf52840 = [
     "dep:cortex-m",
     "dep:cortex-m-rt",
     "embassy-executor/arch-cortex-m",
-    "dot15d4-driver/nrf52840",
+    "dot15d4/nrf52840",
     "dot15d4-embassy/nrf52840",
 ]
 
@@ -56,26 +53,19 @@ embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
 defmt = [
     "dep:defmt",
     "dep:defmt-rtt",
-    "dot15d4-driver/defmt",
+    "dot15d4/defmt",
     "dot15d4-embassy/defmt",
-    "dot15d4-util/defmt",
     "embassy-executor/defmt",
     "embassy-net/defmt",
     "panic-probe/print-defmt",
 ]
-log = [
-    "dep:log",
-    "dot15d4-driver/log",
-    "dot15d4-embassy/log",
-    "dot15d4-util/log",
-]
+log = ["dep:log", "dot15d4/log", "dot15d4-embassy/log"]
 
-gpio-trace = ["dot15d4-driver/gpio-trace"]
+gpio-trace = ["dot15d4/gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "embassy-executor/rtos-trace",
-    "dot15d4-util/rtos-trace",
-    "dot15d4-driver/rtos-trace",
+    "dot15d4/rtos-trace",
     "dot15d4-embassy/rtos-trace",
     "log",
 ]

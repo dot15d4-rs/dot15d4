@@ -1,6 +1,6 @@
 #![no_std]
 
-use dot15d4_driver::socs::nrf::{
+use dot15d4::driver::socs::nrf::{
     export::{
         pac::{
             CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, PPI, RADIO, RTC0, SCB, SWI0, UICR,
