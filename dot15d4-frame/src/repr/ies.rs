@@ -295,7 +295,7 @@ impl IeListRepr<'_> {
     /// This is usually required when parsing incoming frames. In this case the
     /// remaining length of the MPDU is known from which the length of the IE
     /// and frame payload fields need to be derived.
-    pub const fn ies_and_frame_payload_length(
+    pub const fn try_ies_and_frame_payload_length(
         &self,
         mpdu_ies_and_payload_length: u16,
     ) -> Result<(u16, u16)> {

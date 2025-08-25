@@ -89,7 +89,7 @@ impl<State> RadioFrame<State> {
     /// See [`Self::frame_control()`].
     pub unsafe fn fc_and_addressing_repr(&self) -> Result<(FrameControl<[u8; 2]>, AddressingRepr)> {
         let fc = self.fc();
-        let addressing_repr = AddressingRepr::from_frame_control(fc.clone())?;
+        let addressing_repr = AddressingRepr::try_from_frame_control(fc.clone())?;
         Ok((fc, addressing_repr))
     }
 

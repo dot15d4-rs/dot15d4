@@ -26,12 +26,12 @@ use super::field_ranges::MpduFieldRanges;
 impl MpduFrame {
     fn frame_control_slice_ref(&self) -> &[u8] {
         let mpdu_field_ranges = MpduFieldRanges::new(self.offset, SeqNrRepr::No);
-        &self.buffer[mpdu_field_ranges.range_frame_control()]
+        &self.buffer[mpdu_field_ranges.try_range_frame_control()]
     }
 
     pub(crate) fn frame_control_slice_mut(&mut self) -> &mut [u8] {
         let mpdu_field_ranges = MpduFieldRanges::new(self.offset, SeqNrRepr::No);
-        &mut self.buffer[mpdu_field_ranges.range_frame_control()]
+        &mut self.buffer[mpdu_field_ranges.try_range_frame_control()]
     }
 
     /// Provides read-only access to the [`FrameControl`] field.
@@ -55,19 +55,34 @@ impl MpduFrame {
         Some(self.buffer[mpdu_field_ranges.offset_seq_nr().get() as usize])
     }
 
-    /// Writes the sequence number field.
+    /// Tries to write to the sequence number field.
     ///
-    /// Safety: Requires the sequence number suppression field of the frame
-    ///         control field to be false.
-    pub fn set_sequence_number(&mut self, seq_nr: u8) -> SimplifiedResult<()> {
+    /// Returns an error if the sequence number suppression field of the frame
+    /// control field is true.
+    pub fn try_set_sequence_number(&mut self, seq_nr: u8) -> SimplifiedResult<()> {
         if self.frame_control().sequence_number_suppression() {
             return Err(Error);
         }
 
+        self.set_sequence_number_unchecked(seq_nr);
+        Ok(())
+    }
+
+    /// Writes to the sequence number field.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sequence number suppression field of the frame control
+    /// field is true.
+    pub fn set_sequence_number(&mut self, seq_nr: u8) {
+        debug_assert!(!self.frame_control().sequence_number_suppression());
+        self.set_sequence_number_unchecked(seq_nr);
+    }
+
+    /// Writes to the sequence number field.
+    fn set_sequence_number_unchecked(&mut self, seq_nr: u8) {
         let mpdu_field_ranges = MpduFieldRanges::new(self.offset, SeqNrRepr::Yes);
         self.buffer[mpdu_field_ranges.offset_seq_nr().get() as usize] = seq_nr;
-
-        Ok(())
     }
 
     /// Initializes a partially parsed MPDU with read-only access to the frame
@@ -212,10 +227,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         let mpdu_field_ranges = MpduFieldRanges::new(offset_mpdu, self.seq_nr);
 
         let mpdu_field_ranges = if let Some(addressing) = self.addressing {
-            match mpdu_field_ranges.with_addressing(addressing) {
-                Ok(mpdu_field_ranges) => mpdu_field_ranges,
-                Err(_) => return Err(mpdu.into_buffer()),
-            }
+            mpdu_field_ranges.with_addressing(addressing)
         } else {
             mpdu_field_ranges.without_addressing()
         };
@@ -230,17 +242,13 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         let mpdu_field_ranges = mpdu_field_ranges.without_security();
 
         #[cfg(feature = "ies")]
-        let mpdu_field_ranges = match self.ies {
-            IeListRepr::Empty => {
-                mpdu_field_ranges.without_ies_with_payload_length::<Config>(frame_payload_length)
-            }
-            ies => match mpdu_field_ranges
-                .with_ies_and_payload_length::<Config>(ies, frame_payload_length)
-            {
-                Ok(ies) => ies,
-                Err(_) => return Err(mpdu.into_buffer()),
-            },
-        };
+        let mpdu_field_ranges =
+            match self.ies {
+                IeListRepr::Empty => mpdu_field_ranges
+                    .without_ies_with_payload_length::<Config>(frame_payload_length),
+                ies => mpdu_field_ranges
+                    .with_ies_and_payload_length::<Config>(ies, frame_payload_length),
+            };
         #[cfg(not(feature = "ies"))]
         let mpdu_field_ranges =
             mpdu_field_ranges.without_ies_with_payload_length::<Config>(frame_payload_length);
@@ -298,13 +306,20 @@ impl<WriteOnlyMpdu: AsMut<MpduFrame>, State> MpduParser<WriteOnlyMpdu, State> {
             .set_frame_pending(frame_pending);
     }
 
-    /// See [`MpduFrame::set_sequence_number()`].
-    pub fn set_sequence_number(&mut self, seq_nr: u8) -> SimplifiedResult<()> {
+    /// See [`MpduFrame::try_set_sequence_number()`].
+    pub fn try_set_sequence_number(&mut self, seq_nr: u8) -> SimplifiedResult<()> {
         // Safety: We synchronize the frame representation and the frame
         //         control field when we instantiate the parsed MPDU. The
         //         following call checks the frame control field's sequence
         //         number suppression field.
-        self.mpdu.as_mut().set_sequence_number(seq_nr)
+        self.mpdu.as_mut().try_set_sequence_number(seq_nr)
+    }
+
+    /// See [`MpduFrame::set_sequence_number()`].
+    pub fn set_sequence_number(&mut self, seq_nr: u8) {
+        // Safety: We synchronize the frame representation and the frame
+        //         control field when we instantiate the parsed MPDU.
+        self.mpdu.as_mut().set_sequence_number(seq_nr);
     }
 }
 
@@ -340,9 +355,9 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithFrameContr
     pub fn parse_addressing(
         self,
     ) -> SimplifiedResult<MpduParser<ReadOnlyMpdu, MpduWithAddressing>> {
-        let addressing = AddressingRepr::from_frame_control(self.frame_control())?;
-        let mpdu_field_ranges = if addressing.addressing_fields_length()? > 0 {
-            self.mpdu_field_ranges.with_addressing(addressing)?
+        let addressing = AddressingRepr::try_from_frame_control(self.frame_control())?;
+        let mpdu_field_ranges = if addressing.try_addressing_fields_length()? > 0 {
+            self.mpdu_field_ranges.with_addressing(addressing)
         } else {
             self.mpdu_field_ranges.without_addressing()
         };
@@ -363,9 +378,9 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>>
     pub fn parse_addressing_mut(
         self,
     ) -> SimplifiedResult<MpduParser<ReadWriteMpdu, MpduWithAddressing>> {
-        let addressing = AddressingRepr::from_frame_control(self.frame_control())?;
-        let mpdu_field_ranges = if addressing.addressing_fields_length()? > 0 {
-            self.mpdu_field_ranges.with_addressing(addressing)?
+        let addressing = AddressingRepr::try_from_frame_control(self.frame_control())?;
+        let mpdu_field_ranges = if addressing.try_addressing_fields_length()? > 0 {
+            self.mpdu_field_ranges.with_addressing(addressing)
         } else {
             self.mpdu_field_ranges.without_addressing()
         };
@@ -405,7 +420,7 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithSecurity> 
         let mpdu_length_wo_fcs = self.mpdu.as_ref().pdu_length_wo_fcs();
         let mpdu_field_ranges = match self
             .mpdu_field_ranges
-            .without_ies_with_mpdu_length::<Config>(mpdu_length_wo_fcs)
+            .try_without_ies_with_mpdu_length::<Config>(mpdu_length_wo_fcs)
         {
             Ok(result) => result,
             Err(_) => return Err(Error),
@@ -423,21 +438,25 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithSecurity> 
 impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduParsedUpToAddressing>
     MpduParser<ReadOnlyMpdu, State>
 {
-    /// Read-only addressing field access.
-    pub fn addressing_fields(&self) -> SimplifiedResult<Option<AddressingFields<&[u8]>>> {
-        let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
+    /// Tries to provide read-only addressing field access.
+    ///
+    /// Fails if the frame control field is invalid or the MPDU does not contain
+    /// any addressing fields.
+    pub fn try_addressing_fields(&self) -> SimplifiedResult<AddressingFields<&[u8]>> {
+        let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
+        let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: Addressing representation and range are both synced with the
-        //         frame control field.
+        // Safety: We checked that we have an addressing range with a non-zero
+        //         length. Addressing representation and range are both synced
+        //         with the frame control field.
         let addressing_fields = unsafe {
             AddressingFields::new_unchecked(
                 &self.mpdu.as_ref().buffer[range_addressing],
                 addressing_repr,
-            )?
+            )
         };
 
-        Ok(Some(addressing_fields))
+        Ok(addressing_fields)
     }
 }
 
@@ -447,22 +466,45 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAd
     MpduParser<ReadWriteMpdu, State>
 {
     /// Writable addressing field access.
-    pub fn addressing_fields_mut(
-        &mut self,
-    ) -> SimplifiedResult<Option<AddressingFields<&mut [u8]>>> {
-        let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
+    ///
+    /// Fails if the frame control field is invalid or the MPDU does not contain
+    /// any addressing fields.
+    pub fn try_addressing_fields_mut(&mut self) -> SimplifiedResult<AddressingFields<&mut [u8]>> {
+        let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
+        let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: Addressing representation and range are both synced with the
-        //         frame control field.
+        // Safety: We checked that we have an addressing range with a non-zero
+        //         length. Addressing representation and range are both synced
+        //         with the frame control field.
         let addressing_fields = unsafe {
             AddressingFields::new_unchecked(
                 &mut self.mpdu.as_mut().buffer[range_addressing],
                 addressing_repr,
-            )?
+            )
         };
 
-        Ok(Some(addressing_fields))
+        Ok(addressing_fields)
+    }
+
+    /// Writable addressing field access.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame control field is invalid or the MPDU does not contain
+    /// any addressing fields.
+    pub fn addressing_fields_mut(&mut self) -> AddressingFields<&mut [u8]> {
+        let range_addressing = self.mpdu_field_ranges.try_range_addressing().unwrap();
+        let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control()).unwrap();
+
+        // Safety: We checked that we have an addressing range with a non-zero
+        //         length. Addressing representation and range are both synced
+        //         with the frame control field.
+        unsafe {
+            AddressingFields::new_unchecked(
+                &mut self.mpdu.as_mut().buffer[range_addressing],
+                addressing_repr,
+            )
+        }
     }
 }
 
@@ -470,17 +512,18 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAd
 impl<'mpdu, State: MpduParsedUpToAddressing> MpduParser<&'mpdu MpduFrame, State> {
     /// Consumes an MPDU reader and returns a stand-alone reference into the
     /// MPDU's addressing fields instead.
-    pub fn into_addressing_fields(self) -> SimplifiedResult<Option<AddressingFields<&'mpdu [u8]>>> {
-        let range_addressing = self.mpdu_field_ranges.range_addressing().ok_or(Error)?;
-        let addressing_repr = AddressingRepr::from_frame_control(self.frame_control())?;
+    pub fn try_into_addressing_fields(self) -> SimplifiedResult<AddressingFields<&'mpdu [u8]>> {
+        let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
+        let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: Addressing representation and range are both synced with the
-        //         frame control field.
+        // Safety: We checked that we have an addressing range with a non-zero
+        //         length. Addressing representation and range are both synced
+        //         with the frame control field.
         let addressing_fields = unsafe {
-            AddressingFields::new_unchecked(&self.mpdu.buffer[range_addressing], addressing_repr)?
+            AddressingFields::new_unchecked(&self.mpdu.buffer[range_addressing], addressing_repr)
         };
 
-        Ok(Some(addressing_fields))
+        Ok(addressing_fields)
     }
 }
 
@@ -494,12 +537,12 @@ impl<AnyMpdu, State: MpduParsedUpToSecurity> MpduParser<AnyMpdu, State> {
 impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields> {
     // TODO: Add access to IEs.
 
-    pub fn frame_payload(&self) -> Option<&[u8]> {
-        Some(&self.mpdu.as_ref().buffer[self.mpdu_field_ranges.range_frame_payload()?])
+    pub fn try_frame_payload(&self) -> Option<&[u8]> {
+        Some(&self.mpdu.as_ref().buffer[self.mpdu_field_ranges.try_range_frame_payload()?])
     }
 
-    pub fn fcs(&self) -> Option<&[u8]> {
-        Some(&self.mpdu.as_ref().buffer[self.mpdu_field_ranges.range_fcs()?])
+    pub fn try_fcs(&self) -> Option<&[u8]> {
+        Some(&self.mpdu.as_ref().buffer[self.mpdu_field_ranges.try_range_fcs()?])
     }
 }
 
@@ -507,12 +550,20 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields>
 impl<ReadOnlyMpdu: AsMut<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields> {
     // TODO: Add access to IEs.
 
-    pub fn frame_payload_mut(&mut self) -> Option<&mut [u8]> {
-        Some(&mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.range_frame_payload()?])
+    pub fn try_frame_payload_mut(&mut self) -> Option<&mut [u8]> {
+        Some(&mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.try_range_frame_payload()?])
     }
 
-    pub fn fcs_mut(&mut self) -> Option<&mut [u8]> {
-        Some(&mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.range_fcs()?])
+    pub fn frame_payload_mut(&mut self) -> &mut [u8] {
+        &mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.try_range_frame_payload().unwrap()]
+    }
+
+    pub fn try_fcs_mut(&mut self) -> Option<&mut [u8]> {
+        Some(&mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.try_range_fcs()?])
+    }
+
+    pub fn fcs_mut(&mut self) -> &mut [u8] {
+        &mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.try_range_fcs().unwrap()]
     }
 }
 
@@ -537,11 +588,11 @@ impl<State> FramePdu for MpduParser<MpduFrame, State> {
 impl Frame for MpduParser<MpduFrame, MpduWithAllFields> {
     /// Provides access to the frame payload for reading.
     fn sdu_ref(&self) -> &[u8] {
-        self.frame_payload().unwrap_or(&[])
+        self.try_frame_payload().unwrap_or(&[])
     }
 
     /// Provides access to the frame payload for writing.
     fn sdu_mut(&mut self) -> &mut [u8] {
-        self.frame_payload_mut().unwrap_or(&mut [])
+        self.try_frame_payload_mut().unwrap_or(&mut [])
     }
 }

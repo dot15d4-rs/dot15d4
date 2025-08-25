@@ -477,7 +477,7 @@ where
         let tx_ack_frame = self.tx_ack_frame.take().unwrap();
 
         let mut tx_ack_mpdu = MpduFrame::from_radio_frame(tx_ack_frame);
-        let _ = tx_ack_mpdu.set_sequence_number(ack_seq_nr);
+        let _ = tx_ack_mpdu.try_set_sequence_number(ack_seq_nr);
         let tx_ack_frame = tx_ack_mpdu.into_radio_frame::<RadioDriverImpl>();
 
         let tx_ack_task = RadioTaskTx {
