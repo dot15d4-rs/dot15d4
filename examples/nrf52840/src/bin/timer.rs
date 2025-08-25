@@ -3,7 +3,7 @@
 
 use panic_probe as _;
 
-use dot15d4_driver::{
+use dot15d4::driver::{
     executor::InterruptExecutor,
     socs::nrf::executor,
     timer::{HardwareSignal, LocalClockDuration, Pin, RadioTimerApi, RadioTimerResult},
