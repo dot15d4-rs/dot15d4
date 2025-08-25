@@ -919,7 +919,7 @@ pub trait SelfRadioTransition<
     /// returned to the radio task scheduler once the `transition()` to the
     /// target state also finishes, see the [`RadioDriver`] documentation for
     /// UML state machine compatibility.
-    fn run_and_transition(
+    fn complete_and_transition(
         self,
     ) -> impl Future<Output = CompletedRadioTransition<RadioDriverImpl, ThisTask, NextTask>>;
 }
@@ -938,7 +938,7 @@ where
     RadioDriver<RadioDriverImpl, NextTask>: RadioState<NextTask>,
     RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl>,
 {
-    async fn run_and_transition(
+    async fn complete_and_transition(
         mut self,
     ) -> CompletedRadioTransition<RadioDriverImpl, ThisTask, NextTask> {
         if let Err(scheduling_error) = (self.on_scheduled)() {

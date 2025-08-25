@@ -43,7 +43,7 @@ log = { version = "0.4", optional = true }
 rtos-trace = { version = "0.2", optional = true }
 
 [features]
-default = ["_cortex-m", "embassy-net"]
+default = ["_cortex-m", "embassy-net", "all_radio_tests"]
 
 embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
 
@@ -68,6 +68,11 @@ rtos-trace = [
     "log",
 ]
 
+# Radio test scenarios
+all_radio_tests = ["rx_to_tx", "tx_to_tx"]
+rx_to_tx = ["_cortex-m"]
+tx_to_tx = ["_cortex-m"]
+
 # An internal helper attribute that allows us to apply clippy in std mode.
 _cortex-m = [
     "dep:cortex-m",
@@ -76,5 +81,5 @@ _cortex-m = [
     "dot15d4/nrf52840",
     "dot15d4-embassy/nrf52840",
 ]
-_clippy-std = ["embassy-executor/arch-std"]
+_clippy-std = ["embassy-executor/arch-std", "all_radio_tests"]
 _clippy-no-std = ["_cortex-m", "embassy-net", "rtos-trace"]

@@ -8,12 +8,9 @@ use embassy_nrf as _;
 
 use dot15d4::driver::{
     executor::InterruptExecutor,
-    socs::nrf::executor,
     timer::{HardwareSignal, LocalClockDuration, Pin, RadioTimerApi, RadioTimerResult},
 };
-#[cfg(feature = "gpio-trace")]
-use dot15d4_examples_nrf52840::PIN_EXECUTOR;
-use dot15d4_examples_nrf52840::{config_peripherals, toggle_gpiote_pin, PIN_ALARM};
+use dot15d4_examples_nrf52840::{config_peripherals, swi_executor, toggle_gpiote_pin, PIN_ALARM};
 use embassy_executor::Spawner;
 
 #[embassy_executor::main]
@@ -27,15 +24,7 @@ async fn main(_spawner: Spawner) {
         toggle_gpiote_pin(&peripherals.gpiote, PIN_ALARM.gpiote_channel as usize);
     };
 
-    #[cfg(feature = "gpio-trace")]
-    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
-    let executor = executor::swi0(
-        peripherals.swi0,
-        #[cfg(feature = "gpio-trace")]
-        &peripherals.gpiote,
-        #[cfg(feature = "gpio-trace")]
-        gpiote_trace_channel,
-    );
+    let executor = swi_executor(&peripherals.gpiote);
 
     let timer_task = async {
         let mut timeout = timer.now();
@@ -52,9 +41,8 @@ async fn main(_spawner: Spawner) {
         }
         toggle_alarm_pin();
     };
-    unsafe {
-        executor.spawn(timer_task).await;
-    }
+
+    unsafe { executor.spawn(timer_task).await };
 
     toggle_alarm_pin();
 
