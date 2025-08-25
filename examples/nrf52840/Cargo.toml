@@ -38,15 +38,7 @@ log = { version = "0.4", optional = true }
 rtos-trace = { version = "0.2", optional = true }
 
 [features]
-default = ["nrf52840", "embassy-net"]
-
-nrf52840 = [
-    "dep:cortex-m",
-    "dep:cortex-m-rt",
-    "embassy-executor/arch-cortex-m",
-    "dot15d4/nrf52840",
-    "dot15d4-embassy/nrf52840",
-]
+default = ["_cortex-m", "embassy-net"]
 
 embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
 
@@ -70,5 +62,13 @@ rtos-trace = [
     "log",
 ]
 
+# An internal helper attribute that allows us to apply clippy in std mode.
+_cortex-m = [
+    "dep:cortex-m",
+    "dep:cortex-m-rt",
+    "embassy-executor/arch-cortex-m",
+    "dot15d4/nrf52840",
+    "dot15d4-embassy/nrf52840",
+]
 _clippy-std = ["embassy-executor/arch-std"]
-_clippy-no-std = ["nrf52840", "embassy-net", "rtos-trace"]
+_clippy-no-std = ["_cortex-m", "embassy-net", "rtos-trace"]
