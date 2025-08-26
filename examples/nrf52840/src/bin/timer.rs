@@ -3,6 +3,9 @@
 
 use panic_probe as _;
 
+#[cfg(feature = "rtos-trace")]
+use embassy_nrf as _;
+
 use dot15d4::driver::{
     executor::InterruptExecutor,
     socs::nrf::executor,
@@ -15,6 +18,9 @@ use embassy_executor::Spawner;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
+    #[cfg(feature = "rtos-trace")]
+    dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
+
     let (peripherals, _, timer) = config_peripherals();
 
     let toggle_alarm_pin = || {

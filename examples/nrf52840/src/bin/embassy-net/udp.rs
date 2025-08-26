@@ -26,7 +26,7 @@ const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
-    dot15d4::util::trace::instrument();
+    dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
     let (peripherals, clocks, timer) = dot15d4_examples_nrf52840::config_peripherals();
     #[cfg(feature = "gpio-trace")]

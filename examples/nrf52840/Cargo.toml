@@ -19,6 +19,11 @@ dot15d4 = { version = "0.1.2", path = "../../dot15d4" }
 embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
     "executor-thread",
 ] }
+embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+    # The time driver is only required for rtos-trace.
+    "time-driver-rtc1",
+], optional = true, default-features = false }
+
 panic-probe = "1.0"
 heapless = "0.8"
 static_cell = "2.1"
@@ -56,6 +61,7 @@ log = ["dep:log", "dot15d4/log", "dot15d4-embassy/log"]
 gpio-trace = ["dot15d4/gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
+    "dep:embassy-nrf",
     "embassy-executor/rtos-trace",
     "dot15d4/rtos-trace",
     "dot15d4-embassy/rtos-trace",
