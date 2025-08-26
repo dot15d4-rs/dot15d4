@@ -10,9 +10,7 @@ keywords = ["ieee802154", "WPAN", "smoltcp"]
 
 [dependencies]
 dot15d4-util = { version = "0.0.1", path = "../dot15d4-util" }
-dot15d4-driver = { version = "0.0.1", path = "../dot15d4-driver", features = [
-    "nrf52840",
-] }
+dot15d4-driver = { version = "0.0.1", path = "../dot15d4-driver"}
 dot15d4-frame = { version = "0.0.1", path = "../dot15d4-frame", default-features = false }
 
 log = { version = "0.4.21", optional = true }
@@ -48,6 +46,9 @@ ies = ["dot15d4-frame/ies"]
 
 # Tracing
 rtos-trace = ["dep:rtos-trace", "log"]
+
+# Support for Nordic nrf52840
+nrf52840 = ["dot15d4-driver/nrf52840"]
 
 _clippy-std = ["std", "fuzz"]
 _clippy-no-std = ["rtos-trace"]
