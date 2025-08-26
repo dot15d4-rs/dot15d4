@@ -47,6 +47,7 @@ nrf52840 = [
     "dep:cortex-m",
     "dep:cortex-m-rt",
     "embassy-executor/arch-cortex-m",
+    "dot15d4-driver/nrf52840",
     "dot15d4-embassy/nrf52840",
 ]
 
