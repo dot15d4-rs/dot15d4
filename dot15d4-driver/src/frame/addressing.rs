@@ -757,7 +757,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> AddressingFields<Bytes> {
         match addr.len() {
             0 => Some(Address::Absent),
             2 => Some(Address::Short(ShortAddress(addr))),
-            4 => Some(Address::Extended(ExtendedAddress(addr))),
+            8 => Some(Address::Extended(ExtendedAddress(addr))),
             // Safety: This is a guarantee of AddressingRepr.
             _ => unreachable!(),
         }
