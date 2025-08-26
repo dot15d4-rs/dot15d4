@@ -406,9 +406,16 @@ impl MpduFieldRanges<MpduWithAllFields> {
     /// frame does not have a payload.
     pub(crate) const fn offset_frame_payload_end(&self) -> u16 {
         #[cfg(feature = "security")]
-        return self.offset_fcs.unwrap().get() - self.length_mic.unwrap().get() as u16;
+        {
+            let length_mic = if let Some(length_mic) = self.length_mic {
+                length_mic.get()
+            } else {
+                0
+            } as u16;
+            self.offset_fcs.unwrap().get() - length_mic
+        }
         #[cfg(not(feature = "security"))]
-        return self.offset_fcs.unwrap().get();
+        self.offset_fcs.unwrap().get()
     }
 
     /// The buffer range containing the frame payload.
