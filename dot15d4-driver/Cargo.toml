@@ -24,6 +24,8 @@ nrf52840-pac = { version = "0.12", optional = true }
 nrf52811-pac = { version = "0.12", optional = true }
 nrf5340-net-pac = { version = "0.12", optional = true }
 
+defmt = { version = "1.0", optional = true }
+defmt-rtt = { version = "1.0", optional = true }
 log = { version = "0.4.21", optional = true }
 
 cty = { version = "0.2", optional = true }
@@ -38,7 +40,7 @@ nrf52811 = ["dep:nrf52811-hal", "dep:nrf52811-hal", "nrf"]
 nrf5340-net = ["dep:nrf5340-net-hal", "dep:nrf5340-net-pac", "nrf"]
 
 log = ["dep:log", "dot15d4-util/log"]
-defmt = ["dot15d4-util/defmt"]
+defmt = ["dep:defmt", "dep:defmt-rtt", "dot15d4-util/defmt"]
 
 # Activate for GPIO tracing
 gpio-trace = []
