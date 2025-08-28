@@ -1,19 +1,22 @@
 #!/bin/sh -e
 
-echo "TEST: build for ARM target"
-cargo build --target=thumbv7em-none-eabihf -p dot15d4-frame
+echo "CHECK(examples): ARM, default features"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf -- -D warnings
 
-echo "TEST: no features"
+echo "CHECK(examples): ARM, optional features"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace -- -D warnings
+
+echo "TEST(dot15d4-frame): no features"
 cargo test -p dot15d4-frame --no-default-features
 
-echo "TEST: security"
+echo "TEST(dot15d4-frame): security"
 cargo test -p dot15d4-frame --no-default-features --features=security
 
-echo "TEST: ies"
+echo "TEST(dot15d4-frame): ies"
 cargo test -p dot15d4-frame --no-default-features --features=ies
 
-echo "TEST: security,ies"
+echo "TEST(dot15d4-frame): security,ies"
 cargo test -p dot15d4-frame --no-default-features --features=security,ies
 
-echo "TEST: std"
+echo "TEST(workspace): std"
 cargo test --features=std
