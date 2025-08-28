@@ -9,6 +9,14 @@ name = "embassy-net-udp"
 path = "src/bin/embassy-net/udp.rs"
 required-features = ["embassy-net"]
 
+[[bin]]
+name = "timer-sig"
+required-features = ["gpio-trace"]
+
+[[bin]]
+name = "timer-evt"
+required-features = ["gpio-trace"]
+
 [dependencies]
 cortex-m = { version = "0.7", features = [
     "inline-asm",

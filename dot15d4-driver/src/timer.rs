@@ -32,15 +32,6 @@ pub enum RadioTimerResult {
     Overdue,
 }
 
-/// Arbitrary output pins that can be targeted by hardware signals. The actual
-/// mapping to physical pins is implementation specific.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Pin {
-    Pin0,
-    // ... add additional pins as needed
-}
-
 /// Hardware signals are an abstraction over electrical signals that can be sent
 /// across an event bus as usually found on radio hardware.
 ///
@@ -50,8 +41,9 @@ pub enum Pin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HardwareSignal {
-    /// Toggle the given output pin.
-    GpioToggle(Pin),
+    /// Toggle the outbound alarm pin.
+    #[cfg(feature = "gpio-trace")]
+    GpioToggle,
 
     /// Enable radio reception.
     RadioRxEnable,
@@ -61,6 +53,14 @@ pub enum HardwareSignal {
 
     /// Disable radio reception/transmission.
     RadioDisable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HardwareEvent {
+    /// A toggle event on the inbound alarm pin.
+    #[cfg(feature = "gpio-trace")]
+    GpioToggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,29 +76,30 @@ impl TimedSignal {
 }
 
 pub trait RadioTimerApi: Copy {
-    /// Returns the current instant of the local radio clock.
+    /// Returns the current instant of the local radio clock's coarse sleep
+    /// timer.
     ///
     /// Note: This method involves the CPU and therefore will always introduce
     ///       some latency. The timer might have ticked concurrently in the
     ///       meantime.
     fn now(&self) -> LocalClockInstant;
 
-    /// Waits until the given instant, then wakes the current task. Only the
-    /// sleep timer will be used.
+    /// Waits until the given instant, then wakes the current task.
     ///
     /// If an additional signal is provided, then that signal will be triggered
     /// precisely at the requested time. This option uses the high-precision
     /// timer.
     ///
-    /// If no signal is provided, keeps the high-precision timer off.
+    /// If no hardware signal is given then only the sleep timer will be used.
+    /// The high-precision timer is kept off.
     ///
     /// Implementations SHALL be cancel-safe. Cancelling the future will cancel
     /// the alarm.
     ///
-    /// Note: This method may introduce latency and jitter as there may be an
-    ///       arbitrary delay between waking the task and the task executing.
-    ///       For precisely timed alarms, use one of the hardware-backed
-    ///       methods. To reduce latency and (almost) eliminate jitter, use the
+    /// Note: This wakes the current task with latency and jitter as there may
+    ///       be an arbitrary delay between waking the task and the task
+    ///       executing. Only the (optional) signal will be deterministically
+    ///       timed. To reduce latency and (almost) eliminate jitter, use the
     ///       [`InterruptExecutor`].
     ///
     /// [`InterruptExecutor`]: crate::executor::InterruptExecutor
@@ -110,12 +111,40 @@ pub trait RadioTimerApi: Copy {
     /// - The resulting future SHALL always be polled with the same waker, i.e.
     ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
     ///   subsequent invocations of the method, though.
-    #[allow(dead_code)]
     unsafe fn wait_until(
         &self,
         instant: LocalClockInstant,
         signal: Option<HardwareSignal>,
     ) -> impl Future<Output = RadioTimerResult>;
+
+    /// Enables the high-precision timer at the given start time, then starts
+    /// listening for a hardware event and captures the high-precision timestamp
+    /// of the event.
+    ///
+    /// Implementations SHALL be cancel-safe. Cancelling the future will stop
+    /// the high-precision timer and reset timer state.
+    ///
+    /// Note: This wakes the current task with latency and jitter as there may
+    ///       be an arbitrary delay between waking the task and the task
+    ///       executing. The event timestamp will be captured precisely, though.
+    ///       To reduce latency and (almost) eliminate jitter, use the
+    ///       [`InterruptExecutor`].
+    ///
+    /// [`InterruptExecutor`]: crate::executor::InterruptExecutor
+    ///
+    /// # Safety
+    ///
+    /// - This method SHALL be called from a context that runs at lower priority
+    ///   than the timer interrupt(s) as well as any interrupt fired by the
+    ///   captured hardware event.
+    /// - The resulting future SHALL always be polled with the same waker, i.e.
+    ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
+    ///   subsequent invocations of the method, though.
+    unsafe fn wait_for_event(
+        &self,
+        start_at: LocalClockInstant,
+        event: HardwareEvent,
+    ) -> impl Future<Output = Result<LocalClockInstant, RadioTimerResult>>;
 
     /// Schedule a hardware event, i.e. programs a signal to be sent over the
     /// event bus at a precise instant.
@@ -131,7 +160,7 @@ pub trait RadioTimerApi: Copy {
     /// - This method SHALL be called from a context that runs at lower priority
     ///   than the timer interrupt(s).
     ///
-    unsafe fn schedule_event(&self, timed_signal: TimedSignal) -> RadioTimerResult;
+    unsafe fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> RadioTimerResult;
 }
 
 #[cfg(feature = "rtos-trace")]
@@ -168,20 +197,34 @@ pub mod trace {
         );
     }
 
+    // Events
+    #[derive(Clone, Copy)]
+    enum TraceEvents {
+        WaitUntil,
+        WaitFor,
+        ScheduleEvent,
+        NumEvents,
+    }
+
+    impl TraceEvents {
+        fn event_id(&self) -> u32 {
+            *self as u32 + unsafe { TIMER_MODULE.EventOffset }
+        }
+    }
+
+    use TraceEvents::*;
+
     static TIMER_MODULE_DESC: &str = "M=timer, \
-        0 SchedAlarm ns=%u rt=%u, \
-        1 SchedSignal ns=%u rt=%u tt=%u\0";
+        0 WaitUntil ns=%u rt=%u, \
+        1 WaitFor ns=%u rt=%u, \
+        2 SchedEvt ns=%u rt=%u tt=%u\0";
     static mut TIMER_MODULE: SEGGER_SYSVIEW_MODULE = SEGGER_SYSVIEW_MODULE {
         sModule: TIMER_MODULE_DESC.as_ptr(),
-        NumEvents: 2,
+        NumEvents: NumEvents as u32,
         EventOffset: 0,
         pfSendModuleDesc: None,
         pNext: null_mut(),
     };
-
-    // Events
-    pub const EVENT_SCHEDULE_ALARM: u32 = 0;
-    pub const EVENT_SCHEDULE_SIGNAL: u32 = 1;
 
     pub fn instrument() {
         unsafe {
@@ -189,20 +232,22 @@ pub mod trace {
         }
     }
 
-    pub fn record_schedule_alarm(ns: u32, rtc_ticks: u32) {
+    pub fn record_wait_until(ns: u32, rtc_ticks: u32) {
         unsafe {
-            SEGGER_SYSVIEW_RecordU32x2(
-                EVENT_SCHEDULE_ALARM + TIMER_MODULE.EventOffset,
-                ns,
-                rtc_ticks,
-            );
+            SEGGER_SYSVIEW_RecordU32x2(WaitUntil.event_id(), ns, rtc_ticks);
         }
     }
 
-    pub fn record_schedule_signal(ns: u32, rtc_ticks: u32, remaining_timer_ticks: u32) {
+    pub fn record_wait_for(ns: u32, rtc_ticks: u32) {
+        unsafe {
+            SEGGER_SYSVIEW_RecordU32x2(WaitFor.event_id(), ns, rtc_ticks);
+        }
+    }
+
+    pub fn record_schedule_event(ns: u32, rtc_ticks: u32, remaining_timer_ticks: u32) {
         unsafe {
             SEGGER_SYSVIEW_RecordU32x3(
-                EVENT_SCHEDULE_SIGNAL + TIMER_MODULE.EventOffset,
+                ScheduleEvent.event_id(),
                 ns,
                 rtc_ticks,
                 remaining_timer_ticks,

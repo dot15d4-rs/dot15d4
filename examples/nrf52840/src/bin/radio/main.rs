@@ -15,7 +15,7 @@ use dot15d4::{
     util::buffer_allocator,
 };
 #[cfg(feature = "gpio-trace")]
-use dot15d4_examples_nrf52840::PIN_EXECUTOR;
+use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor};
 
 #[cfg(feature = "rx_to_tx")]
@@ -43,7 +43,10 @@ fn main() -> ! {
         #[cfg(feature = "gpio-trace")]
         gpiote_trace_channel,
     );
-    let executor = swi_executor(&peripherals.gpiote);
+    let executor = swi_executor(
+        #[cfg(feature = "gpio-trace")]
+        &peripherals.gpiote,
+    );
 
     executor.block_on(async {
         #[cfg(feature = "rx_to_tx")]

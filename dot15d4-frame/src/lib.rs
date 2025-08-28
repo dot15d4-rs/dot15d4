@@ -78,7 +78,15 @@ mod test {
             todo!()
         }
 
-        unsafe fn schedule_event(&self, _: TimedSignal) -> RadioTimerResult {
+        async unsafe fn wait_for_event(
+            &self,
+            _: LocalClockInstant,
+            _: dot15d4_driver::timer::HardwareEvent,
+        ) -> Result<LocalClockInstant, RadioTimerResult> {
+            todo!()
+        }
+
+        unsafe fn schedule_timed_signal(&self, _: TimedSignal) -> RadioTimerResult {
             todo!()
         }
     }

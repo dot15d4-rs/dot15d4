@@ -599,7 +599,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_RX);
 
         if let Some(timed_transition) = timed_transition {
-            let result = unsafe { self.timer().schedule_event(timed_transition) };
+            let result = unsafe { self.timer().schedule_timed_signal(timed_transition) };
             if matches!(result, RadioTimerResult::Overdue) {
                 return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
@@ -1216,7 +1216,7 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
         rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_TX);
 
         if let Some(timed_transition) = timed_transition {
-            let result = unsafe { self.timer().schedule_event(timed_transition) };
+            let result = unsafe { self.timer().schedule_timed_signal(timed_transition) };
             if matches!(result, RadioTimerResult::Overdue) {
                 return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
