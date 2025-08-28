@@ -12,7 +12,7 @@ use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
 };
 #[cfg(feature = "gpio-trace")]
-use dot15d4_examples_nrf52840::PIN_EXECUTOR;
+use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use embassy_executor::Spawner;
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},

@@ -14,11 +14,13 @@ use core::{
 
 use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU32;
-use nrf52840_pac::{interrupt, Peripherals, GPIOTE, NVIC, PPI, RADIO, RTC0, TIMER0};
+#[cfg(feature = "gpio-trace")]
+use nrf52840_pac::GPIOTE;
+use nrf52840_pac::{interrupt, Peripherals, NVIC, PPI, RADIO, RTC0, TIMER0};
 
 use crate::timer::{
-    HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi, RadioTimerResult,
-    TimedSignal,
+    HardwareEvent, HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi,
+    RadioTimerResult, TimedSignal,
 };
 
 use super::AlarmChannel;
@@ -59,6 +61,9 @@ use super::AlarmChannel;
 /// active even if it sets the flag to `false`.
 #[repr(u8)]
 enum AlarmState {
+    /// The alarm is currently unused and may be acquired by any scheduling
+    /// context.
+    Unused,
     /// The alarm is currently being scheduled but still owned by the scheduling
     /// context.
     Pending,
@@ -75,16 +80,15 @@ struct Alarm {
     /// considerations.
     state: AtomicU8,
 
-    /// The RTC tick of a pending alarm or OFF if the alarm is not pending.
+    /// The RTC tick of a pending alarm.
     ///
     /// Safety: Access is synchronized via the alarm state, see above.
     rtc_tick: Cell<u64>,
 
-    /// The additional TIMER ticks of a pending alarm or OFF if the alarm is not
-    /// pending.
+    /// True if the RTC triggers the high frequency timer.
     ///
     /// Safety: Access is synchronized via the alarm state, see above.
-    remaining_timer_ticks: Cell<u16>,
+    triggers_timer: Cell<bool>,
 
     /// Waker for the current alarm.
     ///
@@ -109,9 +113,9 @@ impl Alarm {
             // The state is initially 'fired' to signal that the scheduling
             // thread has exclusive access to this alarm but still needs to
             // program it.
-            state: AtomicU8::new(AlarmState::Fired as u8),
+            state: AtomicU8::new(AlarmState::Unused as u8),
             rtc_tick: Cell::new(0),
-            remaining_timer_ticks: Cell::new(0),
+            triggers_timer: Cell::new(false),
             waker: UnsafeCell::new(None),
         }
     }
@@ -119,7 +123,7 @@ impl Alarm {
 
 const NUM_ALARM_CHANNELS: usize = AlarmChannel::NumAlarmChannels as usize;
 const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] =
-    [AlarmChannel::Rtc2, AlarmChannel::Rtc1, AlarmChannel::Timer];
+    [AlarmChannel::Timer, AlarmChannel::Rtc1, AlarmChannel::Rtc2];
 
 #[repr(u8)]
 enum InitializationState {
@@ -154,11 +158,19 @@ struct State {
     /// Safety: Alarms are Sync.
     alarms: [Alarm; NUM_ALARM_CHANNELS],
 
-    /// A GPIOTE channel used for event triggering.
+    /// A GPIOTE channel used for GPIO event triggering.
     ///
     /// Will only be accessed from scheduling context but is atomic to satisfy
     /// the type system.
-    gpiote_channel: AtomicUsize,
+    #[cfg(feature = "gpio-trace")]
+    gpiote_out_channel: AtomicUsize,
+
+    /// A GPIOTE channel used for GPIO event capturing.
+    ///
+    /// Will only be accessed from scheduling context but is atomic to satisfy
+    /// the type system.
+    #[cfg(feature = "gpio-trace")]
+    gpiote_in_channel: AtomicUsize,
 
     /// A PPI channel used for event triggering.
     ///
@@ -177,23 +189,26 @@ impl State {
     const RTC_GUARD_TICKS: u64 = 2;
 
     // Pre-programmed PPI channels.
-    const TIMER_CC_RADIO_TXEN_CHANNEL: usize = 20;
-    const TIMER_CC_RADIO_RXEN_CHANNEL: usize = 21;
-    const RTC_CC_RADIO_TXEN_CHANNEL: usize = 28;
-    const RTC_CC_RADIO_RXEN_CHANNEL: usize = 29;
-    const RTC_CC_TIMER_START_CHANNEL: usize = 31;
-    const PPI_CHANNEL_MASK: u32 = 1 << Self::TIMER_CC_RADIO_TXEN_CHANNEL
-        | 1 << Self::TIMER_CC_RADIO_RXEN_CHANNEL
-        | 1 << Self::RTC_CC_RADIO_TXEN_CHANNEL
-        | 1 << Self::RTC_CC_RADIO_RXEN_CHANNEL
-        | 1 << Self::RTC_CC_TIMER_START_CHANNEL;
+    const TIMER_CC0_RADIO_TXEN_CHANNEL: usize = 20;
+    const TIMER_CC0_RADIO_RXEN_CHANNEL: usize = 21;
+    const RTC_CC0_RADIO_TXEN_CHANNEL: usize = 28;
+    const RTC_CC0_RADIO_RXEN_CHANNEL: usize = 29;
+    const RTC_CC0_TIMER_START_CHANNEL: usize = 31;
+    const PPI_CHANNEL_MASK: u32 = 1 << Self::TIMER_CC0_RADIO_TXEN_CHANNEL
+        | 1 << Self::TIMER_CC0_RADIO_RXEN_CHANNEL
+        | 1 << Self::RTC_CC0_RADIO_TXEN_CHANNEL
+        | 1 << Self::RTC_CC0_RADIO_RXEN_CHANNEL
+        | 1 << Self::RTC_CC0_TIMER_START_CHANNEL;
 
     const fn new() -> Self {
         Self {
             init_state: AtomicU8::new(InitializationState::Uninitialized as u8),
             half_period: AtomicU32::new(0),
             alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
-            gpiote_channel: AtomicUsize::new(0),
+            #[cfg(feature = "gpio-trace")]
+            gpiote_out_channel: AtomicUsize::new(0),
+            #[cfg(feature = "gpio-trace")]
+            gpiote_in_channel: AtomicUsize::new(1),
             ppi_channel: AtomicUsize::new(0),
             ppi_channel_mask: AtomicU32::new(0),
         }
@@ -214,6 +229,7 @@ impl State {
         unsafe { Peripherals::steal() }.PPI
     }
 
+    #[cfg(feature = "gpio-trace")]
     fn gpiote() -> GPIOTE {
         // We only access GPIOTE channels that we exclusively own.
         unsafe { Peripherals::steal() }.GPIOTE
@@ -229,7 +245,14 @@ impl State {
     ///
     /// This must be called during early initialization before any concurrent
     /// critical sections may be active.
-    pub fn init(&self, rtc: RTC0, timer: TIMER0, gpiote_channel: usize, ppi_channel: usize) {
+    pub fn init(
+        &self,
+        rtc: RTC0,
+        timer: TIMER0,
+        #[cfg(feature = "gpio-trace")] gpiote_out_channel: usize,
+        #[cfg(feature = "gpio-trace")] gpiote_in_channel: usize,
+        ppi_channel: usize,
+    ) {
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::instrument();
 
@@ -241,24 +264,30 @@ impl State {
         );
 
         debug_assert!(ppi_channel <= 19);
-
-        STATE
-            .gpiote_channel
-            .store(gpiote_channel, Ordering::Relaxed);
         STATE.ppi_channel.store(ppi_channel, Ordering::Relaxed);
         STATE
             .ppi_channel_mask
             .store(1 << ppi_channel | Self::PPI_CHANNEL_MASK, Ordering::Relaxed);
 
+        #[cfg(feature = "gpio-trace")]
+        {
+            debug_assert!(gpiote_out_channel <= 7);
+            debug_assert!(gpiote_in_channel <= 7);
+            debug_assert_ne!(gpiote_in_channel, gpiote_out_channel);
+
+            STATE
+                .gpiote_out_channel
+                .store(gpiote_out_channel, Ordering::Relaxed);
+            STATE
+                .gpiote_in_channel
+                .store(gpiote_in_channel, Ordering::Relaxed);
+        }
+
         timer.mode.reset();
-        // We need to represent up to two RTC ticks (976 timer ticks).
-        timer.bitmode.reset(); // 16 bit by default
-                               // The prescaler has a non-zero reset value.
+        timer.bitmode.write(|w| w.bitmode()._32bit());
+
+        // The prescaler has a non-zero reset value.
         timer.prescaler.write(|w| w.prescaler().variant(0));
-        timer.shorts.write(|w| {
-            w.compare0_clear().set_bit();
-            w.compare0_stop().set_bit()
-        });
         timer.tasks_clear.write(|w| w.tasks_clear().set_bit());
 
         rtc.prescaler.reset();
@@ -268,6 +297,8 @@ impl State {
             w.ovrflw().set_bit();
             w.compare3().set_bit()
         });
+
+        #[cfg(feature = "gpio-trace")]
         rtc.evtenset.write(|w| w.tick().set_bit());
 
         if rtc.counter.read().counter() != 0 {
@@ -278,7 +309,7 @@ impl State {
         rtc.tasks_start.write(|w| w.tasks_start().set_bit());
         while rtc.counter.read().counter() == 0 {}
 
-        // Clear and enable the timer interrupts
+        // Clear and enable the timer interrupts.
         NVIC::unpend(interrupt::RTC0);
         NVIC::unpend(interrupt::TIMER0);
         // Safety: We're in early initialization, so there should be no
@@ -304,15 +335,10 @@ impl State {
     ///
     /// - The alarm state must indicate ownership for the calling context.
     /// - Must be called exclusively from scheduling context.
-    unsafe fn set_alarm_ticks(
-        &self,
-        channel: AlarmChannel,
-        rtc_tick: u64,
-        remaining_timer_ticks: u16,
-    ) {
+    unsafe fn set_alarm_ticks(&self, channel: AlarmChannel, rtc_tick: u64, triggers_timer: bool) {
         let alarm = &self.alarms[channel as usize];
-        alarm.remaining_timer_ticks.set(remaining_timer_ticks);
-        alarm.rtc_tick.set(rtc_tick)
+        alarm.rtc_tick.set(rtc_tick);
+        alarm.triggers_timer.set(triggers_timer);
     }
 
     /// Read the alarm's RTC tick.
@@ -323,6 +349,29 @@ impl State {
     /// - Compiler fences are required to acquire/release this value.
     unsafe fn alarm_rtc_tick(&self, channel: AlarmChannel) -> u64 {
         self.alarms[channel as usize].rtc_tick.get()
+    }
+
+    /// Check wether the alarm triggers the high frequency timer.
+    ///
+    /// # Safety:
+    ///
+    /// - The alarm state must indicate ownership for the calling context.
+    /// - Compiler fences are required to acquire/release this value.
+    unsafe fn alarm_triggers_timer(&self, channel: AlarmChannel) -> bool {
+        self.alarms[channel as usize].triggers_timer.get()
+    }
+
+    /// Retrieve the captured timer value.
+    ///
+    /// # Safety
+    ///
+    /// - The alarm state must indicate ownership of the timer alarm channel for
+    ///   the calling context.
+    unsafe fn get_and_clear_captured_timer_ticks(&self) -> u32 {
+        let timer = Self::timer();
+        let result = timer.cc[0].read().bits();
+        timer.tasks_clear.write(|w| w.tasks_clear().set_bit());
+        result
     }
 
     /// Returns `true` while the alarm is active (and owned by interrupt
@@ -372,6 +421,10 @@ impl State {
                     .chenclr
                     .write(|w| unsafe { w.bits(self.ppi_channel_mask.load(Ordering::Relaxed)) });
                 Self::timer().intenclr.write(|w| w.compare0().set_bit());
+                #[cfg(feature = "gpio-trace")]
+                Self::gpiote().intenclr.write(|w| unsafe {
+                    w.bits(1 << self.gpiote_in_channel.load(Ordering::Relaxed))
+                });
             }
             AlarmChannel::Rtc1 => rtc.intenclr.write(|w| w.compare1().set_bit()),
             AlarmChannel::Rtc2 => rtc.intenclr.write(|w| w.compare2().set_bit()),
@@ -381,29 +434,50 @@ impl State {
         self.fire_alarm(channel);
     }
 
-    /// Mark the alarm as fired.
+    /// Mark the alarm as pending. Expects the alarm to be unused.
     ///
-    /// Transfers ownership of the alarm from interrupt context to scheduling
-    /// context and releases alarm memory.
-    ///
-    /// May be called from both, interrupt and scheduling context.
-    fn fire_alarm(&self, channel: AlarmChannel) {
-        compiler_fence(Ordering::Release);
-        self.alarms[channel as usize]
-            .state
-            .store(AlarmState::Fired as u8, Ordering::Relaxed);
-    }
-
-    /// Mark the alarm as pending.
-    ///
-    /// Releases alarm memory.
+    /// Acquires, then releases alarm memory.
     ///
     /// Called exclusively from scheduling context.
-    fn pend_alarm(&self, channel: AlarmChannel) {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scheduling context causes a race condition, i.e. tries to
+    /// acquire an alarm that has been acquired concurrently by another
+    /// scheduling context.
+    fn acquire_alarm(&self, channel: AlarmChannel) {
         compiler_fence(Ordering::Release);
         self.alarms[channel as usize]
             .state
-            .store(AlarmState::Pending as u8, Ordering::Relaxed);
+            .compare_exchange_weak(
+                AlarmState::Unused as u8,
+                AlarmState::Pending as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        compiler_fence(Ordering::Acquire);
+    }
+
+    /// Mark the alarm as pending if it is unused.
+    ///
+    /// Acquires, then releases alarm memory.
+    ///
+    /// Called exclusively from scheduling context.
+    fn try_acquire_alarm(&self, channel: AlarmChannel) -> Result<(), ()> {
+        compiler_fence(Ordering::Release);
+        let result = self.alarms[channel as usize].state.compare_exchange_weak(
+            AlarmState::Unused as u8,
+            AlarmState::Pending as u8,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        compiler_fence(Ordering::Acquire);
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     /// Transfer ownership of the alarm to interrupt context.
@@ -419,6 +493,42 @@ impl State {
         self.alarms[channel as usize]
             .state
             .store(AlarmState::Active as u8, Ordering::Relaxed);
+    }
+
+    /// Mark the alarm as fired.
+    ///
+    /// Transfers ownership of the alarm from interrupt context to scheduling
+    /// context and releases alarm memory.
+    ///
+    /// May be called from both, interrupt and scheduling context.
+    fn fire_alarm(&self, channel: AlarmChannel) {
+        compiler_fence(Ordering::Release);
+        self.alarms[channel as usize]
+            .state
+            .store(AlarmState::Fired as u8, Ordering::Relaxed);
+    }
+
+    /// Mark the alarm as unused. Expects the alarm to be fired.
+    ///
+    /// Acquires, then releases alarm memory.
+    ///
+    /// May be called from both, interrupt and scheduling context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the alarm was not previously fired.
+    fn release_alarm(&self, channel: AlarmChannel) {
+        compiler_fence(Ordering::Release);
+        self.alarms[channel as usize]
+            .state
+            .compare_exchange_weak(
+                AlarmState::Fired as u8,
+                AlarmState::Unused as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .unwrap();
+        compiler_fence(Ordering::Acquire);
     }
 
     // Called exclusively from interrupt context.
@@ -462,7 +572,35 @@ impl State {
         }
     }
 
+    // Called exclusively from interrupt context.
     fn on_timer_interrupt(&self) {
+        self.trigger_alarm(AlarmChannel::Timer);
+    }
+
+    #[cfg(feature = "gpio-trace")]
+    fn on_gpiote_interrupt(&self) {
+        let gpiote = Self::gpiote();
+        let gpiote_channel = self.gpiote_in_channel.load(Ordering::Relaxed);
+        let gpiote_mask = 1 << gpiote_channel;
+
+        let is_waiting_for_event = gpiote.intenset.read().bits() & gpiote_mask > 0;
+        if !is_waiting_for_event {
+            return;
+        }
+
+        let is_gpiote_in_event = gpiote.events_in[gpiote_channel]
+            .read()
+            .events_in()
+            .bit_is_set();
+        if is_gpiote_in_event {
+            gpiote.events_in[gpiote_channel].write(|w| w.events_in().clear_bit());
+        } else {
+            return;
+        }
+
+        // Safety: We checked the range of the gpiote channel.
+        gpiote.intenclr.write(|w| unsafe { w.bits(gpiote_mask) });
+
         self.trigger_alarm(AlarmChannel::Timer);
     }
 
@@ -490,7 +628,13 @@ impl State {
                     // has already been set when scheduling the alarm.
                     let rtc = Self::rtc();
                     match channel {
-                        AlarmChannel::Timer => rtc.intenset.write(|w| w.compare0().set_bit()),
+                        AlarmChannel::Timer => {
+                            if unsafe { self.alarm_triggers_timer(channel) } {
+                                rtc.evtenset.write(|w| w.compare0().set_bit())
+                            } else {
+                                rtc.intenset.write(|w| w.compare0().set_bit())
+                            }
+                        }
                         AlarmChannel::Rtc1 => rtc.intenset.write(|w| w.compare1().set_bit()),
                         AlarmChannel::Rtc2 => rtc.intenset.write(|w| w.compare2().set_bit()),
                         _ => unreachable!(),
@@ -529,17 +673,19 @@ impl State {
             .take();
         if let Some(waker) = waker {
             waker.wake();
+        } else {
+            self.release_alarm(channel);
         }
     }
 
     // Called exclusively from scheduling context.
-    fn try_activate_alarm(
+    #[inline(always)]
+    fn prepare_rtc(
         &self,
         rtc_tick: u64,
-        remaining_timer_ticks: u16,
+        triggers_timer: bool,
         channel: AlarmChannel,
-        signal: Option<HardwareSignal>,
-    ) -> RadioTimerResult {
+    ) -> (bool, u64) {
         // Safety: Ensure that the scheduling context exclusively owns the alarm
         //         and corresponding registers.
         debug_assert!(self.is_alarm_pending(channel));
@@ -553,10 +699,10 @@ impl State {
         let rtc_now_tick = self.rtc_now_tick();
         if rtc_tick <= rtc_now_tick + State::RTC_GUARD_TICKS {
             self.fire_alarm(channel);
-            return RadioTimerResult::Overdue;
+            return (false, rtc_now_tick);
         }
 
-        unsafe { self.set_alarm_ticks(channel, rtc_tick, remaining_timer_ticks) };
+        unsafe { self.set_alarm_ticks(channel, rtc_tick, triggers_timer) };
 
         // Safety: The alarm must be activated before enabling the interrupt or
         //         event routing to transfer ownership. Releases alarm memory to
@@ -564,79 +710,23 @@ impl State {
         self.activate_alarm(channel);
 
         let rtc = Self::rtc();
-        let timer = Self::timer();
-        let ppi = Self::ppi();
         let cc = channel as usize;
 
         rtc.events_compare[cc].reset();
         rtc.cc[cc].write(|w| w.compare().variant(rtc_tick as u32 & 0xFFFFFF));
 
-        if matches!(channel, AlarmChannel::Timer) {
-            // cc == 0
+        (true, rtc_now_tick)
+    }
 
-            let cc_event = if remaining_timer_ticks > 0 {
-                // Safety: This is a pre-programmed PPI channel.
-                ppi.chenset
-                    .write(|w| unsafe { w.bits(1 << Self::RTC_CC_TIMER_START_CHANNEL) });
-                timer.events_compare[0].reset();
-                timer.cc[0].write(|w| w.cc().variant(remaining_timer_ticks as u32));
-                timer.intenset.write(|w| w.compare0().set_bit());
-                timer.events_compare[0].as_ptr()
-            } else {
-                rtc.events_compare[0].as_ptr()
-            };
-
-            let ppi_channel = match signal {
-                Some(signal) => match signal {
-                    HardwareSignal::GpioToggle(_) => {
-                        let ppi_channel = self.ppi_channel.load(Ordering::Relaxed);
-                        let ch = &ppi.ch[ppi_channel];
-
-                        ch.eep.write(|w| w.eep().variant(cc_event as u32));
-
-                        let gpiote_channel = self.gpiote_channel.load(Ordering::Relaxed);
-                        let gpiote_out_task = Self::gpiote().tasks_out[gpiote_channel].as_ptr();
-                        ch.tep.write(|w| w.tep().variant(gpiote_out_task as u32));
-
-                        ppi_channel
-                    }
-                    HardwareSignal::RadioRxEnable => {
-                        if remaining_timer_ticks == 0 {
-                            Self::RTC_CC_RADIO_RXEN_CHANNEL
-                        } else {
-                            Self::TIMER_CC_RADIO_RXEN_CHANNEL
-                        }
-                    }
-                    HardwareSignal::RadioTxEnable => {
-                        if remaining_timer_ticks == 0 {
-                            Self::RTC_CC_RADIO_TXEN_CHANNEL
-                        } else {
-                            Self::TIMER_CC_RADIO_TXEN_CHANNEL
-                        }
-                    }
-                    HardwareSignal::RadioDisable => {
-                        let ppi_channel = self.ppi_channel.load(Ordering::Relaxed);
-                        let ch = &ppi.ch[ppi_channel];
-
-                        ch.eep.write(|w| w.eep().variant(cc_event as u32));
-
-                        let radio_disable_task = Self::radio().tasks_disable.as_ptr();
-                        ch.tep.write(|w| w.tep().variant(radio_disable_task as u32));
-
-                        ppi_channel
-                    }
-                },
-                None => unreachable!(),
-            };
-
-            // Safety: The channel has been asserted to be in range.
-            ppi.chenset.write(|w| unsafe { w.bits(1 << ppi_channel) });
-
-            rtc.evtenset.write(|w| w.compare0().set_bit());
-        } else {
-            debug_assert!(signal.is_none());
-            debug_assert_eq!(remaining_timer_ticks, 0);
-        }
+    #[inline(always)]
+    fn was_safely_scheduled(
+        &self,
+        rtc_tick: u64,
+        rtc_now_tick: u64,
+        triggers_timer: bool,
+        channel: AlarmChannel,
+    ) -> RadioTimerResult {
+        let rtc = Self::rtc();
 
         if rtc_tick - rtc_now_tick < Self::RTC_THREE_QUARTERS_PERIOD {
             // If the alarm is imminent (i.e. safely within the currently
@@ -646,7 +736,9 @@ impl State {
             //         alarm until the alarm has been marked inactive again.
             match channel {
                 AlarmChannel::Timer => {
-                    if remaining_timer_ticks == 0 {
+                    if triggers_timer {
+                        rtc.evtenset.write(|w| w.compare0().set_bit());
+                    } else {
                         rtc.intenset.write(|w| w.compare0().set_bit())
                     }
                 }
@@ -675,6 +767,171 @@ impl State {
             // If the alarm is too far into the future, don't enable the compare
             // interrupt yet. It will be enabled by `next_period()`.
             RadioTimerResult::Ok
+        }
+    }
+
+    // Called exclusively from scheduling context.
+    fn try_activate_alarm(
+        &self,
+        rtc_tick: u64,
+        remaining_timer_ticks: u16,
+        channel: AlarmChannel,
+        maybe_signal: Option<HardwareSignal>,
+    ) -> RadioTimerResult {
+        let triggers_timer = remaining_timer_ticks > 0;
+
+        let (ok, rtc_now_tick) = self.prepare_rtc(rtc_tick, triggers_timer, channel);
+        if !ok {
+            return RadioTimerResult::Overdue;
+        }
+
+        let rtc = Self::rtc();
+        let timer = Self::timer();
+        let ppi = Self::ppi();
+
+        if matches!(channel, AlarmChannel::Timer) {
+            // cc == 0
+
+            let cc_event = if triggers_timer {
+                // Safety: This is a pre-programmed PPI channel.
+                ppi.chenset
+                    .write(|w| unsafe { w.bits(1 << Self::RTC_CC0_TIMER_START_CHANNEL) });
+                timer.events_compare[0].reset();
+                timer.shorts.write(|w| {
+                    w.compare0_clear().set_bit();
+                    w.compare0_stop().set_bit()
+                });
+                timer.cc[0].write(|w| w.cc().variant(remaining_timer_ticks as u32));
+                timer.intenset.write(|w| w.compare0().set_bit());
+                timer.events_compare[0].as_ptr()
+            } else {
+                rtc.events_compare[0].as_ptr()
+            };
+
+            let ppi_channel = match maybe_signal {
+                Some(signal) => match signal {
+                    #[cfg(feature = "gpio-trace")]
+                    HardwareSignal::GpioToggle => {
+                        let ppi_channel = self.ppi_channel.load(Ordering::Relaxed);
+                        let ch = &ppi.ch[ppi_channel];
+
+                        ch.eep.write(|w| w.eep().variant(cc_event as u32));
+
+                        let gpiote_channel = self.gpiote_out_channel.load(Ordering::Relaxed);
+                        let gpiote_out_task = Self::gpiote().tasks_out[gpiote_channel].as_ptr();
+                        ch.tep.write(|w| w.tep().variant(gpiote_out_task as u32));
+                        ppi.fork[ppi_channel].tep.reset();
+
+                        ppi_channel
+                    }
+                    HardwareSignal::RadioRxEnable => {
+                        if triggers_timer {
+                            Self::TIMER_CC0_RADIO_RXEN_CHANNEL
+                        } else {
+                            Self::RTC_CC0_RADIO_RXEN_CHANNEL
+                        }
+                    }
+                    HardwareSignal::RadioTxEnable => {
+                        if triggers_timer {
+                            Self::TIMER_CC0_RADIO_TXEN_CHANNEL
+                        } else {
+                            Self::RTC_CC0_RADIO_TXEN_CHANNEL
+                        }
+                    }
+                    HardwareSignal::RadioDisable => {
+                        let ppi_channel = self.ppi_channel.load(Ordering::Relaxed);
+                        let ch = &ppi.ch[ppi_channel];
+
+                        ch.eep.write(|w| w.eep().variant(cc_event as u32));
+
+                        let radio_disable_task = Self::radio().tasks_disable.as_ptr();
+                        ch.tep.write(|w| w.tep().variant(radio_disable_task as u32));
+                        ppi.fork[ppi_channel].tep.reset();
+
+                        ppi_channel
+                    }
+                },
+                None => unreachable!(),
+            };
+
+            // Safety: The channel has been asserted to be in range.
+            ppi.chenset.write(|w| unsafe { w.bits(1 << ppi_channel) });
+        } else {
+            debug_assert!(maybe_signal.is_none());
+            debug_assert!(!triggers_timer);
+        }
+
+        self.was_safely_scheduled(rtc_tick, rtc_now_tick, triggers_timer, channel)
+    }
+
+    // Called exclusively from scheduling context.
+    fn try_activate_capture(
+        &self,
+        _start_at_rtc_tick: u64,
+        _event: HardwareEvent,
+    ) -> RadioTimerResult {
+        #[cfg(not(feature = "gpio-trace"))]
+        todo!("not implemented");
+
+        #[cfg(feature = "gpio-trace")]
+        {
+            let (ok, rtc_now_tick) =
+                self.prepare_rtc(_start_at_rtc_tick, true, AlarmChannel::Timer);
+            if !ok {
+                return RadioTimerResult::Overdue;
+            }
+
+            let timer = Self::timer();
+            timer.shorts.reset();
+
+            let ppi = Self::ppi();
+            let ppi_channel = self.ppi_channel.load(Ordering::Relaxed);
+            let ch = &ppi.ch[ppi_channel];
+            let fork = &ppi.fork[ppi_channel];
+
+            let gpiote = Self::gpiote();
+            let gpiote_channel = self.gpiote_in_channel.load(Ordering::Relaxed);
+
+            match _event {
+                HardwareEvent::GpioToggle => {
+                    let gpiote_in_event = gpiote.events_in[gpiote_channel].as_ptr();
+                    ch.eep.write(|w| w.eep().variant(gpiote_in_event as u32));
+
+                    let timer_capture_task = timer.tasks_capture[0].as_ptr();
+                    ch.tep.write(|w| w.tep().variant(timer_capture_task as u32));
+
+                    let timer_stop_task = timer.tasks_stop.as_ptr();
+                    fork.tep.write(|w| w.tep().variant(timer_stop_task as u32));
+
+                    // Safety: We checked the range of the gpiote channel.
+                    gpiote
+                        .intenset
+                        .write(|w| unsafe { w.bits(1 << gpiote_channel) });
+                }
+            };
+
+            // Safety: These are a pre-programmed PPI channel and a channel that has
+            //         been asserted to be in range.
+            ppi.chenset.write(|w| unsafe {
+                w.bits(1 << Self::RTC_CC0_TIMER_START_CHANNEL | 1 << ppi_channel)
+            });
+
+            let was_safely_scheduled = self.was_safely_scheduled(
+                _start_at_rtc_tick,
+                rtc_now_tick,
+                true,
+                AlarmChannel::Timer,
+            );
+            if gpiote.events_in[gpiote_channel]
+                .read()
+                .events_in()
+                .bit_is_set()
+            {
+                gpiote.events_in[gpiote_channel].write(|w| w.events_in().clear_bit());
+                RadioTimerResult::Overdue
+            } else {
+                was_safely_scheduled
+            }
         }
     }
 
@@ -738,28 +995,23 @@ impl State {
         ((half_period as u64) << 23) + ((counter ^ ((half_period & 1) << 23)) as u64)
     }
 
-    // Called exclusively from scheduling context.
-    async fn wait_for_alarm(
+    // Called exclusively from scheduling context. Requires the given alarm
+    // channel to be acquired/released before/after calling/awaiting the method.
+    async fn wait_for<Activate: (FnOnce(AlarmChannel) -> RadioTimerResult) + Copy>(
         &self,
-        rtc_tick: u64,
-        remaining_timer_ticks: u16,
         channel: AlarmChannel,
-        signal: Option<HardwareSignal>,
+        activate: Activate,
     ) -> RadioTimerResult {
         let cleanup_on_drop = CancellationGuard::new(|| {
             // Safety: Clearing the interrupt is not immediate. It might still
             //         fire. That's why interrupt context additionally
             //         synchronizes on alarm state.
             self.fire_and_inactivate_alarm(channel);
+            self.release_alarm(channel);
 
             // No need to drop the waker. It'll save us cloning if it is still
             // valid when scheduling the next alarm.
         });
-
-        // Safety: Ensure that we exclusively own the alarm.
-        debug_assert!(!self.is_alarm_active(channel));
-
-        self.pend_alarm(channel);
 
         let result = poll_fn(|cx| {
             if self.is_alarm_active(channel) {
@@ -786,8 +1038,7 @@ impl State {
                     //         establishes a happens-before relationship with
                     //         all prior memory accesses and transfers ownership
                     //         of the alarm to interrupt context.
-                    let result =
-                        self.try_activate_alarm(rtc_tick, remaining_timer_ticks, channel, signal);
+                    let result = activate(channel);
                     if matches!(result, RadioTimerResult::Ok) {
                         Poll::Pending
                     } else {
@@ -805,21 +1056,25 @@ impl State {
         result
     }
 
-    // Called exclusively from scheduling context.
+    // Called exclusively from scheduling context. Requires the given alarm
+    // channel to be acquired before calling the method.
     fn schedule_event(
         &self,
         rtc_tick: u64,
         remaining_timer_ticks: u16,
         signal: HardwareSignal,
     ) -> RadioTimerResult {
-        // Safety: Ensure that we exclusively own the alarm.
-        debug_assert!(!self.is_alarm_active(AlarmChannel::Timer));
+        // Safety: We own alarm memory at this point and the unsafe cell ensures
+        //         a non-null pointer.
+        unsafe {
+            self.alarms[AlarmChannel::Timer as usize]
+                .waker
+                .get()
+                .as_mut()
+        }
+        .unwrap()
+        .take();
 
-        self.pend_alarm(AlarmChannel::Timer);
-
-        // Safety: Activating the alarm establishes a happens-before
-        //         relationship with all prior memory accesses and transfers
-        //         ownership of the alarm to interrupt context.
         self.try_activate_alarm(
             rtc_tick,
             remaining_timer_ticks,
@@ -862,9 +1117,35 @@ pub struct NrfRadioTimer {
 impl NrfRadioTimer {
     /// Instantiate the timer for the first time. Consumes the required
     /// peripherals. Further copies can then be created.
-    pub fn new(rtc: RTC0, timer: TIMER0, gpiote_channel: usize, ppi_channel: usize) -> Self {
-        STATE.init(rtc, timer, gpiote_channel, ppi_channel);
+    pub fn new(
+        rtc: RTC0,
+        timer: TIMER0,
+        #[cfg(feature = "gpio-trace")] gpiote_out_channel: usize,
+        #[cfg(feature = "gpio-trace")] gpiote_in_channel: usize,
+        ppi_channel: usize,
+    ) -> Self {
+        STATE.init(
+            rtc,
+            timer,
+            #[cfg(feature = "gpio-trace")]
+            gpiote_out_channel,
+            #[cfg(feature = "gpio-trace")]
+            gpiote_in_channel,
+            ppi_channel,
+        );
         Self { inner: () }
+    }
+
+    /// Applications that require the gpio-trace feature and want to capture
+    /// incoming GPIO toggle events SHALL call this method when the
+    /// corresponding interrupt has been fired.
+    ///
+    /// Note: The global GPIOTE interrupt handler cannot be owned by the timer
+    ///       as it only owns particular channels of the GPIOTE peripheral, not
+    ///       the whole peripheral.
+    #[cfg(feature = "gpio-trace")]
+    pub fn on_gpiote_interrupt() {
+        STATE.on_gpiote_interrupt();
     }
 }
 
@@ -902,7 +1183,6 @@ impl NrfRadioTimer {
         LocalClockInstant::from_ticks(ns as u64)
     }
 
-    #[allow(dead_code)]
     const fn timer_ticks_to_duration(timer_ticks: u32) -> LocalClockDuration {
         // timestamp_ns = ticks * (1 / timer_frequency_hz) * 10^9 ns/s
         //              = ticks * (1 / 16 MHz) * 10^9 ns/s
@@ -994,46 +1274,81 @@ impl RadioTimerApi for NrfRadioTimer {
     ) -> RadioTimerResult {
         STATE.assert_initialized();
 
-        let (rtc_tick, remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
+        let (rtc_tick, mut remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
 
         #[cfg(feature = "rtos-trace")]
-        crate::timer::trace::record_schedule_alarm(instant.ticks() as u32, rtc_tick as u32);
+        crate::timer::trace::record_wait_until(instant.ticks() as u32, rtc_tick as u32);
 
-        if let Some(signal) = signal {
-            STATE
-                .wait_for_alarm(
-                    rtc_tick,
-                    remaining_timer_ticks,
-                    AlarmChannel::Timer,
-                    Some(signal),
-                )
-                .await
-        } else if !STATE.is_alarm_active(AlarmChannel::Rtc1) {
-            STATE
-                .wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc1, None)
-                .await
-        } else if !STATE.is_alarm_active(AlarmChannel::Rtc2) {
-            STATE
-                .wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc2, None)
-                .await
+        let channel = if signal.is_some() {
+            STATE.acquire_alarm(AlarmChannel::Timer);
+            AlarmChannel::Timer
         } else {
-            // No alarm channel available
-            panic!();
-        }
+            remaining_timer_ticks = 0;
+            [AlarmChannel::Rtc1, AlarmChannel::Rtc2]
+                .into_iter()
+                .find(|&channel| STATE.try_acquire_alarm(channel).is_ok())
+                .unwrap()
+        };
+
+        let result = STATE
+            .wait_for(channel, |channel| {
+                STATE.try_activate_alarm(rtc_tick, remaining_timer_ticks, channel, signal)
+            })
+            .await;
+
+        STATE.release_alarm(channel);
+
+        result
     }
 
-    unsafe fn schedule_event(&self, timed_signal: TimedSignal) -> RadioTimerResult {
+    async unsafe fn wait_for_event(
+        &self,
+        start_at: LocalClockInstant,
+        event: HardwareEvent,
+    ) -> Result<LocalClockInstant, RadioTimerResult> {
+        STATE.assert_initialized();
+
+        let (rtc_tick, _) = Self::instant_to_alarm_ticks(start_at);
+
+        #[cfg(feature = "rtos-trace")]
+        crate::timer::trace::record_wait_for(start_at.ticks() as u32, rtc_tick as u32);
+
+        STATE.acquire_alarm(AlarmChannel::Timer);
+
+        let result = match STATE
+            .wait_for(AlarmChannel::Timer, |_| {
+                STATE.try_activate_capture(rtc_tick, event)
+            })
+            .await
+        {
+            RadioTimerResult::Ok => {
+                let captured_timer_ticks = STATE.get_and_clear_captured_timer_ticks();
+                debug_assert!(captured_timer_ticks > 0);
+                let captured_duration = Self::timer_ticks_to_duration(captured_timer_ticks);
+                Ok(Self::rtc_tick_to_instant(rtc_tick) + captured_duration)
+            }
+            RadioTimerResult::Overdue => Err(RadioTimerResult::Overdue),
+        };
+
+        STATE.release_alarm(AlarmChannel::Timer);
+
+        result
+    }
+
+    unsafe fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> RadioTimerResult {
         STATE.assert_initialized();
 
         let TimedSignal { instant, signal } = timed_signal;
         let (rtc_tick, remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
 
         #[cfg(feature = "rtos-trace")]
-        crate::timer::trace::record_schedule_signal(
+        crate::timer::trace::record_schedule_event(
             instant.ticks() as u32,
             rtc_tick as u32,
             remaining_timer_ticks as u32,
         );
+
+        STATE.acquire_alarm(AlarmChannel::Timer);
 
         STATE.schedule_event(rtc_tick, remaining_timer_ticks, signal)
     }

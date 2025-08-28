@@ -1,3 +1,5 @@
+//! Example demonstrating timed hardware signals.
+
 #![no_std]
 #![no_main]
 
@@ -8,9 +10,11 @@ use embassy_nrf as _;
 
 use dot15d4::driver::{
     executor::InterruptExecutor,
-    timer::{HardwareSignal, LocalClockDuration, Pin, RadioTimerApi, RadioTimerResult},
+    timer::{HardwareSignal, LocalClockDuration, RadioTimerApi, RadioTimerResult},
 };
-use dot15d4_examples_nrf52840::{config_peripherals, swi_executor, toggle_gpiote_pin, PIN_ALARM};
+use dot15d4_examples_nrf52840::{
+    config_peripherals, gpio_trace::PIN_ALARM, swi_executor, toggle_gpiote_pin,
+};
 use embassy_executor::Spawner;
 
 #[embassy_executor::main]
@@ -35,8 +39,7 @@ async fn main(_spawner: Spawner) {
             // Safety: We run at lower priority than the timer interrupt and we
             //         run from a single task.
             let result =
-                unsafe { timer.wait_until(timeout, Some(HardwareSignal::GpioToggle(Pin::Pin0))) }
-                    .await;
+                unsafe { timer.wait_until(timeout, Some(HardwareSignal::GpioToggle)) }.await;
             assert!(matches!(result, RadioTimerResult::Ok));
         }
         toggle_alarm_pin();
