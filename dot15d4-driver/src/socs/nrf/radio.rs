@@ -1040,6 +1040,29 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
 
         if let Some(tx_task) = &self.task {
             if tx_task.cca {
+                unsafe {
+                    self.inner
+                        .executor
+                        .spawn(poll_fn(|_| {
+                            if r.events_ccaidle.read().events_ccaidle().bit_is_set()
+                                || r.events_ccabusy.read().events_ccabusy().bit_is_set()
+                            {
+                                r.intenclr.write(|w| {
+                                    w.ccaidle().set_bit();
+                                    w.ccabusy().set_bit()
+                                });
+                                Poll::Ready(())
+                            } else {
+                                r.intenset.write(|w| {
+                                    w.ccaidle().set_bit();
+                                    w.ccabusy().set_bit()
+                                });
+                                Poll::Pending
+                            }
+                        }))
+                        .await;
+                }
+                r.events_rxready.reset();
                 if r.events_ccabusy.read().events_ccabusy().bit_is_set() {
                     r.events_ccabusy.reset();
                     let recovered_task = self.task.take().unwrap();
