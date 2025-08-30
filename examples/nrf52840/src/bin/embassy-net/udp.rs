@@ -11,7 +11,7 @@ use dot15d4_driver::{
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
 };
-use embassy_executor::{Spawner, SpawnerTraceExt};
+use embassy_executor::Spawner;
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
     IpAddress, IpEndpoint, Ipv6Address, Ipv6Cidr, Runner,
@@ -47,9 +47,10 @@ async fn main(spawner: Spawner) {
     let driver = radio_stack.driver();
 
     // We spawn the task that will control the CSMA task
-    spawner
-        .spawn_named("dot15d4\0", ieee802154_task(radio_stack, peripherals.RNG))
-        .unwrap();
+    let ieee802154_task = ieee802154_task(radio_stack, peripherals.RNG).unwrap();
+    #[cfg(feature = "rtos-trace")]
+    ieee802154_task.metadata().set_name("dot15d4\0");
+    spawner.spawn(ieee802154_task);
 
     let addr = option_env!("ADDRESS").unwrap_or("1").parse().unwrap();
     let config = embassy_net::Config::ipv6_static(embassy_net::StaticConfigV6 {
@@ -69,9 +70,10 @@ async fn main(spawner: Spawner) {
     );
 
     // Launch network task
-    spawner
-        .spawn_named("embassy-net\0", net_task(net_runner))
-        .unwrap();
+    let net_task = net_task(net_runner).unwrap();
+    #[cfg(feature = "rtos-trace")]
+    net_task.metadata().set_name("embassy-net\0");
+    spawner.spawn(net_task);
 
     // Then we can use it!
     let mut rx_meta = [PacketMetadata::EMPTY; 16];
