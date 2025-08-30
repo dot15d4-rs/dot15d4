@@ -201,17 +201,9 @@ async fn main(spawner: Spawner) {
     // Allocators, senders and receivers can all be safely and efficiently cloned.
 
     for id in 0..NUM_PRODUCERS {
-        spawner
-            .spawn(producer(
-                Address(id as u8),
-                buffer_allocator,
-                channel.sender(),
-            ))
-            .unwrap();
+        spawner.spawn(producer(Address(id as u8), buffer_allocator, channel.sender()).unwrap());
     }
     for id in 0..NUM_CONSUMERS {
-        spawner
-            .spawn(consumer(Address((id << 1) as u8), channel.receiver()))
-            .unwrap();
+        spawner.spawn(consumer(Address((id << 1) as u8), channel.receiver()).unwrap());
     }
 }

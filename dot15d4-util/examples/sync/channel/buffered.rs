@@ -95,6 +95,6 @@ async fn main(spawner: Spawner) {
         .init();
 
     let channel = CHANNEL.init(BufferedChannel::new());
-    spawner.spawn(producer(channel.sender())).unwrap();
-    spawner.spawn(consumer(channel.receiver())).unwrap();
+    spawner.spawn(producer(channel.sender()).unwrap());
+    spawner.spawn(consumer(channel.receiver()).unwrap());
 }

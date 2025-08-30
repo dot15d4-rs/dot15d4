@@ -111,11 +111,7 @@ async fn main(spawner: Spawner) {
 
     let channel = mpdu_channel();
     for id in 0..NUM_PRODUCERS {
-        spawner
-            .spawn(producer(id as u8, buffer_allocator, channel.sender()))
-            .unwrap();
+        spawner.spawn(producer(id as u8, buffer_allocator, channel.sender()).unwrap());
     }
-    spawner
-        .spawn(consumer(buffer_allocator, channel.receiver()))
-        .unwrap();
+    spawner.spawn(consumer(buffer_allocator, channel.receiver()).unwrap());
 }
