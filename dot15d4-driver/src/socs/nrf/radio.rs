@@ -13,13 +13,11 @@ use core::{
 };
 
 use dot15d4_util::{debug, frame::FramePdu, sync::CancellationGuard};
+// TODO: Remove HAL dependency.
+use nrf52840_hal::clocks::{Clocks, ExternalOscillator, LfOscStarted};
 #[cfg(feature = "gpio-trace")]
-use nrf52840_hal::pac::GPIOTE;
-use nrf52840_hal::{
-    clocks::{ExternalOscillator, LfOscStarted},
-    pac::{self, radio::state::STATE_A},
-    Clocks,
-};
+use nrf52840_pac::GPIOTE;
+use nrf52840_pac::{self as pac, radio::state::STATE_A};
 use typenum::U;
 
 #[cfg(feature = "rtos-trace")]
@@ -46,10 +44,9 @@ use crate::{
 use super::{executor::radio::NrfInterruptExecutor, timer::NrfRadioTimer};
 
 pub mod export {
-    pub use nrf52840_hal::{
-        clocks::{Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted},
-        pac,
-    };
+    // TODO: Remove HAL dependency.
+    pub use nrf52840_hal::clocks::{Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted};
+    pub use nrf52840_pac as pac;
 }
 
 /// This struct serves multiple purposes:
@@ -275,7 +272,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 impl<State> RadioDriverApi for RadioDriver<NrfRadioDriver, State> {
     fn ieee802154_address(&self) -> [u8; 8] {
         // Safety: Read-only access to a read-only register.
-        let ficr: nrf52840_hal::pac::FICR = unsafe { pac::Peripherals::steal() }.FICR;
+        let ficr: pac::FICR = unsafe { pac::Peripherals::steal() }.FICR;
         let id1 = ficr.deviceid[0].read().bits(); // TODO: Should this be modified to use DEVICEADDR (only 48bit)?
         let id2 = ficr.deviceid[1].read().bits();
         [
