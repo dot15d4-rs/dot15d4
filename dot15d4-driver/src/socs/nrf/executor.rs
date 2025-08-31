@@ -13,9 +13,9 @@ use core::{
 
 use cortex_m::asm::wfe;
 use dot15d4_util::sync::CancellationGuard;
-use nrf52840_hal::pac::{Interrupt, NVIC};
+use nrf52840_pac::{Interrupt, NVIC};
 #[cfg(feature = "gpio-trace")]
-use nrf52840_hal::pac::{Peripherals, GPIOTE};
+use nrf52840_pac::{Peripherals, GPIOTE};
 use portable_atomic::{AtomicPtr, Ordering};
 
 #[cfg(feature = "rtos-trace")]
@@ -294,7 +294,7 @@ macro_rules! nrf_interrupt_executor {
                 ptr,
                 task::{RawWaker, RawWakerVTable},
             };
-            use nrf52840_hal::pac::{interrupt, $peripheral, Interrupt};
+            use nrf52840_pac::{interrupt, $peripheral, Interrupt};
             use static_cell::StaticCell;
 
             use $crate::{executor::InterruptExecutor, interrupt_executor};
@@ -348,7 +348,7 @@ macro_rules! nrf_interrupt_executor {
         ///         that only a single instance of the executor can be
         ///         requested.
         pub fn $mod(
-            peripheral: nrf52840_hal::pac::$peripheral,
+            peripheral: nrf52840_pac::$peripheral,
             #[cfg(feature = "gpio-trace")] _gpiote: &GPIOTE,
             #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
         ) -> &'static mut $mod::NrfInterruptExecutor {

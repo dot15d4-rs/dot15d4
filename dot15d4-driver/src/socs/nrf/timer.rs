@@ -14,7 +14,7 @@ use core::{
 
 use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU32;
-use nrf52840_hal::pac::{interrupt, Peripherals, GPIOTE, NVIC, PPI, RTC0, TIMER0};
+use nrf52840_pac::{interrupt, Peripherals, GPIOTE, NVIC, PPI, RTC0, TIMER0};
 
 use crate::timer::{
     HardwareSignal, Pin, RadioTimerApi, RadioTimerResult, SyntonizedDuration, SyntonizedInstant,
