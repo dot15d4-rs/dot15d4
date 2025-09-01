@@ -11,7 +11,7 @@ pub use timer::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlarmChannel {
-    Event = 0,
-    Cpu,
+    Timer = 0,
+    Rtc1,
     NumAlarmChannels,
 }

@@ -118,7 +118,8 @@ impl Alarm {
 }
 
 const NUM_ALARM_CHANNELS: usize = AlarmChannel::NumAlarmChannels as usize;
-const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] = [AlarmChannel::Cpu, AlarmChannel::Event];
+const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] =
+    [AlarmChannel::Rtc1, AlarmChannel::Timer];
 
 #[repr(u8)]
 enum InitializationState {
@@ -364,7 +365,7 @@ impl State {
         //         this operation takes effect. Should the interrupt be
         //         spuriously woken it will additionally check alarm state.
         match channel {
-            AlarmChannel::Event => {
+            AlarmChannel::Timer => {
                 rtc.evtenclr.write(|w| w.compare0().set_bit());
                 rtc.intenclr.write(|w| w.compare0().set_bit());
                 Self::ppi()
@@ -372,7 +373,7 @@ impl State {
                     .write(|w| unsafe { w.bits(self.ppi_channel_mask.load(Ordering::Relaxed)) });
                 Self::timer().intenclr.write(|w| w.compare0().set_bit());
             }
-            AlarmChannel::Cpu => rtc.intenclr.write(|w| w.compare1().set_bit()),
+            AlarmChannel::Rtc1 => rtc.intenclr.write(|w| w.compare1().set_bit()),
             _ => unreachable!(),
         }
 
@@ -461,7 +462,7 @@ impl State {
     }
 
     fn on_timer_interrupt(&self) {
-        self.trigger_alarm(AlarmChannel::Event);
+        self.trigger_alarm(AlarmChannel::Timer);
     }
 
     // Called exclusively from interrupt context.
@@ -488,8 +489,8 @@ impl State {
                     // has already been set when scheduling the alarm.
                     let rtc = Self::rtc();
                     match channel {
-                        AlarmChannel::Event => rtc.intenset.write(|w| w.compare0().set_bit()),
-                        AlarmChannel::Cpu => rtc.intenset.write(|w| w.compare1().set_bit()),
+                        AlarmChannel::Timer => rtc.intenset.write(|w| w.compare0().set_bit()),
+                        AlarmChannel::Rtc1 => rtc.intenset.write(|w| w.compare1().set_bit()),
                         _ => unreachable!(),
                     }
                 }
@@ -568,7 +569,7 @@ impl State {
         rtc.events_compare[cc].reset();
         rtc.cc[cc].write(|w| w.compare().variant(rtc_tick as u32 & 0xFFFFFF));
 
-        if matches!(channel, AlarmChannel::Event) {
+        if matches!(channel, AlarmChannel::Timer) {
             // cc == 0
 
             let cc_event = if remaining_timer_ticks > 0 {
@@ -642,12 +643,12 @@ impl State {
             // Safety: From this point onwards we must no longer access the
             //         alarm until the alarm has been marked inactive again.
             match channel {
-                AlarmChannel::Event => {
+                AlarmChannel::Timer => {
                     if remaining_timer_ticks == 0 {
                         rtc.intenset.write(|w| w.compare0().set_bit())
                     }
                 }
-                AlarmChannel::Cpu => rtc.intenset.write(|w| w.compare1().set_bit()),
+                AlarmChannel::Rtc1 => rtc.intenset.write(|w| w.compare1().set_bit()),
                 _ => unreachable!(),
             }
 
@@ -809,9 +810,9 @@ impl State {
         signal: HardwareSignal,
     ) -> RadioTimerResult {
         // Safety: Ensure that we exclusively own the alarm.
-        debug_assert!(!self.is_alarm_active(AlarmChannel::Event));
+        debug_assert!(!self.is_alarm_active(AlarmChannel::Timer));
 
-        self.pend_alarm(AlarmChannel::Event);
+        self.pend_alarm(AlarmChannel::Timer);
 
         // Safety: Activating the alarm establishes a happens-before
         //         relationship with all prior memory accesses and transfers
@@ -819,7 +820,7 @@ impl State {
         self.try_activate_alarm(
             rtc_tick,
             remaining_timer_ticks,
-            AlarmChannel::Event,
+            AlarmChannel::Timer,
             Some(signal),
         )
     }
@@ -999,11 +1000,11 @@ impl RadioTimerApi for NrfRadioTimer {
             STATE.wait_for_alarm(
                 rtc_tick,
                 remaining_timer_ticks,
-                AlarmChannel::Event,
+                AlarmChannel::Timer,
                 Some(signal),
             )
         } else {
-            STATE.wait_for_alarm(rtc_tick, 0, AlarmChannel::Cpu, None)
+            STATE.wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc1, None)
         }
         .await
     }
