@@ -1065,7 +1065,7 @@ where
             radio_frame: rx_ack_frame,
         };
         let (mut rx_driver, tx_radio_frame) = match tx_driver
-            .schedule_rx(rx_ack_task, Ifs::Aifs)
+            .schedule_rx(rx_ack_task, Ifs::None)
             .execute_transition()
             .await
         {
