@@ -119,7 +119,7 @@ impl Alarm {
 
 const NUM_ALARM_CHANNELS: usize = AlarmChannel::NumAlarmChannels as usize;
 const ALARM_CHANNELS: [AlarmChannel; NUM_ALARM_CHANNELS] =
-    [AlarmChannel::Rtc1, AlarmChannel::Timer];
+    [AlarmChannel::Rtc2, AlarmChannel::Rtc1, AlarmChannel::Timer];
 
 #[repr(u8)]
 enum InitializationState {
@@ -192,7 +192,7 @@ impl State {
         Self {
             init_state: AtomicU8::new(InitializationState::Uninitialized as u8),
             half_period: AtomicU32::new(0),
-            alarms: [Alarm::new(), Alarm::new()],
+            alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
             gpiote_channel: AtomicUsize::new(0),
             ppi_channel: AtomicUsize::new(0),
             ppi_channel_mask: AtomicU32::new(0),
@@ -374,6 +374,7 @@ impl State {
                 Self::timer().intenclr.write(|w| w.compare0().set_bit());
             }
             AlarmChannel::Rtc1 => rtc.intenclr.write(|w| w.compare1().set_bit()),
+            AlarmChannel::Rtc2 => rtc.intenclr.write(|w| w.compare2().set_bit()),
             _ => unreachable!(),
         }
 
@@ -491,6 +492,7 @@ impl State {
                     match channel {
                         AlarmChannel::Timer => rtc.intenset.write(|w| w.compare0().set_bit()),
                         AlarmChannel::Rtc1 => rtc.intenset.write(|w| w.compare1().set_bit()),
+                        AlarmChannel::Rtc2 => rtc.intenset.write(|w| w.compare2().set_bit()),
                         _ => unreachable!(),
                     }
                 }
@@ -649,6 +651,7 @@ impl State {
                     }
                 }
                 AlarmChannel::Rtc1 => rtc.intenset.write(|w| w.compare1().set_bit()),
+                AlarmChannel::Rtc2 => rtc.intenset.write(|w| w.compare2().set_bit()),
                 _ => unreachable!(),
             }
 
@@ -997,16 +1000,26 @@ impl RadioTimerApi for NrfRadioTimer {
         crate::timer::trace::record_schedule_alarm(instant.ticks() as u32, rtc_tick as u32);
 
         if let Some(signal) = signal {
-            STATE.wait_for_alarm(
-                rtc_tick,
-                remaining_timer_ticks,
-                AlarmChannel::Timer,
-                Some(signal),
-            )
+            STATE
+                .wait_for_alarm(
+                    rtc_tick,
+                    remaining_timer_ticks,
+                    AlarmChannel::Timer,
+                    Some(signal),
+                )
+                .await
+        } else if !STATE.is_alarm_active(AlarmChannel::Rtc1) {
+            STATE
+                .wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc1, None)
+                .await
+        } else if !STATE.is_alarm_active(AlarmChannel::Rtc2) {
+            STATE
+                .wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc2, None)
+                .await
         } else {
-            STATE.wait_for_alarm(rtc_tick, 0, AlarmChannel::Rtc1, None)
+            // No alarm channel available
+            panic!();
         }
-        .await
     }
 
     unsafe fn schedule_event(&self, timed_signal: TimedSignal) -> RadioTimerResult {

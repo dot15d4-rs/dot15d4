@@ -13,5 +13,6 @@ pub use timer::*;
 pub enum AlarmChannel {
     Timer = 0,
     Rtc1,
+    Rtc2,
     NumAlarmChannels,
 }
