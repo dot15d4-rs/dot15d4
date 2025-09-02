@@ -1,3 +1,6 @@
+use core::ptr::null_mut;
+
+use cty::{c_char, c_uint, c_ulong};
 use systemview_target::SystemView;
 
 rtos_trace::global_trace! {SystemView}
@@ -18,6 +21,66 @@ pub enum TraceOffset {
 impl TraceOffset {
     pub const fn wrap(&self, offset: u32) -> u32 {
         *self as u32 + offset
+    }
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct SystemviewModule {
+    module_desc: *const c_char,
+    num_events: c_ulong,
+    event_offset: c_ulong,
+    send_module_desc: Option<unsafe extern "C" fn()>,
+    next_module: *mut SystemviewModule,
+}
+
+impl SystemviewModule {
+    pub const fn new(module_desc: &'static str, num_events: c_ulong) -> Self {
+        Self {
+            module_desc: module_desc.as_ptr(),
+            num_events,
+            event_offset: 0,
+            send_module_desc: None,
+            next_module: null_mut(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn event_offset(&self) -> c_ulong {
+        self.event_offset
+    }
+}
+
+unsafe extern "C" {
+    fn SEGGER_SYSVIEW_RegisterModule(module: *mut SystemviewModule);
+
+    fn SEGGER_SYSVIEW_RecordU32x2(event_id: c_uint, para0: c_ulong, para1: c_ulong);
+
+    fn SEGGER_SYSVIEW_RecordU32x3(event_id: c_uint, para0: c_ulong, para1: c_ulong, para2: c_ulong);
+}
+
+/// See SEGGER_SYSVIEW_RegisterModule.
+///
+/// # Safety
+///
+/// The argument must point to a module with static lifetime that's never moved.
+#[inline(always)]
+pub unsafe fn systemview_register_module(module: *mut SystemviewModule) {
+    SEGGER_SYSVIEW_RegisterModule(module);
+}
+
+/// See SEGGER_SYSVIEW_RecordU32x2.
+#[inline(always)]
+pub fn systemview_record_u32x2(event_id: c_uint, para0: c_ulong, para1: c_ulong) {
+    unsafe {
+        SEGGER_SYSVIEW_RecordU32x2(event_id, para0, para1);
+    }
+}
+
+/// See SEGGER_SYSVIEW_RecordU32x3.
+#[inline(always)]
+pub fn systemview_record_u32x3(event_id: c_uint, para0: c_ulong, para1: c_ulong, para2: c_ulong) {
+    unsafe {
+        SEGGER_SYSVIEW_RecordU32x3(event_id, para0, para1, para2);
     }
 }
 
