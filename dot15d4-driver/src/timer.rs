@@ -165,37 +165,12 @@ pub trait RadioTimerApi: Copy {
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
-    #![allow(non_camel_case_types, non_snake_case)]
-    use core::ptr::null_mut;
+    use dot15d4_util::trace::{
+        systemview_record_u32x2, systemview_record_u32x3, systemview_register_module,
+        SystemviewModule,
+    };
 
-    pub type SEGGER_SYSVIEW_MODULE = SEGGER_SYSVIEW_MODULE_STRUCT;
-
-    #[repr(C)]
-    #[derive(Debug, Copy, Clone)]
-    pub struct SEGGER_SYSVIEW_MODULE_STRUCT {
-        pub sModule: *const cty::c_char,
-        pub NumEvents: cty::c_ulong,
-        pub EventOffset: cty::c_ulong,
-        pub pfSendModuleDesc: Option<unsafe extern "C" fn()>,
-        pub pNext: *mut SEGGER_SYSVIEW_MODULE,
-    }
-
-    unsafe extern "C" {
-        pub fn SEGGER_SYSVIEW_RegisterModule(pModule: *mut SEGGER_SYSVIEW_MODULE);
-
-        pub fn SEGGER_SYSVIEW_RecordU32x2(
-            EventId: cty::c_uint,
-            Para0: cty::c_ulong,
-            Para1: cty::c_ulong,
-        );
-
-        pub fn SEGGER_SYSVIEW_RecordU32x3(
-            EventId: cty::c_uint,
-            Para0: cty::c_ulong,
-            Para1: cty::c_ulong,
-            Para2: cty::c_ulong,
-        );
-    }
+    use crate::timer::LocalClockInstant;
 
     // Events
     #[derive(Clone, Copy)]
@@ -208,50 +183,55 @@ pub mod trace {
 
     impl TraceEvents {
         fn event_id(&self) -> u32 {
-            *self as u32 + unsafe { TIMER_MODULE.EventOffset }
+            *self as u32 + unsafe { TIMER_MODULE }.event_offset()
         }
     }
 
     use TraceEvents::*;
 
     static TIMER_MODULE_DESC: &str = "M=timer, \
-        0 WaitUntil ns=%u rt=%u, \
-        1 WaitFor ns=%u rt=%u, \
-        2 SchedEvt ns=%u rt=%u tt=%u\0";
-    static mut TIMER_MODULE: SEGGER_SYSVIEW_MODULE = SEGGER_SYSVIEW_MODULE {
-        sModule: TIMER_MODULE_DESC.as_ptr(),
-        NumEvents: NumEvents as u32,
-        EventOffset: 0,
-        pfSendModuleDesc: None,
-        pNext: null_mut(),
-    };
+        0 WaitUntil µs=%u rt=%u, \
+        1 WaitFor µs=%u rt=%u, \
+        2 SchedEvt µs=%u rt=%u tt=%u\0";
+    static mut TIMER_MODULE: SystemviewModule =
+        SystemviewModule::new(TIMER_MODULE_DESC, NumEvents as u32);
 
     pub fn instrument() {
-        unsafe {
-            SEGGER_SYSVIEW_RegisterModule(&raw mut TIMER_MODULE);
-        }
+        unsafe { systemview_register_module(&raw mut TIMER_MODULE) };
     }
 
-    pub fn record_wait_until(ns: u32, rtc_ticks: u32) {
-        unsafe {
-            SEGGER_SYSVIEW_RecordU32x2(WaitUntil.event_id(), ns, rtc_ticks);
-        }
+    #[inline(always)]
+    fn to_micros_remainder(instant: LocalClockInstant) -> u32 {
+        // The largest power of 10 that can be represented in a u32.
+        const MAX_U32_POW_10: u64 = 1_000_000_000;
+        (instant.duration_since_epoch().to_micros() % MAX_U32_POW_10) as u32
     }
 
-    pub fn record_wait_for(ns: u32, rtc_ticks: u32) {
-        unsafe {
-            SEGGER_SYSVIEW_RecordU32x2(WaitFor.event_id(), ns, rtc_ticks);
-        }
+    #[inline(always)]
+    pub fn record_wait_until(instant: LocalClockInstant, rtc_ticks: u32) {
+        systemview_record_u32x2(
+            WaitUntil.event_id(),
+            to_micros_remainder(instant),
+            rtc_ticks,
+        );
     }
 
-    pub fn record_schedule_event(ns: u32, rtc_ticks: u32, remaining_timer_ticks: u32) {
-        unsafe {
-            SEGGER_SYSVIEW_RecordU32x3(
-                ScheduleEvent.event_id(),
-                ns,
-                rtc_ticks,
-                remaining_timer_ticks,
-            );
-        }
+    #[inline(always)]
+    pub fn record_wait_for(instant: LocalClockInstant, rtc_ticks: u32) {
+        systemview_record_u32x2(WaitFor.event_id(), to_micros_remainder(instant), rtc_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_schedule_event(
+        instant: LocalClockInstant,
+        rtc_ticks: u32,
+        remaining_timer_ticks: u32,
+    ) {
+        systemview_record_u32x3(
+            ScheduleEvent.event_id(),
+            to_micros_remainder(instant),
+            rtc_ticks,
+            remaining_timer_ticks,
+        );
     }
 }

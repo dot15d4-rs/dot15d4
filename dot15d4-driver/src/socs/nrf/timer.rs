@@ -1277,7 +1277,7 @@ impl RadioTimerApi for NrfRadioTimer {
         let (rtc_tick, mut remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
 
         #[cfg(feature = "rtos-trace")]
-        crate::timer::trace::record_wait_until(instant.ticks() as u32, rtc_tick as u32);
+        crate::timer::trace::record_wait_until(instant, rtc_tick as u32);
 
         let channel = if signal.is_some() {
             STATE.acquire_alarm(AlarmChannel::Timer);
@@ -1311,7 +1311,7 @@ impl RadioTimerApi for NrfRadioTimer {
         let (rtc_tick, _) = Self::instant_to_alarm_ticks(start_at);
 
         #[cfg(feature = "rtos-trace")]
-        crate::timer::trace::record_wait_for(start_at.ticks() as u32, rtc_tick as u32);
+        crate::timer::trace::record_wait_for(start_at, rtc_tick as u32);
 
         STATE.acquire_alarm(AlarmChannel::Timer);
 
@@ -1343,7 +1343,7 @@ impl RadioTimerApi for NrfRadioTimer {
 
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::record_schedule_event(
-            instant.ticks() as u32,
+            instant,
             rtc_tick as u32,
             remaining_timer_ticks as u32,
         );
