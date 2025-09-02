@@ -17,6 +17,10 @@ required-features = ["gpio-trace"]
 name = "timer-evt"
 required-features = ["gpio-trace"]
 
+[[bin]]
+name = "radio-sender"
+required-features = ["gpio-trace"]
+
 [dependencies]
 cortex-m = { version = "0.7", features = [
     "inline-asm",
