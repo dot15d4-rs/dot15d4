@@ -8,13 +8,15 @@ use crate::trace::{
 };
 use crate::{
     driver::{
-        frame::{
-            Address, AddressingMode, PanId, RadioFrame, RadioFrameRepr, RadioFrameSized,
-            RadioFrameUnsized,
+        radio::{
+            frame::{
+                Address, AddressingMode, PanId, RadioFrame, RadioFrameRepr, RadioFrameSized,
+                RadioFrameUnsized,
+            },
+            DriverConfig,
         },
-        radio::DriverConfig,
-        tasks::{RxError, RxResult, Timestamp, TxError, TxResult},
-        DrvSvcRequest, DrvSvcResponse, DrvSvcTaskError, DrvSvcTaskRx, DrvSvcTaskTx,
+        DrvSvcErrorRx, DrvSvcErrorTx, DrvSvcRequest, DrvSvcResponse, DrvSvcResultRx,
+        DrvSvcResultTx, DrvSvcTaskError, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp,
     },
     mac::{frame::mpdu::MpduFrame, task::*, MacBufferAllocator},
     util::{Error, Result as SimplifiedResult},
@@ -185,14 +187,14 @@ impl<RadioDriverImpl: DriverConfig> DataRequestTask<'_, RadioDriverImpl> {
     fn handle_tx_driver_response(response: DrvSvcResponse) -> DataRequestResult {
         match response {
             DrvSvcResponse::Tx(tx_result) => match tx_result {
-                Ok(TxResult::Sent(sent_tx_frame)) => {
+                Ok(DrvSvcResultTx::Sent(sent_tx_frame, ..)) => {
                     #[cfg(feature = "rtos-trace")]
                     rtos_trace::trace::marker(TX_FRAME);
 
                     DataRequestResult::Sent(sent_tx_frame.forget_size::<RadioDriverImpl>())
                 }
                 // TODO: resend
-                Ok(TxResult::Nack(unacknowledged_tx_frame)) => {
+                Ok(DrvSvcResultTx::Nack(unacknowledged_tx_frame, ..)) => {
                     #[cfg(feature = "rtos-trace")]
                     rtos_trace::trace::marker(TX_NACK);
 
@@ -200,7 +202,7 @@ impl<RadioDriverImpl: DriverConfig> DataRequestTask<'_, RadioDriverImpl> {
                 }
                 Err(tx_error) => match tx_error {
                     // TODO: CSMA/CA
-                    DrvSvcTaskError::Task(TxError::CcaBusy(unsent_tx_frame)) => {
+                    DrvSvcTaskError::Task(DrvSvcErrorTx::CcaBusy(unsent_tx_frame)) => {
                         #[cfg(feature = "rtos-trace")]
                         rtos_trace::trace::marker(TX_CCABUSY);
 
@@ -318,26 +320,26 @@ impl<'task, RadioDriverImpl: DriverConfig> DataIndicationTask<'task, RadioDriver
         match response {
             DrvSvcResponse::Rx(rx_result) => match rx_result {
                 Ok(rx_result) => match rx_result {
-                    RxResult::Frame(rx_frame) => {
+                    DrvSvcResultRx::Frame(rx_frame, ..) => {
                         #[cfg(feature = "rtos-trace")]
                         rtos_trace::trace::marker(RX_FRAME);
 
                         let mpdu = MpduFrame::from_radio_frame(rx_frame);
                         Ok(mpdu)
                     }
-                    RxResult::FilteredFrame(recovered_radio_frame) => {
+                    DrvSvcResultRx::FilteredFrame(recovered_radio_frame, ..) => {
                         #[cfg(feature = "rtos-trace")]
                         rtos_trace::trace::marker(RX_INVALID);
 
                         Err(recovered_radio_frame.forget_size::<RadioDriverImpl>())
                     }
-                    RxResult::RxWindowEnded(recovered_radio_frame) => {
+                    DrvSvcResultRx::RxWindowEnded(recovered_radio_frame, ..) => {
                         #[cfg(feature = "rtos-trace")]
                         rtos_trace::trace::marker(RX_WINDOW_ENDED);
 
                         Err(recovered_radio_frame)
                     }
-                    RxResult::CrcError(recovered_radio_frame) => {
+                    DrvSvcResultRx::CrcError(recovered_radio_frame, ..) => {
                         #[cfg(feature = "rtos-trace")]
                         rtos_trace::trace::marker(RX_CRC_ERROR);
 
@@ -347,7 +349,7 @@ impl<'task, RadioDriverImpl: DriverConfig> DataIndicationTask<'task, RadioDriver
                 Err(rx_task_error) => match rx_task_error {
                     // Bailing CRC errors should be handled by the driver
                     // service.
-                    DrvSvcTaskError::Task(RxError::CrcError) => unreachable!(),
+                    DrvSvcTaskError::Task(DrvSvcErrorRx::CrcError) => unreachable!(),
                     // TODO: Implement if required by a driver implementation.
                     _ => unreachable!(),
                 },

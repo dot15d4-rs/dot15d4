@@ -1,15 +1,14 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use dot15d4::{
-    driver::{
-        constants::PHY_MAX_PACKET_SIZE_127,
+    driver::radio::{
         frame::{
             Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
             PanId, RadioFrame,
         },
-        radio::DriverConfig,
-        tasks::{TaskOff, TaskRx, TaskTx, Timestamp},
-        timer::LocalClockInstant,
+        phy::PhyConfig,
+        tasks::{TaskRx, TaskTx},
+        DriverConfig, PhyOf,
     },
     mac::frame::{
         repr::{MpduRepr, SeqNrRepr},
@@ -46,37 +45,25 @@ const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
 static SEQ_NR: AtomicU8 = AtomicU8::new(0);
 
 #[allow(dead_code)]
-pub fn rx_task<Config: DriverConfig>(
-    start: Option<LocalClockInstant>,
-    buffer_allocator: BufferAllocator,
-) -> TaskRx {
+pub fn rx_task<Config: DriverConfig>(buffer_allocator: BufferAllocator) -> TaskRx {
     let radio_frame = RadioFrame::new::<Config>(
         buffer_allocator
-            .try_allocate_buffer(PHY_MAX_PACKET_SIZE_127)
+            .try_allocate_buffer(<PhyOf<Config> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize)
             .unwrap(),
     );
 
-    let start = if let Some(at) = start {
-        Timestamp::Scheduled(at)
-    } else {
-        Timestamp::BestEffort
-    };
-    TaskRx { start, radio_frame }
+    TaskRx { radio_frame }
 }
 
 #[allow(dead_code)]
-pub fn tx_task<Config: DriverConfig>(
-    at: Option<LocalClockInstant>,
-    cca: bool,
-    buffer_allocator: BufferAllocator,
-) -> TaskTx {
+pub fn tx_task<Config: DriverConfig>(cca: bool, buffer_allocator: BufferAllocator) -> TaskTx {
     let mut mpdu = MPDU_REPR
         .into_writer::<Config>(
             FrameVersion::Ieee802154_2006,
             FrameType::Data,
             PAYLOAD.len() as u16,
             buffer_allocator
-                .try_allocate_buffer(PHY_MAX_PACKET_SIZE_127)
+                .try_allocate_buffer(<PhyOf<Config> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize)
                 .unwrap(),
         )
         .unwrap();
@@ -89,24 +76,5 @@ pub fn tx_task<Config: DriverConfig>(
     mpdu.frame_payload_mut().copy_from_slice(&PAYLOAD);
     let radio_frame = mpdu.into_radio_frame::<Config>();
 
-    let at = if let Some(at) = at {
-        Timestamp::Scheduled(at)
-    } else {
-        Timestamp::BestEffort
-    };
-    TaskTx {
-        at,
-        radio_frame,
-        cca,
-    }
-}
-
-#[allow(dead_code)]
-pub fn off_task(at: Option<LocalClockInstant>) -> TaskOff {
-    let at = if let Some(at) = at {
-        Timestamp::Scheduled(at)
-    } else {
-        Timestamp::BestEffort
-    };
-    TaskOff { at }
+    TaskTx { radio_frame, cca }
 }

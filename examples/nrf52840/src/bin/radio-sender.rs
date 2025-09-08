@@ -3,23 +3,32 @@
 
 #![no_std]
 #![no_main]
+#![cfg(feature = "nrf52840")]
 
 use panic_probe as _;
 
-#[cfg(feature = "_cortex-m")]
 use cortex_m::asm::wfe;
 use dot15d4::{
-    driver::{constants::PHY_MAX_PACKET_SIZE_127, executor::InterruptExecutor, radio::RadioDriver},
+    driver::{
+        executor::InterruptExecutor,
+        radio::{
+            phy::{OQpsk250KBit, Phy, PhyConfig},
+            RadioDriver,
+        },
+    },
     util::buffer_allocator,
 };
 use dot15d4_examples_nrf52840::{config_peripherals, gpio_trace::PIN_EXECUTOR, swi_executor};
 
-#[cfg_attr(feature = "_cortex-m", cortex_m_rt::entry)]
+#[cortex_m_rt::entry]
 fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
 
-    let _buffer_allocator = buffer_allocator!(PHY_MAX_PACKET_SIZE_127, 2);
+    let _buffer_allocator = buffer_allocator!(
+        { <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize },
+        2
+    );
 
     let (peripherals, clocks, timer) = config_peripherals();
 
@@ -30,11 +39,9 @@ fn main() -> ! {
         clocks,
         timer,
         #[cfg(feature = "gpio-trace")]
-        &peripherals.gpiote,
-        #[cfg(feature = "gpio-trace")]
         gpiote_trace_channel,
     );
-    let executor = swi_executor(&peripherals.gpiote);
+    let executor = swi_executor();
 
     executor.block_on(async {});
 

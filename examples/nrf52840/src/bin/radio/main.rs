@@ -5,14 +5,17 @@
 
 #![no_std]
 #![no_main]
+#![cfg(feature = "nrf52840")]
 
 use panic_probe as _;
 
-#[cfg(feature = "_cortex-m")]
 use cortex_m::asm::wfe;
 use dot15d4::driver::{executor::InterruptExecutor, radio::RadioDriver};
 #[cfg(any(feature = "rx_to_tx", feature = "tx_to_tx"))]
-use dot15d4::{driver::constants::PHY_MAX_PACKET_SIZE_127, util::buffer_allocator};
+use dot15d4::{
+    driver::radio::phy::{OQpsk250KBit, Phy, PhyConfig},
+    util::buffer_allocator,
+};
 #[cfg(feature = "gpio-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor};
@@ -23,13 +26,16 @@ mod rx_to_tx;
 mod tx_to_tx;
 mod util;
 
-#[cfg_attr(feature = "_cortex-m", cortex_m_rt::entry)]
+#[cortex_m_rt::entry]
 fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
 
     #[cfg(any(feature = "rx_to_tx", feature = "tx_to_tx"))]
-    let _buffer_allocator = buffer_allocator!(PHY_MAX_PACKET_SIZE_127, 2);
+    let _buffer_allocator = buffer_allocator!(
+        { <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize },
+        2
+    );
 
     let (peripherals, clocks, timer) = config_peripherals();
     #[cfg(feature = "gpio-trace")]
@@ -39,14 +45,9 @@ fn main() -> ! {
         clocks,
         timer,
         #[cfg(feature = "gpio-trace")]
-        &peripherals.gpiote,
-        #[cfg(feature = "gpio-trace")]
         gpiote_trace_channel,
     );
-    let executor = swi_executor(
-        #[cfg(feature = "gpio-trace")]
-        &peripherals.gpiote,
-    );
+    let executor = swi_executor();
 
     executor.block_on(async {
         #[cfg(feature = "rx_to_tx")]
@@ -60,9 +61,7 @@ fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::stop();
 
-    #[allow(clippy::empty_loop)]
     loop {
-        #[cfg(feature = "_cortex-m")]
         wfe();
     }
 }

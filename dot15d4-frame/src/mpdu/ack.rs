@@ -1,6 +1,6 @@
-use dot15d4_driver::{
+use dot15d4_driver::radio::{
     frame::{FrameType, FrameVersion},
-    radio::DriverConfig,
+    DriverConfig,
 };
 use dot15d4_util::allocator::BufferToken;
 
@@ -24,6 +24,10 @@ pub const ACK_MPDU_SIZE_WO_FCS: u16 = {
         Ok(len) => len.get(),
         _ => unreachable!(),
     }
+};
+
+const _: () = {
+    assert!(ACK_MPDU_SIZE_WO_FCS == 3);
 };
 
 /// Instantiates a reader/writer for an ImmAck frame with the given buffer and

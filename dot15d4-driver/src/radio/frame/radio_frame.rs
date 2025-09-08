@@ -6,12 +6,10 @@ use dot15d4_util::{
     Result,
 };
 
-use crate::{
-    frame::{AddressingRepr, FrameControl},
-    radio::DriverConfig,
+use super::{
+    super::DriverConfig, AddressingRepr, FrameControl, RadioFrameRepr, RadioFrameSized,
+    RadioFrameUnsized,
 };
-
-use super::{RadioFrameRepr, RadioFrameSized, RadioFrameUnsized};
 
 /// Provides a simple default radio frame implementation with an externally
 /// allocated buffer.

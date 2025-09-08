@@ -70,7 +70,7 @@ where
     /// Poll function that can be used to build futures waiting for request
     /// token availability.
     pub fn poll_allocate_request_token(&self, cx: &mut Context) -> Poll<RequestToken> {
-        match self.channel.state().allocate_msg_slot(Some(cx)) {
+        match self.channel.state_mut().allocate_msg_slot(Some(cx)) {
             Some(msg_slot) => Poll::Ready(RequestToken::new(msg_slot)),
             None => Poll::Pending,
         }
@@ -79,7 +79,7 @@ where
     /// Try to allocate a request token without blocking.
     pub fn try_allocate_request_token(&self) -> Option<RequestToken> {
         self.channel
-            .state()
+            .state_mut()
             .allocate_msg_slot(None)
             .map(RequestToken::new)
     }
@@ -89,7 +89,7 @@ where
     /// Changes the state of any allocated slot from allocated to available.
     pub fn release_request_token(&self, request_token: RequestToken) {
         let msg_slot = request_token.consume();
-        self.channel.state().release_msg_slot(msg_slot);
+        self.channel.state_mut().release_msg_slot(msg_slot);
     }
 
     /// Synchronously sends the given request over a previously allocated slot
@@ -103,7 +103,7 @@ where
     /// Note: This operation cannot fail.
     pub fn send_request_no_response(&self, request_token: RequestToken, request: Request) {
         let msg_slot = request_token.consume();
-        let mut state = self.channel.state();
+        let mut state = self.channel.state_mut();
         state.send(msg_slot, request);
         state.slot_state[msg_slot as usize] = SlotState::RequestNoResponse;
     }
@@ -124,7 +124,7 @@ where
         request: Request,
     ) -> PollingResponseToken {
         let msg_slot = request_token.consume();
-        let mut state = self.channel.state();
+        let mut state = self.channel.state_mut();
         state.send(msg_slot, request);
         state.slot_state[msg_slot as usize] = SlotState::RequestPollingResponse(None);
         PollingResponseToken::new(msg_slot)
@@ -154,7 +154,7 @@ where
             .collect();
 
         let deregister_wakers = || {
-            let mut state = self.channel.state();
+            let mut state = self.channel.state_mut();
             for msg_slot in msg_slots.iter() {
                 let slot_state = &mut state.slot_state[*msg_slot as usize];
                 if let SlotState::RequestPollingResponse(maybe_waker) = slot_state {
@@ -169,7 +169,7 @@ where
         let cancellation_guard = CancellationGuard::new(deregister_wakers);
 
         let matching_response = poll_fn(|cx| {
-            let mut state = self.channel.state();
+            let mut state = self.channel.state_mut();
 
             let maybe_matching_response = state.try_poll_response(&msg_slots);
 
@@ -233,7 +233,7 @@ where
             .iter()
             .map(|response_token| response_token.message_slot())
             .collect();
-        let mut state = self.channel.state();
+        let mut state = self.channel.state_mut();
         let maybe_matching_response = state.try_poll_response(&msg_slots);
         if let Some((matching_msg_slot_idx, response)) = maybe_matching_response {
             let matching_request_token =
@@ -272,12 +272,12 @@ where
         request: Request,
     ) -> Response {
         let msg_slot = request_token.consume();
-        self.channel.state().send(msg_slot, request);
+        self.channel.state_mut().send(msg_slot, request);
 
         let cancellation_guard = CancellationGuard::new(|| panic!("cancelled"));
 
         let response = poll_fn(move |cx| {
-            let mut state = self.channel.state();
+            let mut state = self.channel.state_mut();
             if let Some(response) = state.try_get_response(msg_slot) {
                 Poll::Ready(response)
             } else {

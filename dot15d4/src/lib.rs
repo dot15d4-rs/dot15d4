@@ -6,10 +6,12 @@ pub use dot15d4_util as util;
 
 use self::{
     driver::{
-        radio::{DriverConfig, RadioDriver, RadioDriverApi},
-        tasks::{
-            OffState, RxState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
-            TaskTx as RadioTaskTx, TxState,
+        radio::{
+            tasks::{
+                ListeningRxState, OffState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
+                TaskTx as RadioTaskTx, TxState,
+            },
+            DriverConfig, RadioDriver, RadioDriverApi,
         },
         DriverRequestChannel, DriverService,
     },
@@ -30,7 +32,7 @@ impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl> {
 impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl>
 where
     RadioDriver<RadioDriverImpl, RadioTaskOff>: OffState<RadioDriverImpl> + RadioDriverApi,
-    RadioDriver<RadioDriverImpl, RadioTaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
+    RadioDriver<RadioDriverImpl, RadioTaskRx>: ListeningRxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, RadioTaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
     pub async fn run<'upper_layer>(
@@ -62,30 +64,6 @@ where
             Either::Second(_) => panic!("Driver service terminated"),
         }
     }
-
-    // pub async fn start_as_coordinator(&mut self) {
-    //     self.scan_energy().await;
-    // }
-
-    // pub async fn start(&mut self) {
-    //     //
-    //     self.scan_channels().await;
-    // }
-
-    // async fn receive_beacon_request<'a>(
-    //     &self,
-    //     buffer: &mut [u8; 128],
-    //     radio_guard: &mut Option<MutexGuard<'a, R>>,
-    // ) {
-    //     receive(
-    //         &mut **radio_guard.as_mut().unwrap(),
-    //         buffer,
-    //         RxConfig {
-    //             channel: crate::phy::config::Channel::_26,
-    //         },
-    //     )
-    //     .await;
-    // }
 }
 
 #[cfg(feature = "rtos-trace")]

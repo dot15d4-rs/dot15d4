@@ -1,4 +1,4 @@
-use crate::driver::frame::PanId;
+use crate::driver::radio::frame::PanId;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
 #[allow(dead_code)]
@@ -59,7 +59,7 @@ pub struct Pib {
 
 impl Default for Pib {
     fn default() -> Self {
-        use crate::driver::const_config::*;
+        use crate::driver::radio::const_config::*;
 
         Self {
             extended_address: None,

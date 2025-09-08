@@ -1,4 +1,5 @@
 use core::{
+    cell::Ref,
     future::{poll_fn, Future},
     marker::PhantomData,
     mem,
@@ -7,7 +8,7 @@ use core::{
 
 use bitmaps::{Bits, BitsImpl};
 
-use crate::sync::CancellationGuard;
+use crate::sync::{channel::State, CancellationGuard, MsgSlot};
 
 use super::{
     state::{Message, SlotState},
@@ -67,7 +68,7 @@ where
     /// receive requests in parallel.
     pub fn try_allocate_consumer_token(&self) -> Option<ConsumerToken> {
         self.channel
-            .state()
+            .state_mut()
             .allocate_cons_slot()
             .map(ConsumerToken::new)
     }
@@ -80,7 +81,7 @@ where
     /// back to the pool.
     pub fn release_consumer_token(&self, consumer_token: ConsumerToken) {
         self.channel
-            .state()
+            .state_mut()
             .release_cons_slot(consumer_token.consume());
     }
 
@@ -104,7 +105,10 @@ where
     /// to receiving.
     ///
     /// Canceling reception will free the consumer slot.
-    pub async fn wait_for_request(
+    ///
+    /// You SHOULD NOT try to receive and peek at the same time as this will
+    /// result in non-deterministic behavior.
+    pub async fn receive_request_async(
         &self,
         consumer_token: &mut ConsumerToken,
         address: &Address,
@@ -112,10 +116,10 @@ where
         let consumer_slot = consumer_token.consumer_slot();
         let cancellation_guard = CancellationGuard::new(|| {
             // Clean up the consumer slot.
-            self.channel.state().consumers[consumer_slot as usize] = None;
+            self.channel.state_mut().consumers[consumer_slot as usize] = None;
         });
 
-        let result = poll_fn(|cx| self.poll_wait_for_request(cx, consumer_token, address)).await;
+        let result = poll_fn(|cx| self.poll_receive_request(cx, consumer_token, address)).await;
         cancellation_guard.inactivate();
 
         result
@@ -123,7 +127,10 @@ where
 
     /// Poll function that can be used to build futures waiting for pending
     /// requests. The poll result will return the request and a response token.
-    pub fn poll_wait_for_request(
+    ///
+    /// You SHOULD NOT try to receive and peek at the same time as this will
+    /// result in non-deterministic behavior.
+    pub fn poll_receive_request(
         &self,
         cx: &mut Context,
         consumer_token: &mut ConsumerToken,
@@ -131,22 +138,21 @@ where
     ) -> Poll<(ResponseToken, Request)> {
         let consumer_slot = consumer_token.consumer_slot();
 
-        let mut state = self.channel.state();
+        let mut state = self.channel.state_mut();
         match state.try_receive(address) {
-            Some((msg_slot, request)) => {
-                debug_assert!(state.consumers[consumer_slot as usize].is_none());
-                Poll::Ready((ResponseToken::new(msg_slot), request))
-            }
+            Some((msg_slot, request)) => Poll::Ready((ResponseToken::new(msg_slot), request)),
             None => {
                 // None of the pending messages fits the given address, so let's
                 // wait for one that fits.
                 let consumer = &mut state.consumers[consumer_slot as usize];
-                debug_assert!(match consumer {
-                    Some((_, waker)) => cx.waker().will_wake(waker),
-                    None => true,
-                });
-                if consumer.is_none() {
-                    *consumer = Some((address.clone(), cx.waker().clone()));
+                match consumer {
+                    Some((ex_address, ex_waker)) => {
+                        ex_waker.clone_from(cx.waker());
+                        *ex_address = address.clone();
+                    }
+                    None => {
+                        *consumer = Some((address.clone(), cx.waker().clone()));
+                    }
                 }
                 Poll::Pending
             }
@@ -158,7 +164,7 @@ where
     /// slot allocated for the response.
     ///
     /// The same ordering, filtering and backpressure rules apply as for
-    /// [`Self::wait_for_request()`], see there.
+    /// [`Self::receive_request_async()`], see there.
     ///
     /// Changes the state of any matching message slot from pending to
     /// receiving.
@@ -167,7 +173,7 @@ where
     ///       any consumer-related resources.
     pub fn try_receive_request(&self, address: &Address) -> Option<(ResponseToken, Request)> {
         self.channel
-            .state()
+            .state_mut()
             .try_receive(address)
             .map(|(msg_slot, request)| (ResponseToken::new(msg_slot), request))
     }
@@ -188,7 +194,7 @@ where
 
         // Signal to the sending task, that a the message in this slot has been
         // fully received.
-        let mut state = self.channel.state();
+        let mut state = self.channel.state_mut();
         debug_assert!(state.messages[msg_slot as usize].is_none());
 
         let current_slot_state = &mut state.slot_state[msg_slot as usize];
@@ -248,7 +254,7 @@ where
         }
     }
 
-    /// Convenience method over `wait_for_msg()` and `receive_done()`.
+    /// Convenience method over `receive_request_async()` and `received()`.
     pub async fn receive<
         Result,
         Fut: Future<Output = (Response, Result)>,
@@ -259,9 +265,108 @@ where
         address: &Address,
         f: F,
     ) -> Result {
-        let (response_token, request) = self.wait_for_request(consumer_token, address).await;
+        let (response_token, request) = self.receive_request_async(consumer_token, address).await;
         let (response, result) = f(request).await;
         self.received(response_token, response);
         result
+    }
+
+    /// Wait for a request matching the given address or address wildcard and
+    /// return a copy of it.
+    ///
+    /// Peeking accesses the matching request that has been pending for the
+    /// longest time already.
+    ///
+    /// Does not change the state of the channel.
+    ///
+    /// Canceling will free the consumer slot.
+    ///
+    /// You SHOULD NOT try to receive and peek at the same time as this will
+    /// result in non-deterministic behavior.
+    pub async fn peek_request_async(
+        &self,
+        consumer_token: &mut ConsumerToken,
+        address: &Address,
+    ) -> Ref<'_, Request> {
+        let consumer_slot = consumer_token.consumer_slot();
+        let cancellation_guard = CancellationGuard::new(|| {
+            // Clean up the consumer slot.
+            self.channel.state_mut().consumers[consumer_slot as usize] = None;
+        });
+
+        let result = poll_fn(move |cx| self.poll_peek_request(cx, consumer_token, address)).await;
+        cancellation_guard.inactivate();
+
+        result
+    }
+
+    /// Poll function that can be used to build futures waiting for pending
+    /// requests. The poll result will return a reference to the request without
+    /// dequeuing it from the list of pending requests.
+    ///
+    /// You SHOULD NOT try to receive and peek at the same time as this will
+    /// result in non-deterministic behavior.
+    pub fn poll_peek_request(
+        &self,
+        cx: &mut Context,
+        consumer_token: &mut ConsumerToken,
+        address: &Address,
+    ) -> Poll<Ref<'_, Request>> {
+        let consumer_slot = consumer_token.consumer_slot();
+
+        match Self::try_peek(self.channel.state(), address) {
+            Some((_, request)) => Poll::Ready(request),
+            None => {
+                // None of the pending messages fits the given address, so let's
+                // wait for one that fits.
+                let consumer = &mut self.channel.state_mut().consumers[consumer_slot as usize];
+                match consumer {
+                    Some((ex_address, ex_waker)) => {
+                        ex_waker.clone_from(cx.waker());
+                        *ex_address = address.clone();
+                    }
+                    None => {
+                        *consumer = Some((address.clone(), cx.waker().clone()));
+                    }
+                }
+
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Try to find a pending request that matches the given address. If found,
+    /// it will be cloned and returned.
+    fn try_peek<'request>(
+        state: Ref<'request, State<Address, Request, Response, MESSAGES, BACKLOG, CONSUMERS>>,
+        address: &Address,
+    ) -> Option<(MsgSlot, Ref<'request, Request>)> {
+        for &msg_slot in state.pending_requests.iter() {
+            if let Some(Message::Request(request)) = state.messages[msg_slot as usize].as_ref() {
+                // Check whether this consumer listens for the pending request.
+                if request.matches(address) {
+                    let borrowed_request = Ref::map(state, |state| {
+                        // Safety: A slot can never be allocated and pending at the
+                        //         same time. We're guaranteed exclusive access to
+                        //         the slot right now and may read it. A pending
+                        //         slot must have been allocated and set.
+                        let request = state.messages[msg_slot as usize].as_ref().unwrap();
+                        if let Message::Request(request) = request {
+                            request
+                        } else {
+                            unreachable!()
+                        }
+                    });
+
+                    return Some((msg_slot, borrowed_request));
+                }
+            } else {
+                // Safety: We know that the request is pending, so a
+                //         corresponding message must be available.
+                unreachable!()
+            }
+        }
+
+        None
     }
 }

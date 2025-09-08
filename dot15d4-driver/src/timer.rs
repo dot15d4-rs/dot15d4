@@ -13,23 +13,26 @@ pub mod export {
 
 use export::*;
 
-/// O-QPSK 250kB/s = 31.25kb/s = 62.5ksymbol/s (1 byte = 8 bit = 2 O-QPSK symbols)
-pub const O_QPSK_FREQUENCY: u32 = 62_500;
-pub type SymbolsOQpsk250Instant = Instant<u64, 1, 62_500>;
-pub type SymbolsOQpsk250Duration = Duration<u64, 1, 62_500>;
-
 pub type LocalClockInstant = Instant<u64, 1, 1_000_000_000>;
 pub type LocalClockDuration = NanosDurationU64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RadioTimerError {
-    /// The timer operation could not be safely scheduled:
-    /// - In case of instants or signals, guard time restrictions were violated.
-    /// - In case of events, the event already occurred.
+    /// The instant or signal could not be safely scheduled, e.g. due to guard
+    /// time restrictions or because the scheduled instant is in the past.
     ///
     /// The operation returned at an arbitrary time before or after the
     /// scheduled instant or event occurrence.
-    Overdue,
+    ///
+    /// The offending instant is being returned.
+    Overdue(LocalClockInstant),
+
+    /// The event cannot be observed as it already occurred.
+    Already,
+
+    /// The timer operation could not be scheduled due to lack of resources
+    /// (e.g. lack of free timer channels).
+    Busy,
 }
 
 /// Hardware signals are an abstraction over electrical signals that can be sent
@@ -41,26 +44,39 @@ pub enum RadioTimerError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HardwareSignal {
-    /// Toggle the outbound alarm pin.
-    #[cfg(feature = "gpio-trace")]
-    GpioToggle,
-
     /// Enable radio reception.
     RadioRxEnable,
 
     /// Enable radio transmission.
     RadioTxEnable,
 
-    /// Disable radio reception/transmission.
+    /// Cancel any ongoing radio reception/transmission and transition the radio
+    /// into a low-energy state.
     RadioDisable,
+
+    /// Toggle the outbound alarm pin.
+    #[cfg(feature = "gpio-trace")]
+    GpioToggle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HardwareEvent {
+    /// An event indicating that the radio receiver was enabled. Exact timing is
+    /// implementation specific.
+    RadioRxEnabled,
+
+    /// An event indicating the start of frame reception. Exact timing is
+    /// implementation specific.
+    RadioFrameStarted,
+
+    /// An event indicating that the radio was disabled. Exact timing is
+    /// implementation specific.
+    RadioDisabled,
+
     /// A toggle event on the inbound alarm pin.
     #[cfg(feature = "gpio-trace")]
-    GpioToggle,
+    GpioToggled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,33 +92,33 @@ impl TimedSignal {
 }
 
 pub trait RadioTimerApi: Copy {
-    /// Returns the current instant of the local radio clock's coarse sleep
-    /// timer.
+    const TICK_PERIOD: LocalClockDuration;
+    const GUARD_TIME: LocalClockDuration;
+
+    type HighPrecisionTimer: HighPrecisionTimer;
+
+    /// Returns a recent instant of the local radio clock's coarse sleep timer.
     ///
-    /// Note: This method involves the CPU and therefore will always introduce
-    ///       some latency. The timer might have ticked concurrently in the
-    ///       meantime.
+    /// Note: This method involves the CPU and therefore will always return a
+    ///       past instant while the timer continues to tick concurrently.
     fn now(&self) -> LocalClockInstant;
 
-    /// Waits until the given instant, then wakes the current task.
-    ///
-    /// If an additional signal is provided, then that signal will be triggered
-    /// precisely at the requested time. This option uses the high-precision
-    /// timer.
-    ///
-    /// If no hardware signal is given then only the sleep timer will be used.
-    /// The high-precision timer is kept off.
+    /// Waits until the given instant using only the sleep timer, then wakes the
+    /// current task.
     ///
     /// Implementations SHALL be cancel-safe. Cancelling the future will cancel
     /// the alarm.
     ///
-    /// Note: This wakes the current task with latency and jitter as there may
-    ///       be an arbitrary delay between waking the task and the task
-    ///       executing. Only the (optional) signal will be deterministically
-    ///       timed. To reduce latency and (almost) eliminate jitter, use the
-    ///       [`InterruptExecutor`].
+    /// Note: This wakes the current task with latency and jitter depending on
+    ///       the surrounding executor implementation. To reduce latency and
+    ///       (almost) eliminate jitter, use the [`InterruptExecutor`].
     ///
     /// [`InterruptExecutor`]: crate::executor::InterruptExecutor
+    ///
+    /// # Panics
+    ///
+    /// Trying to create another future while the previous has not been driven
+    /// to completion and dropped, will panic.
     ///
     /// # Safety
     ///
@@ -112,75 +128,123 @@ pub trait RadioTimerApi: Copy {
     ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
     ///   subsequent invocations of the method, though.
     unsafe fn wait_until(
-        &self,
+        &mut self,
         instant: LocalClockInstant,
-        signal: Option<HardwareSignal>,
     ) -> impl Future<Output = Result<(), RadioTimerError>>;
 
-    /// Enables the high-precision timer at the given start time, then starts
-    /// listening for a hardware event and captures the high-precision timestamp
-    /// of the event.
+    /// Tries to allocate and start a high precision timer instance that is
+    /// synchronized with the sleep clock. Returns an error if no timer instance
+    /// can be allocated.
     ///
-    /// Implementations SHALL be cancel-safe. Cancelling the future will stop
-    /// the high-precision timer and reset timer state.
+    /// If a start time is given and the method returns without an error, then
+    /// the timer is guaranteed to be started before the given instant. The
+    /// start time must observe [`RadioTimerApi::GUARD_TIME`].
     ///
-    /// Note: This wakes the current task with latency and jitter as there may
-    ///       be an arbitrary delay between waking the task and the task
-    ///       executing. The event timestamp will be captured precisely, though.
-    ///       To reduce latency and (almost) eliminate jitter, use the
-    ///       [`InterruptExecutor`].
+    /// If no start time is given, then the timer starts as fast as possible,
+    /// i.e.  at the next available sleep timer tick. This MAY be faster than
+    /// [`RadioTimerApi::GUARD_TIME`] but SHALL NOT be slower.
     ///
-    /// [`InterruptExecutor`]: crate::executor::InterruptExecutor
+    /// The returned object serves as a token representing the running timer.
+    /// Dropping it will cancel, stop and de-allocate the timer.
     ///
-    /// # Safety
-    ///
-    /// - This method SHALL be called from a context that runs at lower priority
-    ///   than the timer interrupt(s) as well as any interrupt fired by the
-    ///   captured hardware event.
-    /// - The resulting future SHALL always be polled with the same waker, i.e.
-    ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
-    ///   subsequent invocations of the method, though.
-    unsafe fn wait_for_event(
+    /// Note: The sleep timer MAY be used concurrently with high-precision
+    ///       timers.
+    fn start_high_precision_timer(
         &self,
-        start_at: LocalClockInstant,
-        event: HardwareEvent,
-    ) -> impl Future<Output = Result<LocalClockInstant, RadioTimerError>>;
+        at: Option<LocalClockInstant>,
+    ) -> Result<Self::HighPrecisionTimer, RadioTimerError>;
+}
 
-    /// Schedule a hardware event, i.e. programs a signal to be sent over the
-    /// event bus at a precise instant.
+/// Represents a started high-precision timer. MAY be dropped to stop and
+/// de-allocate the timer.
+pub trait HighPrecisionTimer {
+    const TICK_PERIOD: LocalClockDuration;
+
+    /// Programs a hardware signal to be sent over the event bus at a precise
+    /// instant.
     ///
-    /// This method provides access to deterministically timed events at
-    /// hardware level without CPU intervention. Uses the high-precision timer.
-    /// Exact timing specifications are implementation dependent.
+    /// This method provides access to deterministically timed signals at
+    /// hardware level without CPU intervention. Exact timing specifications are
+    /// implementation dependent.
     ///
-    /// The method does not block.
+    /// Returns an error if the timed signal could not be scheduled, e.g. due to
+    /// lack of resources or late scheduling.
+    fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> Result<&Self, RadioTimerError>;
+
+    /// Programs a hardware signal to be sent over the event bus at a precise
+    /// instant unless the given event happens before.
+    ///
+    /// Returns an error if the timed signal could not be scheduled, e.g. due to
+    /// lack of resources or late scheduling.
+    fn schedule_timed_signal_unless(
+        &self,
+        timed_signal: TimedSignal,
+        event: HardwareEvent,
+    ) -> Result<&Self, RadioTimerError>;
+
+    /// Waits until a scheduled signal has been executed.
+    ///
+    /// The resulting future SHALL be cancellable. Dropping the future SHALL NOT
+    /// cancel the scheduled event.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`HighPrecisionTimer::schedule_timed_signal()`] had not been
+    /// called for this signal.
     ///
     /// # Safety
     ///
     /// - This method SHALL be called from a context that runs at lower priority
     ///   than the timer interrupt(s).
+    /// - The resulting future SHALL always be polled with the same waker, i.e.
+    ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
+    ///   subsequent invocations of the method, though.
+    unsafe fn wait_for(&mut self, signal: HardwareSignal) -> impl Future<Output = ()>;
+
+    /// Prepares the timer to listen for a hardware event and capture the
+    /// high-precision timestamp of the event if it occurs.
     ///
-    unsafe fn schedule_timed_signal(
-        &self,
-        timed_signal: TimedSignal,
-    ) -> Result<(), RadioTimerError>;
+    /// Returns an error if the timer cannot observe the event, e.g. due to lack
+    /// of resources.
+    ///
+    /// This method SHALL be idempotent, i.e. if the event is already being
+    /// observed, then calling this method SHALL be a no-op and return
+    /// successfully.
+    ///
+    /// See [`HighPrecisionTimer::poll_event`].
+    fn observe_event(&self, event: HardwareEvent) -> Result<&Self, RadioTimerError>;
+
+    /// Returns the timestamp observed by [`HighPrecisionTimer::observe_event`].
+    /// Returns [`None`] if the corresponding event was not observed.
+    ///
+    /// In case an event was observed, calling this method will release
+    /// corresponding timer resources so that they can be re-used by future
+    /// calls to [`HighPrecisionTimer::observe_event()`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`HighPrecisionTimer::observe_event()`] had not been called
+    /// for this event or if the event had already been collected by a prior
+    /// call to this method.
+    fn poll_event(&self, event: HardwareEvent) -> Option<LocalClockInstant>;
 }
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
     use dot15d4_util::trace::{
-        systemview_record_u32x2, systemview_record_u32x3, systemview_register_module,
-        SystemviewModule,
+        systemview_record_u32, systemview_record_u32x2, systemview_record_u32x3,
+        systemview_register_module, SystemviewModule,
     };
 
-    use crate::timer::LocalClockInstant;
+    use crate::timer::{HardwareEvent, HardwareSignal, LocalClockInstant};
 
     // Events
     #[derive(Clone, Copy)]
     enum TraceEvents {
-        WaitUntil,
-        WaitFor,
-        ScheduleEvent,
+        RtcAlarm,
+        StartHpTimer,
+        ScheduleTimedSignal,
+        ObserveEvent,
         NumEvents,
     }
 
@@ -193,9 +257,10 @@ pub mod trace {
     use TraceEvents::*;
 
     static TIMER_MODULE_DESC: &str = "M=timer, \
-        0 WaitUntil µs=%u rt=%u, \
-        1 WaitFor µs=%u rt=%u, \
-        2 SchedEvt µs=%u rt=%u tt=%u\0";
+        0 Alarm µs=%u rt=%u, \
+        1 Start µs=%u rt=%u, \
+        2 Sig µs=%u tt=%u s=%u \
+        3 Evt e=%u\0";
     static mut TIMER_MODULE: SystemviewModule =
         SystemviewModule::new(TIMER_MODULE_DESC, NumEvents as u32);
 
@@ -211,30 +276,35 @@ pub mod trace {
     }
 
     #[inline(always)]
-    pub fn record_wait_until(instant: LocalClockInstant, rtc_ticks: u32) {
+    pub fn record_rtc_alarm(instant: LocalClockInstant, rtc_ticks: u32) {
+        systemview_record_u32x2(RtcAlarm.event_id(), to_micros_remainder(instant), rtc_ticks);
+    }
+
+    #[inline(always)]
+    pub fn record_start_hp_timer(instant: LocalClockInstant, rtc_ticks: u32) {
         systemview_record_u32x2(
-            WaitUntil.event_id(),
+            StartHpTimer.event_id(),
             to_micros_remainder(instant),
             rtc_ticks,
         );
     }
 
     #[inline(always)]
-    pub fn record_wait_for(instant: LocalClockInstant, rtc_ticks: u32) {
-        systemview_record_u32x2(WaitFor.event_id(), to_micros_remainder(instant), rtc_ticks);
-    }
-
-    #[inline(always)]
-    pub fn record_schedule_event(
+    pub fn record_schedule_timed_signal(
         instant: LocalClockInstant,
-        rtc_ticks: u32,
-        remaining_timer_ticks: u32,
+        timer_ticks: u32,
+        signal: HardwareSignal,
     ) {
         systemview_record_u32x3(
-            ScheduleEvent.event_id(),
+            ScheduleTimedSignal.event_id(),
             to_micros_remainder(instant),
-            rtc_ticks,
-            remaining_timer_ticks,
+            timer_ticks,
+            signal as u32,
         );
+    }
+
+    #[inline(always)]
+    pub fn record_observe_event(event: HardwareEvent) {
+        systemview_record_u32(ObserveEvent.event_id(), event as u32);
     }
 }

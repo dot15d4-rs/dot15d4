@@ -53,6 +53,8 @@ impl SystemviewModule {
 unsafe extern "C" {
     fn SEGGER_SYSVIEW_RegisterModule(module: *mut SystemviewModule);
 
+    fn SEGGER_SYSVIEW_RecordU32(event_id: c_uint, para: c_ulong);
+
     fn SEGGER_SYSVIEW_RecordU32x2(event_id: c_uint, para0: c_ulong, para1: c_ulong);
 
     fn SEGGER_SYSVIEW_RecordU32x3(event_id: c_uint, para0: c_ulong, para1: c_ulong, para2: c_ulong);
@@ -66,6 +68,14 @@ unsafe extern "C" {
 #[inline(always)]
 pub unsafe fn systemview_register_module(module: *mut SystemviewModule) {
     SEGGER_SYSVIEW_RegisterModule(module);
+}
+
+/// See SEGGER_SYSVIEW_RecordU32.
+#[inline(always)]
+pub fn systemview_record_u32(event_id: c_uint, para: c_ulong) {
+    unsafe {
+        SEGGER_SYSVIEW_RecordU32(event_id, para);
+    }
 }
 
 /// See SEGGER_SYSVIEW_RecordU32x2.

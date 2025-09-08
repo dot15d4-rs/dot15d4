@@ -17,7 +17,6 @@ bitflags = "2"
 const_for = "0.1"
 
 [dev-dependencies]
-typenum = "1"
 static_cell = "2.1"
 
 [features]

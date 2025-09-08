@@ -10,10 +10,11 @@ use embassy_nrf as _;
 
 use dot15d4::driver::{
     executor::InterruptExecutor,
-    timer::{HardwareSignal, LocalClockDuration, RadioTimerApi},
+    socs::nrf::NrfRadioSleepTimer,
+    timer::{HardwareSignal, HighPrecisionTimer, LocalClockDuration, RadioTimerApi, TimedSignal},
 };
 use dot15d4_examples_nrf52840::{
-    config_peripherals, gpio_trace::PIN_ALARM, swi_executor, toggle_gpiote_pin,
+    config_peripherals, gpio_trace::PIN_TIMER_SIGNAL, swi_executor, toggle_gpiote_pin,
 };
 use embassy_executor::Spawner;
 
@@ -22,26 +23,48 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
-    let (peripherals, _, timer) = config_peripherals();
+    let (peripherals, _, mut timer) = config_peripherals();
 
     let toggle_alarm_pin = || {
-        toggle_gpiote_pin(&peripherals.gpiote, PIN_ALARM.gpiote_channel as usize);
+        toggle_gpiote_pin(
+            &peripherals.gpiote,
+            PIN_TIMER_SIGNAL.gpiote_channel as usize,
+        );
     };
 
-    let executor = swi_executor(&peripherals.gpiote);
+    let executor = swi_executor();
 
     let timer_task = async {
         let mut timeout = timer.now();
-        for _ in 0..10 {
-            const DELAY: LocalClockDuration = LocalClockDuration::nanos(4 * 30518);
-            timeout += DELAY;
 
-            // Safety: We run at lower priority than the timer interrupt and we
-            //         run from a single task.
-            let result =
-                unsafe { timer.wait_until(timeout, Some(HardwareSignal::GpioToggle)) }.await;
-            assert!(result.is_ok());
+        for _ in 0..10 {
+            const PERIOD: LocalClockDuration = LocalClockDuration::micros(500);
+
+            timeout += PERIOD;
+
+            unsafe {
+                timer
+                    .wait_until(timeout - NrfRadioSleepTimer::GUARD_TIME)
+                    .await
+                    .unwrap()
+            };
+
+            let mut high_precision_timer = timer.start_high_precision_timer(Some(timeout)).unwrap();
+            high_precision_timer
+                .schedule_timed_signal(TimedSignal::new(timeout, HardwareSignal::GpioToggle))
+                .unwrap();
+
+            unsafe {
+                high_precision_timer
+                    .wait_for(HardwareSignal::GpioToggle)
+                    .await
+            };
+
+            // The high precision timer is being dropped (and thereby stopped
+            // and de-allocated) at the end of the scope.
+            drop(high_precision_timer);
         }
+
         toggle_alarm_pin();
     };
 

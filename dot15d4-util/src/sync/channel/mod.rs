@@ -70,12 +70,12 @@
 //!   - [`Receiver::release_consumer_token()`]
 //!     Releases a previously
 //!
-//!   - [`Receiver::wait_for_request()`]
+//!   - [`Receiver::receive_request_async()`]
 //!     Asynchronously waits until a matching request becomes pending and
 //!     returns it. Also returns the token required to signal delivery to the
 //!     sender.
 //!
-//!   - [`Receiver::poll_wait_for_request()`]
+//!   - [`Receiver::poll_receive_request()`]
 //!     Poll function that can be used to build futures waiting for pending
 //!     requests. The poll result will return the request and a response token.
 //!
@@ -88,8 +88,17 @@
 //!     Releases the message slot and signals delivery to the sender.
 //!
 //!   - [`Receiver::receive()`]
-//!     This is convenience method over [`Receiver::wait_for_request()`] and
-//!     [`Receiver::received()`]. It handles message reception in a closure.
+//!     This is convenience method over [`Receiver::receive_request_async()`]
+//!     and [`Receiver::received()`]. It handles message reception in a closure.
+//!
+//!   - [`Receiver::peek_request_async()`]
+//!     Asynchronously waits until a matching request becomes pending and
+//!     returns a copy of it without dequeuing the message from the channel.
+//!
+//!   - [`Receiver::poll_peek_request()`]
+//!     Poll function that can be used to build futures waiting for pending
+//!     requests. The poll result will return a copy of the request without
+//!     dequeuing the message from the channel.
 
 // TODO: Make a prioritized version of the channel for timestamped radio tasks
 //       that allows awaiting changes to the queue front.
@@ -105,7 +114,7 @@ mod state;
 mod tokens;
 mod util;
 
-use core::cell::{RefCell, RefMut};
+use core::cell::{Ref, RefCell, RefMut};
 
 use self::state::State;
 
@@ -189,8 +198,14 @@ where
         Receiver::new(self)
     }
 
-    fn state(&self) -> RefMut<'_, State<Address, Request, Response, MESSAGES, BACKLOG, CONSUMERS>> {
+    fn state_mut(
+        &self,
+    ) -> RefMut<'_, State<Address, Request, Response, MESSAGES, BACKLOG, CONSUMERS>> {
         self.state.borrow_mut()
+    }
+
+    fn state(&self) -> Ref<'_, State<Address, Request, Response, MESSAGES, BACKLOG, CONSUMERS>> {
+        self.state.borrow()
     }
 }
 

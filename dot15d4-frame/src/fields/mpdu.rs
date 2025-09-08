@@ -1,9 +1,9 @@
-use dot15d4_driver::{
+use dot15d4_driver::radio::{
     frame::{
         AddressingFields, AddressingMode, AddressingRepr, FrameControl, FrameType, FrameVersion,
         RadioFrame, RadioFrameRepr, RadioFrameSized,
     },
-    radio::DriverConfig,
+    DriverConfig,
 };
 use dot15d4_util::{
     allocator::{BufferToken, IntoBuffer},

@@ -1,13 +1,23 @@
+#![cfg_attr(not(feature = "nrf"), allow(unused))]
+
 use core::fmt::Debug;
 
-use generic_array::ArrayLength;
+use crate::{
+    radio::tasks::StopListeningResult,
+    timer::{LocalClockInstant, RadioTimerApi, RadioTimerError},
+};
 
-use crate::timer::RadioTimerApi;
+use self::{
+    phy::PhyConfig,
+    tasks::{RadioState, RadioTask, RadioTaskError, SchedulingError, TaskOff},
+};
 
-pub mod export {
-    pub use generic_array::ArrayLength;
-    pub use typenum::{Unsigned, U};
-}
+pub mod config;
+pub mod const_config;
+pub mod constants;
+pub mod frame;
+pub mod phy;
+pub mod tasks;
 
 // TODO: Move this to an external per-driver config.
 pub const MAX_DRIVER_OVERHEAD: usize = 2;
@@ -30,17 +40,19 @@ pub type FcsNone = ();
 //       overhead as higher-layer representations need to save headroom,
 //       tailroom and FCS ranges anyway.
 pub trait DriverConfig {
+    type Phy: PhyConfig;
+
     /// Any buffer headroom required by the driver.
-    type Headroom: ArrayLength;
+    const HEADROOM: u8;
 
     /// Any buffer tailroom required by the driver. If the driver takes care of
     /// FCS handling (see [`FcsNone`]), then the tailroom may have to include
     /// the required bytes to let the hardware add the FCS.
-    type Tailroom: ArrayLength;
+    const TAILROOM: u8;
 
     /// aMaxPhyPacketSize if the FCS is handled by the MAC, otherwise
     /// aMaxPhyPacketSize minus the FCS size.
-    type MaxSduLength: ArrayLength;
+    const MAX_SDU_LENGTH: u16;
 
     /// FCS handling:
     ///  - [`FcsTwoBytes`]: No FCS handling inside the driver or hardware. The
@@ -59,7 +71,10 @@ pub trait DriverConfig {
     type Timer: RadioTimerApi;
 }
 
-pub type Timer<RadioDriverImpl> = <RadioDriverImpl as DriverConfig>::Timer;
+pub type HighPrecisionTimerOf<RadioDriverImpl> =
+    <<RadioDriverImpl as DriverConfig>::Timer as RadioTimerApi>::HighPrecisionTimer;
+
+pub type PhyOf<RadioDriverImpl> = <RadioDriverImpl as DriverConfig>::Phy;
 
 /// Basic features to be implemented by all radio drivers, independent of driver
 /// state.
@@ -156,13 +171,13 @@ pub trait RadioDriverApi {
 ///   transition behavior. Implementations will have to ensure that all prior
 ///   effects of the transition will be neutralized before returning an error
 ///   from a transition-related behavior. See
-///   [`crate::tasks::CompletedRadioTransition::Rollback`].
+///   [`tasks::CompletedRadioTransition::Rollback`].
 /// - A rollback is typically not possible if one of the transition behaviors
 ///   signals an error _after_ the source state has been left (i.e. the
 ///   state-specific transition() method has been called). Such exceptions
 ///   SHALL NOT leave the driver in an undefined state. Implementations SHALL
 ///   fall back to the off state if the target state cannot be reached, see
-///   [`crate::tasks::CompletedRadioTransition::Fallback`].
+///   [`tasks::CompletedRadioTransition::Fallback`].
 /// - We further extend the UML state machine model by defining a "do activity
 ///   result", i.e. the radio task MAY produce a result (e.g. a transmission
 ///   result code or a received radio frame). While the result will typically
@@ -179,24 +194,112 @@ pub trait RadioDriverApi {
 ///     radio task may risk deterministic execution timing if overstretching the
 ///     possibly short scheduling window.
 ///
-///   See [`crate::tasks::CompletedRadioTransition::Entered`].
+///   See [`tasks::CompletedRadioTransition::Entered`].
 ///
 /// SAFETY: Radio drivers are not synchronized. All its methods SHALL be called
 ///         from a single scheduler.
 pub struct RadioDriver<RadioDriverImpl: DriverConfig, Task> {
     /// Any private state used by a specific radio driver implementation.
-    pub(super) inner: RadioDriverImpl,
-    // An instance of the radio timer.
-    pub(super) timer: RadioDriverImpl::Timer,
+    pub(crate) inner: RadioDriverImpl,
+    // An instance of the radio sleep timer.
+    pub sleep_timer: RadioDriverImpl::Timer,
+    /// An instance of the high precision timer while it is running.
+    high_precision_timer: Option<HighPrecisionTimerOf<RadioDriverImpl>>,
+    /// The scheduled entry time. Kept for debugging and error handling
+    /// purposes. Shall be set while the task is being scheduled. See
+    /// [`tasks::RadioState::transition`] for a definition of the semantics of
+    /// this timestamp.
+    pub(crate) scheduled_entry: Option<LocalClockInstant>,
+    /// The time the task entered. This timestamp SHALL be measured and set as
+    /// soon as the task entered. See [`tasks::RadioState::transition`] for a
+    /// definition of the semantics of this timestamp.
+    pub(crate) measured_entry: Option<LocalClockInstant>,
+    /// The precise time at which the radio stopped listening: Either
+    /// communicates the RMARKER of an incoming frame or the time at which the
+    /// radio entered the disabled state.
+    ///
+    /// This value is observed at the end of the listening reception state and
+    /// available throughout the completing reception state. Not available in
+    /// any other radio state.
+    stop_listening_result: Option<StopListeningResult>,
     /// The currently active task which may be consumed by the driver at any
     /// time during task execution.
-    #[allow(dead_code)]
-    pub(super) task: Option<Task>,
+    pub(crate) task: Option<Task>,
 }
 
-impl<RadioDriverImpl: DriverConfig, Task> RadioDriver<RadioDriverImpl, Task> {
-    pub fn timer(&self) -> RadioDriverImpl::Timer {
-        self.timer
+impl<RadioDriverImpl: DriverConfig> RadioDriver<RadioDriverImpl, TaskOff>
+where
+    Self: RadioState<TaskOff>,
+{
+    pub(crate) fn initial_state(
+        inner: RadioDriverImpl,
+        sleep_timer: RadioDriverImpl::Timer,
+    ) -> Self {
+        Self {
+            inner,
+            sleep_timer,
+            high_precision_timer: None,
+            scheduled_entry: Some(LocalClockInstant::from_ticks(0)),
+            measured_entry: Some(LocalClockInstant::from_ticks(0)),
+            stop_listening_result: None,
+            task: Some(TaskOff),
+        }
+    }
+
+    pub(crate) async fn wait_until_off(mut self) -> (Self, LocalClockInstant) {
+        let off_entry = self.transition().await;
+        debug_assert!(off_entry.is_ok());
+        (self, off_entry.unwrap())
+    }
+}
+
+impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl, Task> {
+    pub(crate) fn start_timer(
+        &mut self,
+        start_at: Option<LocalClockInstant>,
+    ) -> Result<&HighPrecisionTimerOf<RadioDriverImpl>, RadioTimerError> {
+        debug_assert!(self.high_precision_timer.is_none());
+
+        self.high_precision_timer = Some(self.sleep_timer.start_high_precision_timer(start_at)?);
+        Ok(self.timer())
+    }
+
+    pub(crate) fn timer(&self) -> &HighPrecisionTimerOf<RadioDriverImpl> {
+        self.high_precision_timer.as_ref().unwrap()
+    }
+
+    pub(crate) fn stop_timer(&mut self) {
+        drop(self.high_precision_timer.take());
+    }
+
+    pub(crate) fn set_stop_listening_result(&mut self, stop_listening_result: StopListeningResult) {
+        debug_assert!(self.stop_listening_result.is_none());
+
+        self.stop_listening_result = Some(stop_listening_result)
+    }
+
+    pub(crate) fn frame_started(&self) -> Option<LocalClockInstant> {
+        match self.stop_listening_result {
+            Some(StopListeningResult::FrameStarted(frame_started)) => Some(frame_started),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn take_task(&mut self) -> Task {
+        self.task.take().unwrap()
+    }
+
+    pub(crate) fn ref_task(&self) -> &Task {
+        self.task.as_ref().unwrap()
+    }
+
+    pub(crate) fn scheduling_error(&mut self) -> RadioTaskError<Task> {
+        RadioTaskError::Scheduling(
+            self.take_task(),
+            SchedulingError {
+                instant: self.scheduled_entry,
+            },
+        )
     }
 }
 
