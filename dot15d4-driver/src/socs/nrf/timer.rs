@@ -20,7 +20,7 @@ use nrf52840_pac::{interrupt, Peripherals, NVIC, PPI, RADIO, RTC0, TIMER0};
 
 use crate::timer::{
     HardwareEvent, HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi,
-    RadioTimerResult, TimedSignal,
+    RadioTimerError, TimedSignal,
 };
 
 use super::AlarmChannel;
@@ -725,7 +725,7 @@ impl State {
         rtc_now_tick: u64,
         triggers_timer: bool,
         channel: AlarmChannel,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         let rtc = Self::rtc();
 
         if rtc_tick - rtc_now_tick < Self::RTC_THREE_QUARTERS_PERIOD {
@@ -759,14 +759,14 @@ impl State {
                 //         interrupts is not immediate. Therefore the interrupt
                 //         handler additionally synchronizes on alarm state.
                 self.fire_and_inactivate_alarm(channel);
-                RadioTimerResult::Overdue
+                Err(RadioTimerError::Overdue)
             } else {
-                RadioTimerResult::Ok
+                Ok(())
             }
         } else {
             // If the alarm is too far into the future, don't enable the compare
             // interrupt yet. It will be enabled by `next_period()`.
-            RadioTimerResult::Ok
+            Ok(())
         }
     }
 
@@ -777,12 +777,12 @@ impl State {
         remaining_timer_ticks: u16,
         channel: AlarmChannel,
         maybe_signal: Option<HardwareSignal>,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         let triggers_timer = remaining_timer_ticks > 0;
 
         let (ok, rtc_now_tick) = self.prepare_rtc(rtc_tick, triggers_timer, channel);
         if !ok {
-            return RadioTimerResult::Overdue;
+            return Err(RadioTimerError::Overdue);
         }
 
         let rtc = Self::rtc();
@@ -869,7 +869,7 @@ impl State {
         &self,
         _start_at_rtc_tick: u64,
         _event: HardwareEvent,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         #[cfg(not(feature = "gpio-trace"))]
         todo!("not implemented");
 
@@ -878,7 +878,7 @@ impl State {
             let (ok, rtc_now_tick) =
                 self.prepare_rtc(_start_at_rtc_tick, true, AlarmChannel::Timer);
             if !ok {
-                return RadioTimerResult::Overdue;
+                return Err(RadioTimerError::Overdue);
             }
 
             let timer = Self::timer();
@@ -928,7 +928,7 @@ impl State {
                 .bit_is_set()
             {
                 gpiote.events_in[gpiote_channel].write(|w| w.events_in().clear_bit());
-                RadioTimerResult::Overdue
+                Err(RadioTimerError::Overdue)
             } else {
                 was_safely_scheduled
             }
@@ -997,11 +997,11 @@ impl State {
 
     // Called exclusively from scheduling context. Requires the given alarm
     // channel to be acquired/released before/after calling/awaiting the method.
-    async fn wait_for<Activate: (FnOnce(AlarmChannel) -> RadioTimerResult) + Copy>(
+    async fn wait_for<Activate: (FnOnce(AlarmChannel) -> Result<(), RadioTimerError>) + Copy>(
         &self,
         channel: AlarmChannel,
         activate: Activate,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         let cleanup_on_drop = CancellationGuard::new(|| {
             // Safety: Clearing the interrupt is not immediate. It might still
             //         fire. That's why interrupt context additionally
@@ -1039,13 +1039,13 @@ impl State {
                     //         all prior memory accesses and transfers ownership
                     //         of the alarm to interrupt context.
                     let result = activate(channel);
-                    if matches!(result, RadioTimerResult::Ok) {
+                    if result.is_ok() {
                         Poll::Pending
                     } else {
                         Poll::Ready(result)
                     }
                 } else {
-                    Poll::Ready(RadioTimerResult::Ok)
+                    Poll::Ready(Ok(()))
                 }
             }
         })
@@ -1063,7 +1063,7 @@ impl State {
         rtc_tick: u64,
         remaining_timer_ticks: u16,
         signal: HardwareSignal,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         // Safety: We own alarm memory at this point and the unsafe cell ensures
         //         a non-null pointer.
         unsafe {
@@ -1271,7 +1271,7 @@ impl RadioTimerApi for NrfRadioTimer {
         &self,
         instant: LocalClockInstant,
         signal: Option<HardwareSignal>,
-    ) -> RadioTimerResult {
+    ) -> Result<(), RadioTimerError> {
         STATE.assert_initialized();
 
         let (rtc_tick, mut remaining_timer_ticks) = Self::instant_to_alarm_ticks(instant);
@@ -1305,7 +1305,7 @@ impl RadioTimerApi for NrfRadioTimer {
         &self,
         start_at: LocalClockInstant,
         event: HardwareEvent,
-    ) -> Result<LocalClockInstant, RadioTimerResult> {
+    ) -> Result<LocalClockInstant, RadioTimerError> {
         STATE.assert_initialized();
 
         let (rtc_tick, _) = Self::instant_to_alarm_ticks(start_at);
@@ -1321,13 +1321,13 @@ impl RadioTimerApi for NrfRadioTimer {
             })
             .await
         {
-            RadioTimerResult::Ok => {
+            Ok(_) => {
                 let captured_timer_ticks = STATE.get_and_clear_captured_timer_ticks();
                 debug_assert!(captured_timer_ticks > 0);
                 let captured_duration = Self::timer_ticks_to_duration(captured_timer_ticks);
                 Ok(Self::rtc_tick_to_instant(rtc_tick) + captured_duration)
             }
-            RadioTimerResult::Overdue => Err(RadioTimerResult::Overdue),
+            Err(e) => Err(e),
         };
 
         STATE.release_alarm(AlarmChannel::Timer);
@@ -1335,7 +1335,10 @@ impl RadioTimerApi for NrfRadioTimer {
         result
     }
 
-    unsafe fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> RadioTimerResult {
+    unsafe fn schedule_timed_signal(
+        &self,
+        timed_signal: TimedSignal,
+    ) -> Result<(), RadioTimerError> {
         STATE.assert_initialized();
 
         let TimedSignal { instant, signal } = timed_signal;

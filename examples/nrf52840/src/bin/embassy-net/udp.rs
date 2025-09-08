@@ -6,7 +6,7 @@ use panic_probe as _;
 use dot15d4::driver::{
     radio::RadioDriver,
     socs::nrf::NrfRadioDriver,
-    timer::{LocalClockDuration, RadioTimerApi, RadioTimerResult},
+    timer::{LocalClockDuration, RadioTimerApi},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -113,7 +113,7 @@ async fn main(spawner: Spawner) {
                     .wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD), None)
                     .await
             };
-            debug_assert_eq!(res, RadioTimerResult::Ok);
+            debug_assert!(res.is_ok());
         }
     }
 }

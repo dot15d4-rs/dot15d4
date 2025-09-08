@@ -10,7 +10,7 @@ use embassy_nrf as _;
 
 use dot15d4::driver::{
     executor::InterruptExecutor,
-    timer::{HardwareSignal, LocalClockDuration, RadioTimerApi, RadioTimerResult},
+    timer::{HardwareSignal, LocalClockDuration, RadioTimerApi},
 };
 use dot15d4_examples_nrf52840::{
     config_peripherals, gpio_trace::PIN_ALARM, swi_executor, toggle_gpiote_pin,
@@ -40,7 +40,7 @@ async fn main(_spawner: Spawner) {
             //         run from a single task.
             let result =
                 unsafe { timer.wait_until(timeout, Some(HardwareSignal::GpioToggle)) }.await;
-            assert!(matches!(result, RadioTimerResult::Ok));
+            assert!(result.is_ok());
         }
         toggle_alarm_pin();
     };

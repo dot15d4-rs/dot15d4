@@ -22,13 +22,13 @@ pub type LocalClockInstant = Instant<u64, 1, 1_000_000_000>;
 pub type LocalClockDuration = NanosDurationU64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RadioTimerResult {
-    /// The alarm was successfully scheduled and fired with well-defined
-    /// latency at the given instant.
-    Ok,
-    /// The alarm was already overdue or could not be safely scheduled due to
-    /// guard time restrictions being violated. The method returned at an
-    /// arbitrary time before or after the scheduled instant.
+pub enum RadioTimerError {
+    /// The timer operation could not be safely scheduled:
+    /// - In case of instants or signals, guard time restrictions were violated.
+    /// - In case of events, the event already occurred.
+    ///
+    /// The operation returned at an arbitrary time before or after the
+    /// scheduled instant or event occurrence.
     Overdue,
 }
 
@@ -115,7 +115,7 @@ pub trait RadioTimerApi: Copy {
         &self,
         instant: LocalClockInstant,
         signal: Option<HardwareSignal>,
-    ) -> impl Future<Output = RadioTimerResult>;
+    ) -> impl Future<Output = Result<(), RadioTimerError>>;
 
     /// Enables the high-precision timer at the given start time, then starts
     /// listening for a hardware event and captures the high-precision timestamp
@@ -144,7 +144,7 @@ pub trait RadioTimerApi: Copy {
         &self,
         start_at: LocalClockInstant,
         event: HardwareEvent,
-    ) -> impl Future<Output = Result<LocalClockInstant, RadioTimerResult>>;
+    ) -> impl Future<Output = Result<LocalClockInstant, RadioTimerError>>;
 
     /// Schedule a hardware event, i.e. programs a signal to be sent over the
     /// event bus at a precise instant.
@@ -160,7 +160,10 @@ pub trait RadioTimerApi: Copy {
     /// - This method SHALL be called from a context that runs at lower priority
     ///   than the timer interrupt(s).
     ///
-    unsafe fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> RadioTimerResult;
+    unsafe fn schedule_timed_signal(
+        &self,
+        timed_signal: TimedSignal,
+    ) -> Result<(), RadioTimerError>;
 }
 
 #[cfg(feature = "rtos-trace")]
