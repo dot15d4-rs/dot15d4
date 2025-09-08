@@ -39,20 +39,24 @@ impl MpduParsedUpToSecurity for MpduWithAllFields {}
 
 #[cfg(test)]
 mod test {
-    use core::num::NonZeroU16;
+    use core::{marker::PhantomData, num::NonZeroU16};
 
     use dot15d4_driver::{
-        constants::PHY_MAX_PACKET_SIZE_127,
-        frame::{
-            AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
-            RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
+        radio::{
+            frame::{
+                AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
+                RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
+            },
+            phy::{OQpsk250KBit, Phy},
+            DriverConfig, FcsTwoBytes,
         },
-        radio::{DriverConfig, FcsTwoBytes},
-        timer::{HardwareSignal, LocalClockInstant, RadioTimerApi, RadioTimerError, TimedSignal},
+        timer::{
+            HardwareEvent, HardwareSignal, HighPrecisionTimer, LocalClockDuration,
+            LocalClockInstant, RadioTimerApi, RadioTimerError, TimedSignal,
+        },
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
-    use typenum::{U, U1, U2};
 
     #[cfg(feature = "ies")]
     use crate::repr::{IeListRepr, IeRepr, IeReprList};
@@ -64,40 +68,78 @@ mod test {
         MpduWithIes,
     };
     #[derive(Clone, Copy)]
-    struct FakeRadioTimer;
-    impl RadioTimerApi for FakeRadioTimer {
+    struct FakeRadioTimer<State: Clone> {
+        state: PhantomData<State>,
+    }
+    #[derive(Clone, Copy)]
+    struct Sleeping;
+    #[derive(Clone, Copy)]
+    struct Running;
+
+    impl RadioTimerApi for FakeRadioTimer<Sleeping> {
+        const TICK_PERIOD: LocalClockDuration = LocalClockDuration::from_ticks(0);
+        const GUARD_TIME: LocalClockDuration = LocalClockDuration::from_ticks(0);
+
+        type HighPrecisionTimer = FakeRadioTimer<Running>;
+
         fn now(&self) -> LocalClockInstant {
             todo!()
         }
 
         async unsafe fn wait_until(
-            &self,
-            _: LocalClockInstant,
-            _: Option<HardwareSignal>,
+            &mut self,
+            _instant: LocalClockInstant,
         ) -> Result<(), RadioTimerError> {
             todo!()
         }
 
-        async unsafe fn wait_for_event(
+        fn start_high_precision_timer(
             &self,
-            _: LocalClockInstant,
-            _: dot15d4_driver::timer::HardwareEvent,
-        ) -> Result<LocalClockInstant, RadioTimerError> {
+            _start_at: Option<LocalClockInstant>,
+        ) -> Result<Self::HighPrecisionTimer, RadioTimerError> {
+            todo!()
+        }
+    }
+
+    impl HighPrecisionTimer for FakeRadioTimer<Running> {
+        const TICK_PERIOD: LocalClockDuration = LocalClockDuration::from_ticks(0);
+
+        fn schedule_timed_signal(
+            &self,
+            _timed_signal: TimedSignal,
+        ) -> Result<&Self, RadioTimerError> {
             todo!()
         }
 
-        unsafe fn schedule_timed_signal(&self, _: TimedSignal) -> Result<(), RadioTimerError> {
+        fn schedule_timed_signal_unless(
+            &self,
+            _timed_signal: TimedSignal,
+            _event: HardwareEvent,
+        ) -> Result<&Self, RadioTimerError> {
+            todo!()
+        }
+
+        async unsafe fn wait_for(&mut self, _signal: HardwareSignal) {
+            todo!()
+        }
+
+        fn observe_event(&self, _event: HardwareEvent) -> Result<&Self, RadioTimerError> {
+            todo!()
+        }
+
+        fn poll_event(&self, _event: HardwareEvent) -> Option<LocalClockInstant> {
             todo!()
         }
     }
 
     struct FakeDriverConfig;
     impl DriverConfig for FakeDriverConfig {
-        type Headroom = U1;
-        type Tailroom = U2;
-        type MaxSduLength = U<PHY_MAX_PACKET_SIZE_127>;
+        const HEADROOM: u8 = 1;
+        const TAILROOM: u8 = 2;
+        const MAX_SDU_LENGTH: u16 = 127;
         type Fcs = FcsTwoBytes;
-        type Timer = FakeRadioTimer;
+        type Timer = FakeRadioTimer<Sleeping>;
+        type Phy = Phy<OQpsk250KBit>;
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use core::{cell::Cell, marker::PhantomData};
 
 use dot15d4::{
-    driver::{
-        radio::{DriverConfig, RadioDriver, RadioDriverApi},
-        tasks::{OffState, RxState, TaskOff, TaskRx, TaskTx, TxState},
+    driver::radio::{
+        tasks::{ListeningRxState, OffState, TaskOff, TaskRx, TaskTx, TxState},
+        DriverConfig, RadioDriver, RadioDriverApi,
     },
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},
     Device,
@@ -67,12 +67,12 @@ where
 impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
 where
     RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl> + RadioDriverApi,
-    RadioDriver<RadioDriverImpl, TaskRx>: RxState<RadioDriverImpl> + RadioDriverApi,
+    RadioDriver<RadioDriverImpl, TaskRx>: ListeningRxState<RadioDriverImpl> + RadioDriverApi,
     RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
 {
     pub async fn run(&self) -> ! {
         let radio = self.radio.take().expect("already running");
-        let timer = radio.timer();
+        let timer = radio.sleep_timer;
         let device = Device::new(radio);
         device
             .run(

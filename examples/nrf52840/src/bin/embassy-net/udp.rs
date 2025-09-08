@@ -28,15 +28,13 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
-    let (peripherals, clocks, timer) = dot15d4_examples_nrf52840::config_peripherals();
+    let (peripherals, clocks, mut timer) = dot15d4_examples_nrf52840::config_peripherals();
     #[cfg(feature = "gpio-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
         peripherals.radio,
         clocks,
         timer,
-        #[cfg(feature = "gpio-trace")]
-        &peripherals.gpiote,
         #[cfg(feature = "gpio-trace")]
         gpiote_trace_channel,
     );
@@ -110,7 +108,7 @@ async fn main(spawner: Spawner) {
             // Safety: The main task runs at lowest priority and won't be migrated.
             let res = unsafe {
                 timer
-                    .wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD), None)
+                    .wait_until(anchor_time + ((tx_count + 1) * FRAME_PERIOD))
                     .await
             };
             debug_assert!(res.is_ok());

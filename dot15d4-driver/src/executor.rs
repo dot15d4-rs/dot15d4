@@ -174,8 +174,7 @@ pub trait InterruptExecutor {
     ///
     /// # Safety
     ///
-    /// The task passed to spawn() must not be leaked before driven to
-    /// completion.
+    /// - The returned future must not be leaked before driven to completion.
     unsafe fn spawn<Task: Future<Output = ()>>(&mut self, task: Task) -> impl Future<Output = ()>;
 
     /// Pends the interrupt backing the interrupt executor.

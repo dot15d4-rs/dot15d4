@@ -8,11 +8,3 @@ pub mod export {
 
 pub use radio::*;
 pub use timer::*;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AlarmChannel {
-    Timer = 0,
-    Rtc1,
-    Rtc2,
-    NumAlarmChannels,
-}

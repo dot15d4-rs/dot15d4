@@ -1,10 +1,10 @@
 use core::{cell::RefCell, marker::PhantomData, mem, num::NonZero, task::Context, task::Poll};
 
 use dot15d4::{
-    driver::{
+    driver::radio::{
         const_config::MAC_PAN_ID,
         frame::{RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
-        radio::DriverConfig,
+        DriverConfig,
     },
     mac::{
         frame::mpdu::MpduFrame,
@@ -62,7 +62,7 @@ impl<'driver, RadioDriverImpl: DriverConfig> Ieee802154Driver<'driver, RadioDriv
     }
 
     fn rx_token(&self, cx: &mut Context) -> Option<RxToken<'_>> {
-        let (response_token, indication) = match self.indication_receiver.poll_wait_for_request(
+        let (response_token, indication) = match self.indication_receiver.poll_receive_request(
             cx,
             &mut self.consumer_token.borrow_mut(),
             &(),

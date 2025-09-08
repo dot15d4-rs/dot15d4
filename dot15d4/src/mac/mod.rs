@@ -14,9 +14,11 @@ use paste::paste;
 
 use crate::{
     driver::{
-        constants::PHY_MAX_PACKET_SIZE_127,
-        frame::FrameType,
-        radio::{DriverConfig, MAX_DRIVER_OVERHEAD},
+        radio::{
+            frame::FrameType,
+            phy::{OQpsk250KBit, Phy, PhyConfig},
+            DriverConfig, MAX_DRIVER_OVERHEAD,
+        },
         DriverRequestSender, DRIVER_CHANNEL_CAPACITY,
     },
     mac::mcps::data::DataRequestResult,
@@ -96,7 +98,9 @@ const _: () = {
 /// - one pre-allocated buffer for incoming ACKs
 pub const MAC_NUM_REQUIRED_BUFFERS: usize =
     UL_MAX_TX_TOKENS + MAC_NUM_PARALLEL_INDICATION_TASKS + 2;
-pub const MAC_BUFFER_SIZE: usize = PHY_MAX_PACKET_SIZE_127 + MAX_DRIVER_OVERHEAD;
+// TODO: Make this generic over the radio driver configuration.
+pub const MAC_BUFFER_SIZE: usize =
+    <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize + MAX_DRIVER_OVERHEAD;
 
 pub type MacBufferAllocator = BufferAllocator;
 
@@ -248,7 +252,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         loop {
             match select(
                 self.request_receiver
-                    .wait_for_request(&mut consumer_token, &()),
+                    .receive_request_async(&mut consumer_token, &()),
                 self.driver_request_sender
                     .wait_for_response(&mut state.outstanding_driver_requests),
             )

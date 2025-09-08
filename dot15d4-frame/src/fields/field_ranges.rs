@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, num::NonZero, ops::Range};
 
-use dot15d4_driver::{frame::AddressingRepr, radio::DriverConfig};
+use dot15d4_driver::radio::{frame::AddressingRepr, DriverConfig};
 use dot15d4_util::{Error, Result};
 
 #[cfg(feature = "ies")]
@@ -214,7 +214,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
     /// PHY-level headers/footers and _without the FCS_, i.e. the number of
     /// bytes consumed by the MAC header and MAC payload without the MAC footer.
     ///
-    /// See [`dot15d4_driver::frame::RadioFrame::sdu_wo_fcs_length()`].
+    /// See [`dot15d4_driver::radio::frame::RadioFrame::sdu_wo_fcs_length()`].
     #[cfg(feature = "ies")]
     pub(crate) const fn try_with_ies_and_mpdu_length<Config: DriverConfig>(
         &self,
@@ -253,7 +253,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
     /// PHY-level headers/footers and _without the FCS_, i.e. the number of
     /// bytes consumed by the MAC header and MAC payload without the MAC footer.
     ///
-    /// See [`dot15d4_driver::frame::RadioFrame::sdu_wo_fcs_length()`].
+    /// See [`dot15d4_driver::radio::frame::RadioFrame::sdu_wo_fcs_length()`].
     pub(crate) const fn try_without_ies_with_mpdu_length<Config: DriverConfig>(
         &self,
         mpdu_length_wo_fcs: u16,

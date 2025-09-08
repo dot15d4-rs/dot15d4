@@ -1,16 +1,19 @@
 use dot15d4::{
     driver::{
-        radio::{DriverConfig, RadioDriver},
-        tasks::{
-            CompletedRadioTransition::*, ExternalRadioTransition, Ifs, OffState,
-            SelfRadioTransition, TaskOff, TaskTx, TxResult, TxState,
+        radio::{
+            phy::Ifs,
+            tasks::{
+                CompletedRadioTransition::*, ExternalRadioTransition, OffState,
+                SelfRadioTransition, TaskOff, TaskTx, TxResult, TxState,
+            },
+            DriverConfig, RadioDriver,
         },
         timer::{export::ExtU64, LocalClockInstant, RadioTimerApi},
     },
     util::allocator::{BufferAllocator, IntoBuffer},
 };
 
-use crate::util::{off_task, tx_task};
+use crate::util::tx_task;
 
 pub async fn scenarios<Config: DriverConfig>(
     radio: RadioDriver<Config, TaskOff>,
@@ -49,7 +52,7 @@ where
 {
     // off -> tx
     let mut tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(None, cca, buffer_allocator))
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), None)
         .complete_and_transition()
         .await
     {
@@ -59,35 +62,23 @@ where
 
     // tx -> tx
     tx_radio = match tx_radio
-        .schedule_tx(tx_task::<Config>(None, cca, buffer_allocator), Ifs::Sifs)
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Ifs::short())
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            };
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
     };
 
     // tx -> off
-    match tx_radio
-        .schedule_off(off_task(None))
-        .complete_and_transition()
-        .await
-    {
+    match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            }
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -107,9 +98,9 @@ where
     let frame_period = 10.millis();
 
     // off -> tx
-    let mut tx_at = anchor_time + frame_period;
+    let tx_at = anchor_time + frame_period;
     let mut tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(Some(tx_at), cca, buffer_allocator))
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Some(tx_at))
         .complete_and_transition()
         .await
     {
@@ -118,40 +109,24 @@ where
     };
 
     // tx -> tx
-    tx_at += frame_period;
     tx_radio = match tx_radio
-        .schedule_tx(
-            tx_task::<Config>(Some(tx_at), cca, buffer_allocator),
-            Ifs::None,
-        )
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Ifs::short())
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            };
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
     };
 
     // tx -> off
-    let off_radio = match tx_radio
-        .schedule_off(off_task(None))
-        .complete_and_transition()
-        .await
-    {
+    let off_radio = match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            }
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),

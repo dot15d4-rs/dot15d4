@@ -1,5 +1,3 @@
-use typenum::Unsigned;
-
 use core::{fmt::Debug, marker::PhantomData, num::NonZero, ops::Range};
 
 use crate::radio::DriverConfig;
@@ -25,11 +23,11 @@ pub struct RadioFrameRepr<Config: DriverConfig, State> {
 
 impl<Config: DriverConfig, State> RadioFrameRepr<Config, State> {
     pub const fn headroom_length(&self) -> u8 {
-        <Config::Headroom as Unsigned>::U8
+        Config::HEADROOM
     }
 
     pub const fn tailroom_length(&self) -> u8 {
-        <Config::Tailroom as Unsigned>::U8
+        Config::TAILROOM
     }
 
     pub const fn driver_overhead(&self) -> u8 {
@@ -37,7 +35,7 @@ impl<Config: DriverConfig, State> RadioFrameRepr<Config, State> {
     }
 
     pub const fn max_sdu_length(&self) -> u16 {
-        <Config::MaxSduLength as Unsigned>::U16
+        Config::MAX_SDU_LENGTH
     }
 
     pub const fn max_sdu_length_wo_fcs(&self) -> u16 {

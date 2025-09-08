@@ -27,7 +27,7 @@ fn main() {
     // Collect environment variables
     let mut data = String::new();
     // Write preamble
-    writeln!(data, "use crate::{{frame::PanId}};\n").unwrap();
+    writeln!(data, "use crate::radio::frame::PanId;\n").unwrap();
 
     for (var, value) in std::env::vars() {
         if let Some(name) = var.strip_prefix("DOT15D4_") {

@@ -6,12 +6,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub mod config;
-pub mod const_config;
-pub mod constants;
 pub mod executor;
-pub mod frame;
 pub mod radio;
 pub mod socs;
-pub mod tasks;
 pub mod timer;

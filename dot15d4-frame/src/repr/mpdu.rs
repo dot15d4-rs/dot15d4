@@ -1,8 +1,8 @@
 use core::{marker::PhantomData, num::NonZero};
 
-use dot15d4_driver::{
+use dot15d4_driver::radio::{
     frame::{AddressingRepr, RadioFrameRepr, RadioFrameSized},
-    radio::DriverConfig,
+    DriverConfig,
 };
 use dot15d4_util::{Error, Result};
 

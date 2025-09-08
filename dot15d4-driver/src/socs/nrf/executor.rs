@@ -20,7 +20,7 @@ use cortex_m::{
 use dot15d4_util::sync::CancellationGuard;
 use nrf52840_pac::Interrupt;
 #[cfg(feature = "gpio-trace")]
-use nrf52840_pac::{Peripherals, GPIOTE};
+use nrf52840_pac::Peripherals;
 use portable_atomic::{AtomicPtr, Ordering};
 
 #[cfg(feature = "rtos-trace")]
@@ -32,7 +32,7 @@ use crate::executor::{InterruptPriority, PB3};
 //         may be read by the interrupt context. The getter and setter
 //         implementations for the task pointer must ensure proper compiler
 //         fencing.
-struct State {
+pub struct State {
     // The task pointer points to the inner future to be executed. The task
     // pointer will be modified from both, scheduling and interrupt context.
     task_ptr: AtomicPtr<Pin<&'static mut dyn Future<Output = ()>>>,
@@ -66,7 +66,7 @@ impl State {
         unsafe { CorePeripherals::steal() }.NVIC
     }
 
-    const fn new(interrupt: Interrupt, raw_inner_waker: RawWaker) -> Self {
+    pub const fn new(interrupt: Interrupt, raw_inner_waker: RawWaker) -> Self {
         Self {
             task_ptr: AtomicPtr::new(null_mut()),
             outer_waker: UnsafeCell::new(None),
@@ -82,12 +82,16 @@ impl State {
     /// concurrent critical sections might be active.
     ///
     /// Using the executor w/o calling `init()` will cause undefined behavior.
-    fn init(&self, priority: NrfInterruptPriority, _gpiote_trace_channel: usize) {
+    pub fn init(
+        &self,
+        priority: NrfInterruptPriority,
+        #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
+    ) {
         #[cfg(feature = "rtos-trace")]
         crate::executor::trace::instrument();
 
         #[cfg(feature = "gpio-trace")]
-        self.gpiote_trace_channel.set(_gpiote_trace_channel);
+        self.gpiote_trace_channel.set(gpiote_trace_channel);
 
         // Safety: We check proper priority stacking in our `block_on()` and
         //         `spawn()` implementations to ensure memory safety.
@@ -130,12 +134,12 @@ impl State {
         unsafe { self.outer_waker.get().as_ref() }.unwrap()
     }
 
-    fn pend_interrupt(&self) {
+    pub fn pend_interrupt(&self) {
         // Safety: Triggering a task is atomic and idempotent.
         NVIC::pend(self.interrupt);
     }
 
-    fn on_interrupt(&self) {
+    pub fn on_interrupt(&self) {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::isr_enter();
 
@@ -185,11 +189,11 @@ impl State {
         rtos_trace::trace::isr_exit_to_scheduler();
     }
 
-    fn interrupt_priority(&self) -> NrfInterruptPriority {
+    pub fn interrupt_priority(&self) -> NrfInterruptPriority {
         NrfInterruptPriority::from_arm_nvic_repr(NVIC::get_priority(self.interrupt))
     }
 
-    fn block_on<Task: Future<Output = ()>>(&self, task: Task) {
+    pub fn block_on<Task: Future<Output = ()>>(&self, task: Task) {
         self.assert_priority_stacking();
         debug_assert!(NVIC::is_enabled(self.interrupt), "not initialized");
 
@@ -224,7 +228,19 @@ impl State {
         }
     }
 
-    async unsafe fn spawn<Task: Future<Output = ()>>(&self, task: Task) {
+    /// # Safety
+    ///
+    /// See [`crate::executor::InterruptExecutor::spawn`].
+    ///
+    /// TODO: Pass in a mutable pointer rather than handing over ownership.
+    ///
+    /// TODO: Does the task have to be pinned? Currently I think no, because it
+    ///       will be mutably borrowed for the full lifetime of the returned
+    ///       future. We don't need the drop guarantee for the task, only for
+    ///       the future derived from it. Once the future was driven to
+    ///       completion and the future dropped, the task may move as we won't
+    ///       poll it any more from the interrupt. Test this!
+    pub async unsafe fn spawn<Task: Future<Output = ()>>(&self, task: Task) {
         debug_assert!(NVIC::is_enabled(self.interrupt), "not initialized");
         self.assert_priority_stacking();
 
@@ -326,6 +342,7 @@ impl State {
 // Safety: We synchronize the contents of state via the task atomic.
 unsafe impl Sync for State {}
 
+#[macro_export]
 macro_rules! nrf_interrupt_executor {
     ($mod:ident, $interrupt:ident, $peripheral:ident) => {
         pub mod $mod {
@@ -340,9 +357,8 @@ macro_rules! nrf_interrupt_executor {
             use $crate::{
                 executor::{InterruptExecutor, InterruptPriority},
                 interrupt_executor,
+                socs::nrf::executor::{NrfInterruptPriority, NrfPriorityBits, State},
             };
-
-            use super::{NrfInterruptPriority, NrfPriorityBits, State};
 
             static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor);
             static STATE: State =
@@ -359,9 +375,13 @@ macro_rules! nrf_interrupt_executor {
                     &'static mut self,
                     _peripheral: $peripheral,
                     priority: NrfInterruptPriority,
-                    gpiote_trace_channel: usize,
+                    #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
                 ) -> &'static mut Self {
-                    STATE.init(priority, gpiote_trace_channel);
+                    STATE.init(
+                        priority,
+                        #[cfg(feature = "gpio-trace")]
+                        gpiote_trace_channel,
+                    );
                     self
                 }
             }
@@ -400,19 +420,18 @@ macro_rules! nrf_interrupt_executor {
         pub fn $mod(
             peripheral: nrf52840_pac::$peripheral,
             priority: $crate::socs::nrf::executor::NrfInterruptPriority,
-            #[cfg(feature = "gpio-trace")] _gpiote: &GPIOTE,
             #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
         ) -> &'static mut $mod::NrfInterruptExecutor {
-            #[cfg(not(feature = "gpio-trace"))]
-            let gpiote_trace_channel = 0;
             $mod::EXECUTOR.init($mod::NrfInterruptExecutor).init(
                 peripheral,
                 priority,
+                #[cfg(feature = "gpio-trace")]
                 gpiote_trace_channel,
             )
         }
     };
 }
 
+pub use nrf_interrupt_executor;
+
 nrf_interrupt_executor!(swi0, SWI0_EGU0, SWI0);
-nrf_interrupt_executor!(radio, RADIO, RADIO);

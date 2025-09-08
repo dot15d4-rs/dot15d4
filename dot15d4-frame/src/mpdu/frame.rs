@@ -1,8 +1,8 @@
 use core::{num::NonZero, ops::Range};
 
-use dot15d4_driver::{
+use dot15d4_driver::radio::{
     frame::{RadioFrame, RadioFrameSized},
-    radio::{export::Unsigned, DriverConfig},
+    DriverConfig,
 };
 use dot15d4_util::{
     allocator::{BufferToken, IntoBuffer},
@@ -35,7 +35,7 @@ impl MpduFrame {
     /// responsibility to ensure that the buffer is large enough.
     ///
     /// [`RadioFrameRepr::max_buffer_length()`]:
-    /// dot15d4_driver::frame::RadioFrameRepr::max_buffer_length
+    /// dot15d4_driver::radio::frame::RadioFrameRepr::max_buffer_length
     pub unsafe fn new(buffer: BufferToken, offset: u8, length_wo_fcs: NonZero<u16>) -> Self {
         Self {
             buffer,
@@ -87,7 +87,7 @@ impl MpduFrame {
     ///
     /// Calculates the driver-specific FCS if required.
     pub fn into_radio_frame<Config: DriverConfig>(self) -> RadioFrame<RadioFrameSized> {
-        debug_assert_eq!(self.offset, <Config::Headroom as Unsigned>::U8);
+        debug_assert_eq!(self.offset, Config::HEADROOM);
 
         // TODO: Calculate the FCS if required.
         // Safety: The length must be set for a sized MPDU.

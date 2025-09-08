@@ -4,7 +4,7 @@ pub use customizable::*;
 #[cfg(test)]
 mod customizable {
     #![allow(dead_code)]
-    use crate::frame::PanId;
+    use crate::radio::frame::PanId;
 
     // XXX These are just random numbers I picked by fair dice roll; what should
     // they be?
