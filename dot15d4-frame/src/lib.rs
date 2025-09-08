@@ -48,7 +48,7 @@ mod test {
             RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
         },
         radio::{DriverConfig, FcsTwoBytes},
-        timer::{HardwareSignal, LocalClockInstant, RadioTimerApi, RadioTimerResult, TimedSignal},
+        timer::{HardwareSignal, LocalClockInstant, RadioTimerApi, RadioTimerError, TimedSignal},
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
@@ -74,7 +74,7 @@ mod test {
             &self,
             _: LocalClockInstant,
             _: Option<HardwareSignal>,
-        ) -> RadioTimerResult {
+        ) -> Result<(), RadioTimerError> {
             todo!()
         }
 
@@ -82,11 +82,11 @@ mod test {
             &self,
             _: LocalClockInstant,
             _: dot15d4_driver::timer::HardwareEvent,
-        ) -> Result<LocalClockInstant, RadioTimerResult> {
+        ) -> Result<LocalClockInstant, RadioTimerError> {
             todo!()
         }
 
-        unsafe fn schedule_timed_signal(&self, _: TimedSignal) -> RadioTimerResult {
+        unsafe fn schedule_timed_signal(&self, _: TimedSignal) -> Result<(), RadioTimerError> {
             todo!()
         }
     }

@@ -60,8 +60,8 @@ use crate::{
         SelfRadioTransition, TaskOff, TaskRx, TaskTx, Timestamp, TxError, TxResult, TxState,
     },
     timer::{
-        export::ExtU64, HardwareSignal, LocalClockDuration, RadioTimerApi, RadioTimerResult,
-        SymbolsOQpsk250Duration, TimedSignal,
+        export::ExtU64, HardwareSignal, LocalClockDuration, RadioTimerApi, SymbolsOQpsk250Duration,
+        TimedSignal,
     },
 };
 
@@ -600,7 +600,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         if let Some(timed_transition) = timed_transition {
             let result = unsafe { self.timer().schedule_timed_signal(timed_transition) };
-            if matches!(result, RadioTimerResult::Overdue) {
+            if result.is_err() {
                 return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
         }
@@ -656,7 +656,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
                     .wait_until(timed_completion.instant, Some(timed_completion.signal))
                     .await
             };
-            if matches!(result, RadioTimerResult::Overdue) {
+            if result.is_err() {
                 return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
         } else {
@@ -1217,7 +1217,7 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
 
         if let Some(timed_transition) = timed_transition {
             let result = unsafe { self.timer().schedule_timed_signal(timed_transition) };
-            if matches!(result, RadioTimerResult::Overdue) {
+            if result.is_err() {
                 return Err(RadioTaskError::Scheduling(self.task.take().unwrap()));
             }
         }
