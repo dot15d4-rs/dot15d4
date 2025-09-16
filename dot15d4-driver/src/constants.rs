@@ -40,7 +40,7 @@ pub const A_GTS_DESC_PERSISTENCE_TIME: u8 = 4;
 pub const PHY_MAX_PACKET_SIZE_2047: usize = 2048; // SUN, TVWS, RCC, LECIM FSK, and MSK with a 2000 kb/s data rate
 pub const PHY_MAX_PACKET_SIZE_127: usize = 127; // all other PHYs
 
-/// RX-to-TX or TX-to-RX turnaround time (in symbol periods), as defined in
+/// Rx-to-tx or tx-to-rx turnaround time (in symbol periods), as defined in
 /// 10.2.2 and 10.2.3.
 pub const A_TURNAROUND_TIME: SymbolsOQpsk250Duration = SymbolsOQpsk250Duration::from_ticks(12);
 /// The time required to perform CCA detection in symbol periods.

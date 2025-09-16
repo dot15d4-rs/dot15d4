@@ -47,7 +47,7 @@ where
     RadioDriver<Config, TaskOff>: OffState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
-    // Off -> Tx
+    // off -> tx
     let mut tx_radio = match off_radio
         .schedule_tx(tx_task::<Config>(None, cca, buffer_allocator))
         .complete_and_transition()
@@ -57,7 +57,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Tx
+    // tx -> tx
     tx_radio = match tx_radio
         .schedule_tx(tx_task::<Config>(None, cca, buffer_allocator), Ifs::Sifs)
         .complete_and_transition()
@@ -75,7 +75,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Off
+    // tx -> off
     match tx_radio
         .schedule_off(off_task(None))
         .complete_and_transition()
@@ -106,7 +106,7 @@ where
 {
     let frame_period = 10.millis();
 
-    // Off -> Tx
+    // off -> tx
     let mut tx_at = anchor_time + frame_period;
     let mut tx_radio = match off_radio
         .schedule_tx(tx_task::<Config>(Some(tx_at), cca, buffer_allocator))
@@ -117,7 +117,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Tx
+    // tx -> tx
     tx_at += frame_period;
     tx_radio = match tx_radio
         .schedule_tx(
@@ -139,7 +139,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Off
+    // tx -> off
     let off_radio = match tx_radio
         .schedule_off(off_task(None))
         .complete_and_transition()

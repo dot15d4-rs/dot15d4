@@ -1,4 +1,4 @@
-//! A helper application that is used to trigger precisely timed Tx packets to
+//! A helper application that is used to trigger precisely timed tx frames to
 //! test radio reception from the radio test application.
 
 #![no_std]

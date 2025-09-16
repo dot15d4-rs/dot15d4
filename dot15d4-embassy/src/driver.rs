@@ -34,7 +34,7 @@ impl<'driver, RadioDriverImpl: DriverConfig> Ieee802154Driver<'driver, RadioDriv
         RadioFrameRepr::<RadioDriverImpl, RadioFrameUnsized>::new();
 
     // Note: This API forces us to allocate the max buffer size. The actual
-    //       payload length will only be known when consuming the token. The Tx
+    //       payload length will only be known when consuming the token. The tx
     //       token API is sync and must be infallible, so we can't wait for a
     //       buffer to become available or bail during token consumption.
     const BUFFER_LENGTH: usize = Self::RADIO_FRAME_REPR.max_buffer_length() as usize;

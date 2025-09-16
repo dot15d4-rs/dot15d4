@@ -328,7 +328,7 @@ impl<State> MpduParser<MpduFrame, State> {
     /// Once all reading/writing has been done, convert the frame back into
     /// an MPDU frame.
     ///
-    /// Usually required when parsing incoming frames on the Rx path.
+    /// Usually required when parsing incoming frames on the rx path.
     ///
     /// Note: This will drop all parsing information. Only do this once you're
     ///       sure field access is no longer needed.
@@ -339,7 +339,7 @@ impl<State> MpduParser<MpduFrame, State> {
     /// Once all reading/writing has been done, convert the frame into a radio
     /// frame.
     ///
-    /// Usually required when building frames from scratch for Tx.
+    /// Usually required when building frames from scratch for tx.
     ///
     /// Note: This will drop all parsing information. Only do this once you're
     ///       sure the frame has been finalized.
