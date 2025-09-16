@@ -35,13 +35,13 @@ We target
 - low energy
   - optimize sleep times
   - runtime efficiency
-  - high-precision timing to minimize RX time
+  - high-precision timing to minimize rx time
 - safety
   - use the safe Rust fragment wherever possible
   - stable Rust only
   - prove structural and behavioral correctness via static typing where possible
   - implement back-pressure to avoid packet loss under heavy load
-  - avoid deadlock (e.g. due to Rx and Tx requirements blocking each other)
+  - avoid deadlock (e.g. due to rx and tx requirements blocking each other)
   - prioritize traffic to mitigate DoS attacks
 
 ## Implementation hints
@@ -188,7 +188,7 @@ All following state diagrams may contain states representing MLME/MCPS service p
 
   - trigger: a producer in the next upper layer starts the request
   - entry behavior: the request primitive is transported from the next upper layer to the MLME/MCPS SAP
-  - doActivity: the request is executed via radio Tx tasks or other internal means
+  - doActivity: the request is executed via radio tx tasks or other internal means
   - completion event: triggered immediately, as soon as all corresponding radio tasks or other internal activities have been executed, i.e. before a response from a peer device arrives
   - exit behavior: If the request does not have an associated confirm primitive, then the upper layer is being notified that the request has been transmitted (or that the transmission failed).
 
@@ -196,7 +196,7 @@ All following state diagrams may contain states representing MLME/MCPS service p
 
   - trigger: completion event(s) of one or more associated request primitive(s)
   - entry behavior: n/a
-  - doActivity: Schedule Rx tasks to receive results of the associated service request.
+  - doActivity: Schedule rx tasks to receive results of the associated service request.
   - completion event: all results of the associated request primitive(s) have arrived or a timeout was reached
   - exit behavior: The confirm primitive is transported from the MLME/MCPS SAP to the next upper layer.
 
@@ -204,15 +204,15 @@ All following state diagrams may contain states representing MLME/MCPS service p
 
   - trigger: a producer in the next upper layer starts waiting for indications
   - entry behavior: n/a
-  - doActivity: schedule Rx tasks to receive indications or set up and monitor internal event triggers
-  - completion event: triggered as soon as an Rx task containing an indication finishes or an internal event triggers
+  - doActivity: schedule rx tasks to receive indications or set up and monitor internal event triggers
+  - completion event: triggered as soon as an rx task containing an indication finishes or an internal event triggers
   - exit behavior: the indication primitive is transported from the MLME/MCPS SAP to the next upper layer
 
 - response primitive:
   - trigger: a producer in the next upper layer received an indication that requires a response
   - entry behavior: n/a
-  - doActivity: the upper layer producer collects information required for the response. The response is transported from the next upper layer to the MLME/MCPS SAP. If required, Tx tasks will be scheduled to send the response to peers.
-  - completion event: all information required for the response has been collected and transmitted (i.e. the corresponding Tx tasks have ended - possibly including their acknowledgment)
+  - doActivity: the upper layer producer collects information required for the response. The response is transported from the next upper layer to the MLME/MCPS SAP. If required, tx tasks will be scheduled to send the response to peers.
+  - completion event: all information required for the response has been collected and transmitted (i.e. the corresponding tx tasks have ended - possibly including their acknowledgment)
   - exit behavior: the upper layer is being notified that the response has been transmitted (or that transmission failed)
 
 ## Concurrency of Send and Receive Tasks
@@ -360,13 +360,13 @@ MAC Service - Driver Service interface:
 
 Procedure:
 
-- identify and queue the next 2 Rx links and queue them as RxTasks
+- identify and queue the next 2 rx links and queue them as RxTasks
 - loop:
   - select(radio_task_result_future, mac_future)
     - Either::First(RadioTaskDone) =>
       - RadioTaskDone(RxResult) ==>
         - mark RxTask msg slot as received,
-        - identify and queue next Rx task (fire and forget)
+        - identify and queue next rx task (fire and forget)
         - queue MAC indication with MPDU attached and wait for MAC result,
         - free buffer, drop MPDU
       - RadioTaskDone(TxResult) ==>
@@ -375,7 +375,7 @@ Procedure:
         - if NACK: attach original MPDU to confirmation somehow
         - identify corresponding request and return MAC confirmation
     - Either::Second(MacRequest(DataRequest)) =>
-      - identify corresponding Tx link and queue it
+      - identify corresponding tx link and queue it
 
 ## Driver Service
 

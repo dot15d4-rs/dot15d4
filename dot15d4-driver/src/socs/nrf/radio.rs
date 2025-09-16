@@ -76,13 +76,13 @@ pub mod export {
 // The nRF hardware only supports default CCA duration.
 const _: () = assert!(PHY_CCA_DURATION.ticks() == 8);
 
-// Disabled to Tx Idle duration
+// Disabled to tx idle duration
 const T_TXEN: LocalClockDuration = LocalClockDuration::micros(130);
-// Disabled to Rx Idle duration
+// Disabled to rx idle duration
 const T_RXEN: LocalClockDuration = LocalClockDuration::micros(130);
 // CCA duration
 const T_CCA: LocalClockDuration = PHY_CCA_DURATION.convert();
-// Rx-to-Tx and Tx-to-Rx duration
+// Rx-to-tx and tx-to-rx duration
 const T_TURNAROUND: LocalClockDuration = LocalClockDuration::micros(130);
 // SHR duration: preamble (8 symbols) + SFD (2 symbols)
 const T_SHR: LocalClockDuration = SymbolsOQpsk250Duration::from_ticks(10).convert();
@@ -98,7 +98,7 @@ pub struct NrfRadioDriver {
 }
 
 impl DriverConfig for NrfRadioDriver {
-    type Headroom = U<PHY_HDR_LEN>; // Headroom for the PHY header (packet length).
+    type Headroom = U<PHY_HDR_LEN>; // Headroom for the PHY header (frame length).
     type Tailroom = U<FCS_LEN>; // Tailroom for driver-level FCS handling.
     type MaxSduLength = U<{ PHY_MAX_PACKET_SIZE_127 - FCS_LEN }>; // The FCS is handled by the driver and must not be part of the MAC's MPDU.
     type Fcs = FcsNone; // Assuming automatic FCS handling.
@@ -195,11 +195,11 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
     }
 }
 
-/// RX bit counter event triggered after the frame control field (2 bytes) has
+/// Rx bit counter event triggered after the frame control field (2 bytes) has
 /// been received.
 const BCC_FC_BITS: u32 = 2 * 8;
 
-/// Radio Off state.
+/// "Radio Off" state.
 ///
 /// Entry: DISABLED event
 /// Exit: READY event
@@ -260,7 +260,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             w.crcinc().include()
         });
         radio.pcnf1.write(|w| {
-            // Maximum packet length
+            // Maximum frame length
             w.maxlen().variant(PHY_MAX_PACKET_SIZE_127 as u8);
             // Zero static length
             w.statlen().variant(0);
@@ -268,13 +268,13 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             w.balen().variant(0);
             // Little-endian
             w.endian().little();
-            // Disable packet whitening
+            // Disable whitening
             w.whiteen().clear_bit()
         });
         // Default ramp-up mode for TIFS support.
         radio.modecnf0.write(|w| w.ru().default());
 
-        // Configure the RX bit counter to trigger once the frame control field
+        // Configure the rx bit counter to trigger once the frame control field
         // has been received.
         radio.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
 
@@ -437,7 +437,6 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
 }
 
 impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
-    /// Changes the default radio channel
     fn set_channel(&mut self, channel: Channel) {
         let channel: u8 = channel.into();
         let frequency_offset = (channel - 10) * 5;
@@ -465,7 +464,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             move || {
                 let r = Self::radio();
 
-                // Ramp up the receiver and start packet reception immediately.
+                // Ramp up the receiver and start frame reception immediately.
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
                 r.shorts.write(|w| {
@@ -515,7 +514,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     r.shorts.write(|w| {
                         // Start CCA immediately after the receiver ramped up.
                         w.rxready_ccastart().enabled();
-                        // If the channel is idle, then ramp up the transmitter and start TX
+                        // If the channel is idle, then ramp up the transmitter and start tx
                         // immediately.
                         w.ccaidle_txen().enabled();
                         w.txready_start().enabled();
@@ -587,7 +586,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
 ///
 /// State Invariants:
 /// - The radio is in the RX or RXIDLE state.
-/// - The radio's DMA pointer points to an empty, writable packet in RAM.
+/// - The radio's DMA pointer points to an empty, writable buffer in RAM.
 /// - The "END" and "CRCERROR" events have been cleared before starting reception.
 /// - Only the "END" interrupt is enabled.
 impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
@@ -616,8 +615,8 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
                         r.events_rxready.reset();
                         Poll::Ready(())
                     } else {
-                        // Double check state in case we're coming from another RX state
-                        // (CCA) or back-to-back RX.
+                        // Double check state in case we're coming from another rx state
+                        // (CCA) or back-to-back rx.
                         match r.state.read().state().variant() {
                             Some(STATE_A::RX | STATE_A::RX_IDLE) => Poll::Ready(()),
                             _ => {
@@ -706,7 +705,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
             r.events_crcok.reset();
 
             // The CRC has been checked so the frame must have a non-zero
-            // size saved in the headroom of the nRF packet (PHY header).
+            // size saved in the headroom of the nRF buffer (PHY header).
             let rx_task = self.task.take().unwrap();
             let sdu_length_wo_fcs =
                 NonZero::new(rx_task.radio_frame.pdu_ref()[0] as u16 - FCS_LEN as u16)
@@ -720,9 +719,9 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
             if rollback_on_crcerror {
                 // When rolling back we're expected to place the radio in RX
-                // mode again and receive the next packet into the same
+                // state again and receive the next frame into the same
                 // buffer. Therefore restart the receiver unless it was
-                // already started. Not required for back-to-back Rx as the
+                // already started. Not required for back-to-back rx as the
                 // radio will be re-started by a short in that case.
                 if !is_back_to_back_rx {
                     r.tasks_start.write(|w| w.tasks_start().set_bit());
@@ -795,7 +794,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     w.bcmatch().set_bit();
                     w.end().set_bit()
                 });
-                // Do not clear the end event as it is used in the RX
+                // Do not clear the end event as it is used in the rx
                 // completion() method.
                 r.tasks_bcstop.write(|w| w.tasks_bcstop().set_bit());
                 r.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
@@ -806,7 +805,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
                 if bcmatch || r.events_end.read().events_end().bit_is_set() {
                     // Do not clear the end event as it is used below and in the
-                    // RX completion() method.
+                    // rx completion() method.
                     r.intenclr.write(|w| {
                         w.bcmatch().set_bit();
                         w.end().set_bit()
@@ -880,7 +879,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 poll_fn(|_| {
                     let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
                     if bcmatch || r.events_end.read().events_end().bit_is_set() {
-                        // Do not clear the end event as it is used in the RX
+                        // Do not clear the end event as it is used in the rx
                         // completion() method. The remaining cleanup will be
                         // done by the cancel guard.
                         return Poll::Ready(!bcmatch);
@@ -1062,23 +1061,23 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 //       avoid race conditions, see RX_IDLE case below.
                 if cca {
                     r.shorts.write(|w| {
-                        // Ramp down and up again for proper IFS and CCA
-                        // timing.
+                        // Ramp down and up again for proper IFS and CCA timing.
                         w.end_disable().enabled();
                         if timed_transition.is_none() {
                             w.disabled_rxen().enabled();
                         }
                         w.rxready_ccastart().enabled();
-                        // If the channel is idle, then ramp up and start TX immediately.
+                        // If the channel is idle, then ramp up and start tx
+                        // immediately.
                         w.ccaidle_txen().enabled();
                         w.txready_start().enabled();
-                        // If the channel is busy, then disable the receiver so that
-                        // we reach the fallback state.
+                        // If the channel is busy, then disable the receiver so
+                        // that we reach the fallback state.
                         w.ccabusy_disable().enabled()
                     });
                 } else {
                     r.shorts.write(|w| {
-                        // Ramp down and directly switch to TX mode w/o CCA
+                        // Ramp down and directly switch to TX state w/o CCA
                         // including IFS timing.
                         w.end_disable().enabled();
                         if timed_transition.is_none() {
@@ -1148,7 +1147,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 match r.state.read().state().variant() {
                     Some(STATE_A::RX_IDLE) => {
                         // We're idle, although we have a short in place: This
-                        // means that the previous packet was fully received
+                        // means that the previous frame was fully received
                         // before we were able to set the short.
                         r.tasks_disable.write(|w| w.tasks_disable().set_bit());
                     }
@@ -1175,7 +1174,7 @@ impl RxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 ///
 /// State Invariants:
 /// - The radio is in the TX or TXIDLE state.
-/// - The radio's DMA pointer points to an empty packet in RAM.
+/// - The radio's DMA pointer points to an empty buffer in RAM.
 /// - The "END" event has been cleared before starting transmission.
 /// - Only the "END" interrupt is enabled.
 impl RadioDriver<NrfRadioDriver, TaskTx> {
@@ -1351,15 +1350,15 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
                 Self::set_ifs(ifs);
 
-                // NOTE: To cater for errata 204 (see rev1 v1.4) a TX-to-RX
+                // NOTE: To cater for errata 204 (see rev1 v1.4) a tx-to-rx
                 //       switch must pass through the disabled state, which is
                 //       what the shorts imply anyway.
 
                 // NOTE: We need to set up the shorts before checking radio state to
                 //       avoid race conditions, see the TX_IDLE case below.
                 r.shorts.write(|w| {
-                    // Ramp down the receiver, ramp it up again in RX mode and
-                    // then start packet reception immediately.
+                    // Ramp down the receiver, ramp it up again in RX state and
+                    // then start frame reception immediately.
                     w.end_disable().enabled();
                     if timed_transition.is_none() {
                         w.disabled_rxen().enabled();
@@ -1373,7 +1372,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 let r = Self::radio();
 
                 // We need to schedule the BCSTART short _after_ the FRAMESTART
-                // event of the TX packet, otherwise the TX packet will trigger
+                // event of the tx frame, otherwise the tx frame will trigger
                 // the BCMATCH event already.
                 r.shorts.modify(|_, w| w.framestart_bcstart().enabled());
 
@@ -1435,7 +1434,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
                 if cca {
                     r.shorts.write(|w| {
-                        // Ramp down the transceiver, ramp it up again in RX mode and
+                        // Ramp down the transceiver, ramp it up again in RX state and
                         // then start CCA immediately.
                         w.end_disable().enabled();
                         if timed_transition.is_none() {
@@ -1443,7 +1442,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                         }
                         w.rxready_ccastart().enabled();
 
-                        // If the channel is idle, then ramp up and start TX immediately.
+                        // If the channel is idle, then ramp up and start tx immediately.
                         w.ccaidle_txen().enabled();
                         w.txready_start().enabled();
 
@@ -1470,7 +1469,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 // NOTE: Read the state _after_ having set the short.
                 let r = Self::radio();
                 if r.state.read().state().is_tx_idle() {
-                    // We check whether a second packet was already sent
+                    // We check whether a second frame was already sent
                     // just in the unlikely case that we got here so late
                     // that the next task was already executed.
                     if r.events_end.read().events_end().bit_is_clear() {
@@ -1490,7 +1489,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 Ok(())
             },
             || {
-                // Clean up shorts
+                // Clean up shorts.
                 Self::radio().shorts.reset();
                 Ok(())
             },

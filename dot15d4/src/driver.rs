@@ -245,10 +245,10 @@ enum DriverState<RadioDriverImpl: DriverConfig> {
         /// sent.
         Ifs,
     ),
-    /// There is no Tx frame pending and we have Rx capacity to receive an
+    /// There is no tx frame pending and we have rx capacity to receive an
     /// incoming frame.
     Rx(RadioDriver<RadioDriverImpl, RadioTaskRx>),
-    /// We have no Rx capacity and no Tx frame is pending.
+    /// We have no rx capacity and no tx frame is pending.
     Off(RadioDriver<RadioDriverImpl, RadioTaskOff>),
 }
 
@@ -395,7 +395,7 @@ where
         }
     }
 
-    /// Waits for an incoming frame and receive it or end the Rx window when an
+    /// Waits for an incoming frame and receive it or end the rx window when an
     /// outbound request is received - whatever happens first. Finally switch to
     /// the next requested driver state (if any) or turns the radio off.
     ///
@@ -411,7 +411,7 @@ where
         consumer_token: &mut ConsumerToken,
     ) -> (DriverState<RadioDriverImpl>, Option<ResponseToken>) {
         // Wait until a frame is being received or the next outbound request
-        // ends the Rx window.
+        // ends the rx window.
         match select(
             rx_driver.frame_started(),
             self.request_receiver
@@ -428,7 +428,7 @@ where
                     is_frame_valid_and_for_us(&hardware_address, &preliminary_frame_info);
 
                 // If the frame is valid and ACK is requested, then
-                // schedule a TX ACK task. Otherwise finalize the Rx
+                // schedule a tx ACK task. Otherwise finalize the rx
                 // task and receive the next task (if any).
                 if frame_is_valid {
                     // Safety: Valid frames always have a frame control field.
@@ -472,7 +472,7 @@ where
         ack_seq_nr: u8,
         next_task_ifs: Ifs,
     ) -> (DriverState<RadioDriverImpl>, Option<ResponseToken>) {
-        // Safety: We use the TX ACK frame sequentially and exclusively from
+        // Safety: We use the tx ACK frame sequentially and exclusively from
         //         this method.
         let tx_ack_frame = self.tx_ack_frame.take().unwrap();
 
@@ -502,7 +502,7 @@ where
                 return self.send_frame(driver_tx, None, None, next_task_ifs).await;
             }
             // CRC mismatch: Cancel ACK, recover the pre-allocated ACK frame and
-            //               leave the driver in the RX state.
+            //               leave the driver in the rx state.
             CompletedRadioTransition::Rollback(
                 rx_driver,
                 rx_task_error,
@@ -547,7 +547,7 @@ where
             rx_ack_info: Option<(RadioFrame<RadioFrameSized>, u8)>,
         ) {
             if let Some((tx_radio_frame, rx_task_ack_seq_nr)) = rx_ack_info {
-                // Expect RX ACK frame
+                // Expect rx ACK frame
                 let (tx_result, recovered_rx_frame) = match rx_task_result {
                     RxResult::Frame(rx_ack_frame) => {
                         // TODO: Support enhanced ACK.
@@ -638,7 +638,7 @@ where
                 DrvSvcRequest::Rx(rx_task) => {
                     // We're already receiving another request and are
                     // therefore guaranteed to make progress. Therefore
-                    // scheduling RX back-to-back is ok.
+                    // scheduling rx back-to-back is ok.
                     match rx_driver
                         .schedule_rx(rx_task, false)
                         .complete_and_transition()
@@ -698,7 +698,7 @@ where
                     ));
                     debug_assert!(rx_task_result.is_none());
 
-                    // We rolled back to the previous Rx task
+                    // We rolled back to the previous rx task
                     (
                         DriverState::Rx(recovered_rx_driver),
                         Some(prev_task_response_token),
@@ -710,7 +710,7 @@ where
         }
     }
 
-    /// Schedules RX into a temporary buffer back-to-back while finalizing
+    /// Schedules rx into a temporary buffer back-to-back while finalizing
     /// reception of the invalid frame. Then drops the invalid frame. The
     /// recovered buffer from the dropped frame becomes the new temporary buffer.
     ///
@@ -724,7 +724,7 @@ where
         rx_driver: RadioDriver<RadioDriverImpl, RadioTaskRx>,
         rx_task_response_token: ResponseToken,
     ) -> (DriverState<RadioDriverImpl>, Option<ResponseToken>) {
-        // Safety: The temporary RX frame will be recovered by the end of the
+        // Safety: The temporary rx frame will be recovered by the end of the
         //         procedure.
         let temporary_rx_frame = self.temporary_rx_frame.take().unwrap();
         let rx_task = RadioTaskRx {
@@ -746,7 +746,7 @@ where
                     | RxResult::CrcError(recovered_rx_frame) => recovered_rx_frame,
                 };
 
-                // Safety: Unsized frames (aka RX frames) for the same driver
+                // Safety: Unsized frames (aka rx frames) for the same driver
                 //         are always capable to accommodate the max SDU length,
                 //         so they are interchangeable.
                 self.temporary_rx_frame.set(Some(recovered_rx_frame));
@@ -757,22 +757,22 @@ where
             // Safety: The transition task was programmed to not roll back on
             //         CRC error.
             CompletedRadioTransition::Rollback(..) => unreachable!(),
-            // Safety: Scheduling RX tasks does not fall back.
+            // Safety: Scheduling rx tasks does not fall back.
             CompletedRadioTransition::Fallback(..) => unreachable!(),
         }
     }
 
-    /// Ends the ongoing RX window by scheduling the next request and responding
+    /// Ends the ongoing rx window by scheduling the next request and responding
     /// to the previous request.
     ///
-    /// If the previous request was a TX request: We end up here because ACK
+    /// If the previous request was a tx request: We end up here because ACK
     /// reception timed out and the ACK reception window needs to be ended. The
-    /// TX request will be nack'ed by this method and the next request
+    /// tx request will be nack'ed by this method and the next request
     /// scheduled.
     ///
-    /// If the previous request was an RX request: We received a concurrent TX
-    /// request that needs to make progress. The previous RX request will be
-    /// ended without receiving a frame and the TX request scheduled.
+    /// If the previous request was an rx request: We received a concurrent tx
+    /// request that needs to make progress. The previous rx request will be
+    /// ended without receiving a frame and the tx request scheduled.
     async fn end_rx_window(
         &self,
         rx_driver: RadioDriver<RadioDriverImpl, RadioTaskRx>,
@@ -787,10 +787,12 @@ where
             prev_task_response_token: ResponseToken,
         ) {
             // It is improbable but possible that an inbound frame arrives just
-            // as we try ending the RX window. We drop the incoming frame in
-            // this case as if we had ended the RX window slightly earlier.
+            // as we try ending the rx window. We drop the incoming frame in
+            // this case as if we had ended the rx window slightly earlier.
             //
-            // Note: Well timed protocols should not experience this situation.
+            // Note: Well timed protocols should not experience this situation,
+            //       also see the requirement in the method docs re timed
+            //       follow-up tasks.
             let rx_radio_frame = match rx_task_result {
                 RxResult::Frame(radio_frame) | RxResult::FilteredFrame(radio_frame) => {
                     radio_frame.forget_size::<RadioDriverImpl>()
@@ -801,13 +803,13 @@ where
             };
 
             if let Some(tx_radio_frame) = rx_ack_info {
-                // End RX ACK window
+                // End rx ACK window
                 this.temporary_rx_frame.set(Some(rx_radio_frame));
                 let tx_task_result = TxResult::Nack(tx_radio_frame);
                 this.request_receiver
                     .received(prev_task_response_token, tx_task_result.into());
             } else {
-                // End regular RX window
+                // End regular rx window
                 let rx_task_result = RxResult::RxWindowEnded(rx_radio_frame);
                 this.request_receiver
                     .received(prev_task_response_token, rx_task_result.into());
@@ -839,7 +841,7 @@ where
                         )
                     }
                     // Fallback to "off" state due to CCA busy when trying to schedule
-                    // the Tx task.
+                    // the tx task.
                     CompletedRadioTransition::Fallback(transition_result, tx_task_error) => {
                         let rx_task_result = transition_result.prev_task_result;
                         handle_rx_task_result::<RadioDriverImpl>(
@@ -864,13 +866,13 @@ where
                 let tx_task_result = if let Some(tx_radio_frame) = rx_ack_info {
                     TxResult::Nack(tx_radio_frame)
                 } else {
-                    // Safety: We only ever end an RX window with another RX task
-                    //         after an RX ACK window timed out.
+                    // Safety: We only ever end an rx window with another rx task
+                    //         after an rx ACK window timed out.
                     unreachable!()
                 };
 
                 // Continue the ongoing reception and recover the temporary
-                // frame from the incoming RX task instead.
+                // frame from the incoming rx task instead.
                 self.temporary_rx_frame.set(Some(rx_task.radio_frame));
 
                 self.request_receiver
@@ -898,7 +900,7 @@ where
                         let off_driver = transition_result.this_state;
                         (DriverState::Off(off_driver), None)
                     }
-                    // Safety: Switching the driver off from an RX state
+                    // Safety: Switching the driver off from an rx state
                     //         w/o rollback should be infallible.
                     _ => unreachable!(),
                 }
@@ -945,7 +947,7 @@ where
         }
 
         if let Some(ack_seq_nr) = ack_seq_nr {
-            // Safety: Only regular TX tasks can request acknowledgement and
+            // Safety: Only regular tx tasks can request acknowledgement and
             //         therefore a response token is expected.
             return self
                 .wait_for_ack(tx_driver, tx_task_response_token.unwrap(), ack_seq_nr)
@@ -1006,7 +1008,7 @@ where
                             let off_driver = transition_result.this_state;
                             (DriverState::Off(off_driver), None)
                         }
-                        // Safety: The TX task doesn't roll back.
+                        // Safety: The tx task doesn't roll back.
                         CompletedRadioTransition::Rollback(..) => unreachable!(),
                     }
                 }
@@ -1057,7 +1059,7 @@ where
                         let off_driver = transition_result.this_state;
                         (DriverState::Off(off_driver), None)
                     }
-                    // Safety: Switching the driver off from a TX state should
+                    // Safety: Switching the driver off from a tx state should
                     //         be infallible.
                     _ => unreachable!(),
                 }
@@ -1066,7 +1068,7 @@ where
     }
 
     /// Waits for an incoming ACK frame matching the given sequence number and
-    /// responds to the TX task accordingly.
+    /// responds to the tx task accordingly.
     async fn wait_for_ack(
         &self,
         tx_driver: RadioDriver<RadioDriverImpl, RadioTaskTx>,
@@ -1093,14 +1095,14 @@ where
                 let rx_driver = transition_result.this_state;
                 (rx_driver, tx_radio_frame)
             }
-            // Safety: The TX task doesn't roll back.
+            // Safety: The tx task doesn't roll back.
             CompletedRadioTransition::Rollback(..) => unreachable!(),
-            // Safety: The RX task doesn't fall back.
+            // Safety: The rx task doesn't fall back.
             CompletedRadioTransition::Fallback(..) => unreachable!(),
         };
 
         // Note: This is just a rough estimate with some safety margin for now.
-        //       Precise timing requires timestamp and RX window support in the
+        //       Precise timing requires timestamp and rx window support in the
         //       driver.
         // Safety: The driver service either runs from the main task or from a
         //         low-priority service handler. We don't migrate this future
@@ -1176,7 +1178,7 @@ where
                             off_driver = transition_result.this_state;
                             continue;
                         }
-                        // Safety: The Off task doesn't roll back.
+                        // Safety: The off task doesn't roll back.
                         CompletedRadioTransition::Rollback(..) => unreachable!(),
                     }
                 }
@@ -1190,9 +1192,9 @@ where
                             let rx_driver = transition_result.this_state;
                             break (DriverState::Rx(rx_driver), next_response_token);
                         }
-                        // Safety: The Off task doesn't roll back.
+                        // Safety: The off task doesn't roll back.
                         CompletedRadioTransition::Rollback(..) => unreachable!(),
-                        // Safety: Scheduling an RX task doesn't fall back.
+                        // Safety: Scheduling an rx task doesn't fall back.
                         CompletedRadioTransition::Fallback(..) => unreachable!(),
                     }
                 }

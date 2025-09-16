@@ -47,7 +47,7 @@ where
     RadioDriver<Config, TaskRx>: RxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
-    // Off -> Rx
+    // off -> rx
     let rx_radio = match off_radio
         .schedule_rx(rx_task::<Config>(None, buffer_allocator))
         .complete_and_transition()
@@ -57,7 +57,7 @@ where
         _ => unreachable!(),
     };
 
-    // Rx -> Tx
+    // rx -> tx
     let tx_radio = match rx_radio
         .schedule_tx(
             tx_task::<Config>(None, cca, buffer_allocator),
@@ -79,7 +79,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Off
+    // tx -> off
     match tx_radio
         .schedule_off(off_task(None))
         .complete_and_transition()
@@ -111,7 +111,7 @@ where
 {
     let frame_period = 10.millis();
 
-    // Off -> Rx
+    // off -> rx
     let rx_start = anchor_time + frame_period;
     let rx_radio = match off_radio
         .schedule_rx(rx_task::<Config>(Some(rx_start), buffer_allocator))
@@ -122,7 +122,7 @@ where
         _ => unreachable!(),
     };
 
-    // Rx -> Tx
+    // rx -> tx
     let tx_at = rx_start + frame_period;
     let tx_radio = match rx_radio
         .schedule_tx(
@@ -145,7 +145,7 @@ where
         _ => unreachable!(),
     };
 
-    // Tx -> Off
+    // tx -> off
     let off_radio = match tx_radio
         .schedule_off(off_task(None))
         .complete_and_transition()

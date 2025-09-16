@@ -4,13 +4,13 @@ The dot15d4 framework is based on a generic theory of operation and architecture
 
 ## Production-grade framework support for timed protocols and hardware offloading
 
-Most existing IEEE 802.15.4 driver APIs don't support precise scheduling and timing of radio tasks at all. Such driver APIs may be easy to implement but on real hardware they systematically fail to conform to timing requirements defined in the standard (e.g. inter-frame spacing or precision timestamping or scheduling of TX and/or RX windows). This is true for all currently existing open source IEEE 802.15.4 driver APIs in the Rust language [1] and even for the Linux IEEE 802.15.4 driver API.
+Most existing IEEE 802.15.4 driver APIs don't support precise scheduling and timing of radio tasks at all. Such driver APIs may be easy to implement but on real hardware they systematically fail to conform to timing requirements defined in the standard (e.g. inter-frame spacing or precision timestamping or scheduling of tx and/or rx windows). This is true for all currently existing open source IEEE 802.15.4 driver APIs in the Rust language [1] and even for the Linux IEEE 802.15.4 driver API.
 
 Also, existing driver APIs will often not generically support offloading of MAC tasks (IFS enforcement, ACK, filtering, CRC, security, timing-critical IE and header updates, etc.) to transceivers that implement these concerns in hardware while still being able to fill in cross-driver, framework-provided software implementations for hardware that doesn't have the corresponding MAC acceleration capabilities. The few non-Rust APIs that do support precise timing and hardware acceleration force each individual driver maintainer to re-implement such concerns in driver- or vendor-specific code even if much of it could be implemented generically and shared above the driver level. Even APIs in well-known open source stacks like Contiki OS [2], RIoT OS [3] or Zephyr [4] are no exception to this rule.
 
 This makes addition of new drivers and maintenance of existing drivers unnecessarily complex, costly and error prone from a maintainer perspective. In the case of Zephyr, for example, maintaining fully compliant IEEE 802.15.4 drivers is so involved that at the time of writing, not a single fully compliant driver had been contributed by individual community members. Only two large vendors were able to provide production-grade drivers for their hardware whose development and maintenance requires them to employ dedicated development teams.
 
-The dot15d4 framework tries to fix this situation by introducing a novel paradigm into IEEE 802.15.4 driver API design. While existing drivers invariably abstract around some flavor of state-agnostic `send()` and `receive()` methods, the dot15d4 driver API enforces a much lower-level state machine with distinct, asynchronous transitions between Off, Rx and Tx states. Driver maintainers will only have to implement low-level transitions between radio states without having to drive the state machine themselves.
+The dot15d4 framework tries to fix this situation by introducing a novel paradigm into IEEE 802.15.4 driver API design. While existing drivers invariably abstract around some flavor of state-agnostic `send()` and `receive()` methods, the dot15d4 driver API enforces a much lower-level state machine with distinct, asynchronous transitions between off, rx and tx states. Driver maintainers will only have to implement low-level transitions between radio states without having to drive the state machine themselves.
 
 To avoid misunderstanding: Similar low-level state machine APIs already exist _within_ any reasonable production-grade radio driver. They also exist for other radio protocols, e.g. in the Linux and Zephyr Bluetooth stacks. What distinguishes the dot15d4 approach is that it defines a _shared, generic_ state machine design to be re-used _across_ drivers independently of vendor and radio protocol.
 
@@ -22,7 +22,7 @@ Send/receive-style driver APIs supporting at least limited precision timing exis
 
 ## Painless driver development with compile-time correctness guarantees
 
-Transitions between radio states require vendor- and transition-specific hardware scheduling without CPU intervention. This is necessary to enforce the hard real-time requirements of standard-compliant inter-frame spacing and high-precision RX/TX scheduling and timestamping. This is true for all currently available IEEE 802.15.4 radio SoCs and transceivers on the market. Therefore all existing production-grade drivers had to implement the kind of transitions exposed in dot15d4's radio API anyway.
+Transitions between radio states require vendor- and transition-specific hardware scheduling without CPU intervention. This is necessary to enforce the hard real-time requirements of standard-compliant inter-frame spacing and high-precision rx/tx scheduling and timestamping. This is true for all currently available IEEE 802.15.4 radio SoCs and transceivers on the market. Therefore all existing production-grade drivers had to implement the kind of transitions exposed in dot15d4's radio API anyway.
 
 A few examples of use cases that require hardware-backed real-time operation for full standard compliance and energy efficiency:
 
@@ -60,7 +60,7 @@ While a "full duplex" pair of sequential packet channels continues to be a good 
 - Therefore all common radio hardware implements low-level optimizations outside the control of the CPU to ensure deterministic "hard realtime" execution. This includes offloading of MAC-level tasks to hardware or hardware-optimized event infrastructures (peripheral interconnect, interrupts, event-triggered hardware tasks, etc.)
 - Such hardware optimizations have to be pre-arranged in advance by the CPU usually concurrently with ongoing radio operations.
 
-To make it worse, current hardware not only automates execution of isolated pre-programmed radio tasks but also requires specific optimization of transitions between _pairs_ of tasks (e.g. fast RX-to-TX and the reverse, hardware-assisted chaining of CCA and TX operations, chaining of RX and ACK sending as well as TX and ACK reception, etc.). This means that driver implementations need to be able to provide different execution paths for each combination of subsequent tasks. This is fundamentally impossible in the "best effort" model which is only ever aware of the currently executed task and therefore cannot pipeline future operations while the current task is still running.
+To make it worse, current hardware not only automates execution of isolated pre-programmed radio tasks but also requires specific optimization of transitions between _pairs_ of tasks (e.g. fast rx-to-tx and the reverse, hardware-assisted chaining of CCA and tx operations, chaining of rx and ACK sending as well as tx and ACK reception, etc.). This means that driver implementations need to be able to provide different execution paths for each combination of subsequent tasks. This is fundamentally impossible in the "best effort" model which is only ever aware of the currently executed task and therefore cannot pipeline future operations while the current task is still running.
 
 A fundamental shift in driver design is required to support task pipelining:
 
@@ -73,7 +73,7 @@ A fundamental shift in driver design is required to support task pipelining:
 
 Once a framework depends on a send/receive driver model, it is very hard to change due to the fundamentally different architecture required for a scheduled/pipelined model. The driver model defines the API between driver and framework maintainers. Any change to the driver model will therefore have to go through a lengthy deprecation procedure that will hardly succeed in introducing a fundamentally new design as legacy obligations continue to weigh upon it.
 
-Frameworks starting out with a send/receive model, hoping to add on timing and scheduling features later, will face severe migration issues. The examples of both, Linux and the Zephyr OS, show that such migration will hardly happen as the hurdle to switch from a send/receive to a pipelined model is too high for most community driver maintainers. In Zephyr, only two large vendors introduced specific aspects of scheduled RX/TX while all other drivers remain locked into the send/receive approach - not even able to support Zephyr's IEEE 802.15.4 flagship protocol Thread 1.2+. This is because the scheduled model was built around single-vendor single-protocol abstractions that don't fit other hardware or sub-protocols well. To my best knowledge there is no scheduling-capable IEEE 802.15.4 driver available in Linux at all.
+Frameworks starting out with a send/receive model, hoping to add on timing and scheduling features later, will face severe migration issues. The examples of both, Linux and the Zephyr OS, show that such migration will hardly happen as the hurdle to switch from a send/receive to a pipelined model is too high for most community driver maintainers. In Zephyr, only two large vendors introduced specific aspects of scheduled rx/tx while all other drivers remain locked into the send/receive approach - not even able to support Zephyr's IEEE 802.15.4 flagship protocol Thread 1.2+. This is because the scheduled model was built around single-vendor single-protocol abstractions that don't fit other hardware or sub-protocols well. To my best knowledge there is no scheduling-capable IEEE 802.15.4 driver available in Linux at all.
 
 Understandably, no single vendor or driver maintainer has a fundamental interest in investing into a vendor- or protocol-agnostic glue layer - although - as the examples of Linux, Zephyr and many others show - driver maintainers are usually very open to adapt to a framework's abstractions as they reduce everyone's individual effort even if those abstractions are more sophisticated than what any single maintainer would have introduced on their own.
 
@@ -94,7 +94,7 @@ The driver model SHALL present a minimal barrier to entry while remaining open t
 
 - **R02.01** The driver model SHALL focus on a minimal set of low-level PHY features and thereby remain unencumbered by MAC features as far as possible. MAC features MAY become part of the driver model if (and only if) at least one of the supported SoCs provides hardware offloading for the feature. Typical examples of hardware-backed features currently available on widely used SoCs:
   - features to improve energy efficiency (fast and precise handling of radio ramp-up/tear-down)
-  - features to improve standard compliance (fast RX-to-TX switching, fast ACK, inter-frame-space enforcement, etc.)
+  - features to improve standard compliance (fast rx-to-tx switching, fast ACK, inter-frame-space enforcement, etc.)
   - high precision timing of packet sending and receive windows
   - high precision timestamping of incoming and outgoing packets (including sub-ns-precision ranging timestamps on UWB hardware),
   - automatic CCA, CSMA/CA, CRC checking, ACK, etc.
@@ -102,7 +102,7 @@ The driver model SHALL present a minimal barrier to entry while remaining open t
   - hardware-optimized packet encryption, decryption and signing,
   - hardware-optimized packet filtering (PAN, addressing, etc.),
   - MAC/PHY header and information element mangling - e.g. to inject timing-sensitive data on-the-fly (e.g. timestamps to synchronize TSCH networks or specify CSL anchor points)
-- **R02.02** Drivers SHALL support at least the following tasks: Radio Off (low-power state), RX (including RX idle), TX (including TX idle). Drivers MAY support the following additional features: Send ACK in the RX task, Wait for ACK in the TX task.
+- **R02.02** Drivers SHALL support at least the following tasks: Radio Off (low-power state), Rx (including rx idle), Tx (including tx idle). Drivers MAY support the following additional features: Send ACK in the rx task, Wait for ACK in the tx task.
 - **R02.05** The model SHALL provide default software implementations and polyfills for all generic and non-mandatory driver features to ease initial driver development.
 - **R02.03** The model SHALL provide hooks or configuration to selectively and optionally replace arbitrary generic software features by driver- or vendor-specific implementations that take advantage of proprietary hardware optimizations to improve performance and standard compliance .
 - **R02.04** Drivers SHALL be fully functional without providing optimized transitions between pairs of tasks. Drivers MAY individually optimize a transition between any pair of tasks taking full advantage of hardware optimizations (e.g. execution shortcuts, peripheral interconnect, event subsystems, CPU-less integration with other peripherals like clocks or timers, etc.).
@@ -123,8 +123,8 @@ A few general performance, correctness and safety requirements apply as to any l
 Minimal requirements for the "best effort" fragment of the overall model:
 
 - **R05.01** The framework SHALL be able to schedule the next driver task while the previous task is still being executed. The framework SHALL NOT schedule more than one task in advance.
-- **R05.02** Tasks SHALL be executed by the driver precisely in the order they were scheduled. Re-ordering or prioritizing one task over the other (e.g. TX over RX) is NOT part of the driver's responsibilities and SHALL be implemented in the framework.
-- **R05.03** Reception of packets targeted to the device SHALL not be cancelled mid-frame. Depending on hardware filtering capabilities "targeted" can mean "any packet with the correct SHM", "packets with the correct PAN and addressing" or even "packets with the correct signature and encryption". An already started packet (SHM recognized) takes precedence over sending of packets. (Note: CSMA/CA and other forms of CCA implicitly enforce this rule. In some countries there are even legal requirements to "listen-before-send", e.g. in SubG bands. So drivers cannot make progress towards TX by cancelling active RX anyway.)
+- **R05.02** Tasks SHALL be executed by the driver precisely in the order they were scheduled. Re-ordering or prioritizing one task over the other (e.g. tx over rx) is NOT part of the driver's responsibilities and SHALL be implemented in the framework.
+- **R05.03** Reception of packets targeted to the device SHALL not be cancelled mid-frame. Depending on hardware filtering capabilities "targeted" can mean "any packet with the correct SHM", "packets with the correct PAN and addressing" or even "packets with the correct signature and encryption". An already started packet (SHM recognized) takes precedence over sending of packets. (Note: CSMA/CA and other forms of CCA implicitly enforce this rule. In some countries there are even legal requirements to "listen-before-send", e.g. in SubG bands. So drivers cannot make progress towards tx by cancelling active rx anyway.)
 
 Requirements specific to the timed/scheduled fragment of the overall model:
 
@@ -132,10 +132,10 @@ Requirements specific to the timed/scheduled fragment of the overall model:
 - **R06.02** Upper layers SHALL ensure that tasks are scheduled in advance respecting protocol- and driver-specific guard times. Upper layers SHALL allocate sufficiently large task execution windows for each task. Drivers SHALL reject tasks that do not respect guard times and execution times.
 - **R06.03** If the upper layer does not schedule a subsequent task after the immediate task has been executed then the following rules apply:
   - Radio Off task: The radio is kept in low-power mode.
-  - RX task: The radio is kept powered and idle in RX mode (as supported by the hardware) but will ignore any incoming packet.
-  - TX task: The radio is kept powered and idle in TX mode (as supported by the hardware) and will ignore any incoming packet.
-  - Send ACK task: The radio is kept powered and idle in TX mode (as supported by hardware) and will ignore any incoming packet.
-  - Wait for ACK task: The radio is kept powered and idle in RX mode (as supported by hardware) and will ignore any incoming packet.
+  - RX task: The radio is kept powered and idle in rx mode (as supported by the hardware) but will ignore any incoming packet.
+  - TX task: The radio is kept powered and idle in tx mode (as supported by the hardware) and will ignore any incoming packet.
+  - Send ACK task: The radio is kept powered and idle in tx mode (as supported by hardware) and will ignore any incoming packet.
+  - Wait for ACK task: The radio is kept powered and idle in rx mode (as supported by hardware) and will ignore any incoming packet.
 - **R06.04** Scheduling SHALL be aware of the minimal operation-specific "guard time" required by the driver to update its state, i.e. only such tasks SHALL be accepted that can still be scheduled on-time on the underlying hardware.
 - **R06.05** During "radio off" windows, the driver MAY disable the radio and put the peripheral into the lowest possible energy consumption mode. Protocols optimized for battery-supplied devices (Thread, 6TiSCH, etc.) upgrade this requirement to "SHALL".
 - **R06.06** Ongoing reception of a frame MAY be continued even if the reception window already ended and the following "radio off" or "send" window started. The model SHALL make this feature configurable so that upper layers MAY control driver behavior in this respect.
@@ -159,8 +159,8 @@ Typical examples of generic (implementation-independent) task primitives are:
 
 - "Send a packet over the air such that it's RMARKER will pass the antenna at the precise radio clock tick T. Encrypt and sign the packet on-the-fly."
 - "Ensure that the receiver is on just-in-time so that it'll be able to recognize a packet whose RMARKER is expected to pass the antenna at the precise radio clock tick T +/- X ticks potential clock drift. Keep the receiver on for precisely Y ticks or until an incoming packet is fully received - whatever comes later - and then got to low-energy idle."
-- "Use an Enh-Ack to acknowledge the next incoming packet precisely after AIFS - measured as X radio clock ticks. Ensure that it contains a timing header whose timestamp you'll mangle based on the RX timestamp of the preceding packet."
-- "Do a CCA of precisely aCcaTime, then - if the channel is idle - immediately send a packet after aTurnaroundTime. If the channel is busy then place the radio in low-energy mode as quickly as possible. Calculate everything such that the RMARKER of the TX packet will pass the antenna at the precise radio clock tick T."
+- "Use an Enh-Ack to acknowledge the next incoming packet precisely after AIFS - measured as X radio clock ticks. Ensure that it contains a timing header whose timestamp you'll mangle based on the rx timestamp of the preceding packet."
+- "Do a CCA of precisely aCcaTime, then - if the channel is idle - immediately send a packet after aTurnaroundTime. If the channel is busy then place the radio in low-energy mode as quickly as possible. Calculate everything such that the RMARKER of the tx packet will pass the antenna at the precise radio clock tick T."
 
 Some SoCs will be able to execute full tasks of the above kind without any CPU intervention. Others will require such tasks to be partially controlled by CPU, again others need them to be implemented in software alone - sometimes with reduced standard compliance (which is good enough for many applications and needs to be supported in practice).
 
@@ -177,21 +177,21 @@ Based on the above criteria the following initial tasks need to be implemented b
 "Radio Off" is modeled as a task in its own right rather than being defined as the "absence" of other tasks:
 
 - The radio driver state machine is modeled entirely around tasks, i.e. tasks are just state machine states. Defining a radio off _state_ then automatically requires existence of a corresponding _task_.
-- It turns out that low-energy protocols require sleep periods to be defined as precisely scheduled time windows just as RX or TX windows.
+- It turns out that low-energy protocols require sleep periods to be defined as precisely scheduled time windows just as rx or tx windows.
 - The scheduling API is simplified if all radio states can be scheduled in the same way.
 
-Note that CSMA/CA requires control of isolated CCA operations with potentially long subsequent backoff periods. Performance testing showed that CCA is too short on 2.4G O-QSPK for the CPU to keep up. So CCA needs to be part of the TX task. When CCA succeeds, the driver will enter the TX state, otherwise it will fall back to "radio off" state. Such non-deterministic task outcomes allow CSMA/CA, TSCH CCA, etc. to be part of the framework. With non-deterministic TX tasks, backoff periods can be modeled generically across drivers as "Radio Off" fallback tasks if executing a TX tasks fails due to CCA busy.
+Note that CSMA/CA requires control of isolated CCA operations with potentially long subsequent backoff periods. Performance testing showed that CCA is too short on 2.4G O-QSPK for the CPU to keep up. So CCA needs to be part of the tx task. When CCA succeeds, the driver will enter the tx state, otherwise it will fall back to "radio off" state. Such non-deterministic task outcomes allow CSMA/CA, TSCH CCA, etc. to be part of the framework. With non-deterministic tx tasks, backoff periods can be modeled generically across drivers as "Radio Off" fallback tasks if executing a tx tasks fails due to CCA busy.
 
 ### ACK hardware offloading
 
 Some vendors have built in support for either automated acknowledgement or sophisticated mangling of ACK frames (e.g. to insert sequence numbers or timing-critical information at runtime). Therefore drivers MAY implement ACK offloading (auto-ACK):
 
-- Send ACK flag of the RX task: asks the driver to send an immediate or enhanced acknowledgement frame (Imm-Ack or Enh-Ack) in response receiving a frame as part of an Rx task.
-- Wait for ACK flag of the TX task: asks the driver to wait (with timeout) for an Imm-Ack or Enh-Ack after a Tx tasks finishes.
+- Send ACK flag of the rx task: asks the driver to send an immediate or enhanced acknowledgement frame (Imm-Ack or Enh-Ack) in response receiving a frame as part of an rx task.
+- Wait for ACK flag of the tx task: asks the driver to wait (with timeout) for an Imm-Ack or Enh-Ack after a tx tasks finishes.
 
 ### Behavioral modeling of task transitions
 
-The model treats transitions between tasks as driver primitives, i.e. hardware-accelerated _pairs_ of tasks like Off-to-RX, Off-to-TX, RX-to-TX, TX-to-RX, RX-to-RX, TX-to-TX, TX-to-Off and RX-to-Off switching occupy separate API methods. In Rust, making use of the typestate pattern, it is easy and efficient to implement different code paths depending on runtime state while also statically proving overall behavioral correctness. We therefore use the typestate pattern to enforce correct implementation of individual task transition pairs.
+The model treats transitions between tasks as driver primitives, i.e. hardware-accelerated _pairs_ of tasks like off-to-rx, off-to-tx, rx-to-tx, tx-to-rx, rx-to-rx, tx-to-tx, tx-to-off and rx-to-off switching occupy separate API methods. In Rust, making use of the typestate pattern, it is easy and efficient to implement different code paths depending on runtime state while also statically proving overall behavioral correctness. We therefore use the typestate pattern to enforce correct implementation of individual task transition pairs.
 
 The typestate pattern may seem more verbose or complex than send/receive drivers at first sight, but it turns out to be the simpler driver model in practice. Code implementing state-aware per-transition optimizations at runtime conceptually requires drivers to implement the same state machine. Having the state machine pre-defined in the API makes it easier to implement and validate and removes boilerplate and shared logic from driver implementations.
 
@@ -226,13 +226,13 @@ Drivers meant to support timed protocols (TSCH, CSL, beacon-enabled PANs, etc.) 
 
 ### The importance of RMARKERs in scheduled timing
 
-Central to timed RX/TX is the notion of the "RMARKER" or equivalently "start of physical header (PHD)", "end of synchronization header (SHR)" or "the beginning of the symbol following the start-of-frame (SFD) delimiter".
+Central to timed rx/tx is the notion of the "RMARKER" or equivalently "start of physical header (PHD)", "end of synchronization header (SHR)" or "the beginning of the symbol following the start-of-frame (SFD) delimiter".
 
 At the time of writing, the most precise definition of the RMARKER is given in IEEE 802.15.4-2020z, section 6.9.1.1. This definition subsumes and replaces all other definitions given in different protocol contexts or prior versions of the standard:
 
 "For all PHYs the RMARKER is defined to be the time when the beginning of the first symbol following the SFD of the frame is at the local antenna."
 
-This is the exact point in time that any RX/TX timestamp designates relative to the local radio clock. Any offsets to this definition (e.g. due to hardware guard times or signal times between the SoC and the antenna) need to be taken into account and corrected for internally by driver implementations.
+This is the exact point in time that any rx/tx timestamp designates relative to the local radio clock. Any offsets to this definition (e.g. due to hardware guard times or signal times between the SoC and the antenna) need to be taken into account and corrected for internally by driver implementations.
 
 Any window widening or timestamp adjustment required to cater for local or remote clock drift or global clock synchronization SHALL be calculated by the client. It is the driver's sole responsibility to schedule radio operations as precisely as possible according to its local radio clock.
 
@@ -244,22 +244,22 @@ The driver SHALL communicate a guard time to the client. This is the max. time r
 
 Definition of task timing:
 
-- RX task: a precisely defined time window during which the radio receiver SHALL be able to recognize and receive incoming packets.
-- TX task: a period with a precise start time during which a given packet SHALL be sent if (and only if) potential TX predicates are true (e.g. successful prior CCA).
-- RadioOff task: a precisely defined time window during which the radio peripheral SHALL be placed into a minimal energy consumption state (no RX/TX).
+- Rx task: a precisely defined time window during which the radio receiver SHALL be able to recognize and receive incoming packets.
+- Tx task: a period with a precise start time during which a given packet SHALL be sent if (and only if) potential tx predicates are true (e.g. successful prior CCA).
+- RadioOff task: a precisely defined time window during which the radio peripheral SHALL be placed into a minimal energy consumption state (no rx/tx).
 
 Timed tasks may contain the following data:
 
 - a sufficiently precise (in protocol / energy efficiency terms) timestamp that determines an RMARKER relative to the local monotonic and overflow-protected radio clock, given in (parts of) nanoseconds, radio clock ticks or symbols.
   - The significance of the timestamp depends on the task type.
-  - In case of RX tasks, the timestamp points to the expected earliest RMARKER at
+  - In case of rx tasks, the timestamp points to the expected earliest RMARKER at
     which a packet is to be expected at the local antenna.
-  - In case of TX tasks, the timestamp points to the time at which the RMARKER of the packet SHALL pass the local antenna, drivers SHALL account for CCA time if CCA is requested.
-  - In case of Radio Off tasks, the timestamp points to the earliest time at which detection of new packets is no longer required (i.e. any packet with an earlier RMARKER SHALL still be detected in a preceding RX window).
-- for RX tasks:
+  - In case of tx tasks, the timestamp points to the time at which the RMARKER of the packet SHALL pass the local antenna, drivers SHALL account for CCA time if CCA is requested.
+  - In case of "Radio Off" tasks, the timestamp points to the earliest time at which detection of new packets is no longer required (i.e. any packet with an earlier RMARKER SHALL still be detected in a preceding rx window).
+- for rx tasks:
   - an associated zero-copy mutable packet buffer
   - any hints regarding hardware offloading features (decryption/signing context, CRC parameters, packet filtering, etc.)
-- for TX tasks:
+- for tx tasks:
   - an associated zero-copy mutable packet buffer - mutability is required for certain last-minute patches offloaded to hardware
   - hints regarding the CCA mode to be employed (see section 10.2.8)
   - any hints regarding hardware offloading features (CRC parameters, encryption or signing, header mangling, etc.),
@@ -270,7 +270,7 @@ Note that clock drift is an important factor, but it is assumed that the schedul
 
 Also note that end-timestamps are not given:
 
-- All tasks end by the subsequent task's start timestamp less appropriate hardware-specific guard times. If no subsequent task has been scheduled then tasks are defined to take "forever", i.e. the radio remains in the state that it was left by task execution ("off" for Radio Off, TX/RX idle for TX/RX tasks). This allows the scheduler to deal with situations when the details of the next task are not yet known but it is known that the next task will be of a certain kind (e.g. it may be required to keep the receiver on for fast scheduling of another RX task without long ramp-up times).
+- All tasks end by the subsequent task's start timestamp less appropriate hardware-specific guard times. If no subsequent task has been scheduled then tasks are defined to take "forever", i.e. the radio remains in the state that it was left by task execution ("off" for "Radio Off", tx/rx idle for tx/rx tasks). This allows the scheduler to deal with situations when the details of the next task are not yet known but it is known that the next task will be of a certain kind (e.g. it may be required to keep the receiver on for fast scheduling of another rx task without long ramp-up times).
 - It is the scheduler's responsibility to ensure that standard-defined guard times (AIFS, SIFS, LIFS, aTurnoverTime, aCcaTime, etc.) will be respected when defining timestamps of subsequent tasks. The driver may check such conditions and reject offending tasks with a non-recoverable error.
 - Schedulers also need to ensure that the minimal and maximal execution time of the previous task is always allowed for when scheduling new tasks. Therefore drivers can reject tasks with a non-recoverable error if they cannot be scheduled in time without having to abort the previous task.
 
@@ -284,17 +284,17 @@ Initially, while no task is scheduled at all, an immediate "RadioOff" task is as
 
 As mentioned, "best effort" task execution will be defined more precisely in the timed model. Packets scheduled with a special "best-effort" timestamp value will be executed "immediately" after the preceding task with a task specific precise timing for full standard compliance. "Immediately" means "as fast as possible modulo guard times imposed by hardware delays or standard inter-frame-spacing rules" in this context:
 
-- RX and Radio Off tasks SHALL be ended immediately after receiving a subsequent "best-effort" TX, RX or RadioOff task unless the receiver is currently receiving a valid frame targeted to the current device. In the latter case the next tasks will be executed immediately after finishing packet reception.
-- TX tasks will be fully executed before switching to execute any subsequently scheduled "best effort" RX or "radio off" task. Drivers MAY implement fast hardware-supported Tx-to-RX/Off switching in this case.
+- Rx and "Radio Off" tasks SHALL be ended immediately after receiving a subsequent "best-effort" tx, rx or "Radio Off" task unless the receiver is currently receiving a valid frame targeted to the current device. In the latter case the next tasks will be executed immediately after finishing packet reception.
+- Tx tasks will be fully executed before switching to execute any subsequently scheduled "best effort" rx or "radio off" task. Drivers MAY implement fast hardware-supported tx-to-rx/off switching in this case.
 - Driver's SHALL enforce correct IFS timing between "best effort" tasks.
 
 # The state machine model
 
 The state machine diagram documents the driver's state machine model.
 
-The model defines the minimal interface drivers will initially have to implement. Drivers implement isolated Radio Off, RX and TX states. Acknowledgments are implemented in software by the scheduler. If tasks are "best effort", i.e. timestamps have not be assigned by the scheduler, the driver will execute tasks "as fast as possible" once they have been scheduled.
+The model defines the minimal interface drivers will initially have to implement. Drivers implement isolated "Radio Off", rx and tx states. Acknowledgments are implemented in software by the scheduler. If tasks are "best effort", i.e. timestamps have not be assigned by the scheduler, the driver will execute tasks "as fast as possible" once they have been scheduled.
 
-The best-effort scheduler will generate Rx or Tx tasks whenever a new RX/TX packet buffer (=RX/TX token) becomes available through the next upper layer. The scheduler keeps the driver in "Radio Off" state while no reception or transmission needs to be scheduled.
+The best-effort scheduler will generate rx or tx tasks whenever a new rx/tx packet buffer (=rx/tx token) becomes available through the next upper layer. The scheduler keeps the driver in "Radio Off" state while no reception or transmission needs to be scheduled.
 
 The driver asynchronously signals task results when the scheduled packet has been received or was sent.
 
@@ -340,7 +340,7 @@ The **PHR** consists of a single octet (2 symbols, 32µs).
 
 Depending on the frame type and length, required inter-frame spacing (IFS) between transmitted frames is as follows (sections 6.2.4 and 6.7.4.3):
 
-- Turnaround time: **12 symbol periods** for O-QPSK (aTurnaroundTime, min. time required to switch from RX to TX or reverse, see section 11.3, table 11-1)
+- Turnaround time: **12 symbol periods** for O-QPSK (aTurnaroundTime, min. time required to switch from rx to tx or inverse, see section 11.3, table 11-1)
 - short IFS (SIFS) after MPDUs <= 18 octets: **12 symbol periods** for O-QPSK ( see sections 10.1.4 and aMaxSifsFrameSize 8.4.2, table 8-93)
 - long IFS (LIFS) after MPDUs > 18 octets: **40 symbol periods** for O-QPSK (ibid.)
 - ACK IFS (AIFS): **12 symbol periods** for O-QPSK (same as SIFS, see section 6.7.4.3)
@@ -364,41 +364,41 @@ Example: Radio is initially off
 
 Next Upper Layer:
 
-- queues a TX packet into to the scheduler's TX queue.
+- queues a tx packet into to the scheduler's tx queue.
 
 Scheduler:
 
-- calculates a PSDU/MPDU of 18 bytes (TX packet 16 bytes + 2 bytes FCS),
-- allocates a Tx task and calculates the packet's desired RMARKER in terms of the local radio clock as "Tx timestamp 1",
-- transmits the timestamped Tx task to the driver with sufficient guard time as required by the driver's configuration.
+- calculates a PSDU/MPDU of 18 bytes (tx packet 16 bytes + 2 bytes FCS),
+- allocates a tx task and calculates the packet's desired RMARKER in terms of the local radio clock as "tx timestamp 1",
+- transmits the timestamped tx task to the driver with sufficient guard time as required by the driver's configuration.
 
 Driver:
 
-- sets the radio peripheral's Tx DMA pointer to the start of the PPDU in the Tx task,
+- sets the radio peripheral's tx DMA pointer to the start of the PPDU in the tx task,
 - calculates the hardware specific time to ramp up the radio,
 - calculates the PHY specific time required to send the synchronization header (SHR),
-- configures and arms a timer to fire at time "Tx timestamp/RMARKER - SHR send time - Tx ramp up time",
+- configures and arms a timer to fire at time "tx timestamp/RMARKER - SHR send time - tx ramp up time",
 - configures the timer interrupt to trigger the "on-complete" action of the "Radio Off" state machine state,
-- configures the timer event to trigger the vendor-specific TX ramp-up task,
-- configures the vendor-specific "Tx ready" event to trigger the vendor-specific "Tx start" task,
+- configures the timer event to trigger the vendor-specific tx ramp-up task,
+- configures the vendor-specific "tx ready" event to trigger the vendor-specific "tx start" task,
 - configures the "START" interrupt to trigger the "on-entry" action of the "Tx" state machine state,
 - configures the "END" event to trigger the "on-complete" action of the "Tx" state machine state.
 
-The "on-entry" action of the Tx task signals to the scheduler that the driver is ready to accept scheduling of the next task.
+The "on-entry" action of the tx task signals to the scheduler that the driver is ready to accept scheduling of the next task.
 
 Scheduler:
 
-- allocates a "best effort" RX task to wait for the acknowledgment,
-- schedules the RX task to the driver with sufficient guard time as required by the driver's configuration while the TX task is still being executed.
+- allocates a "best effort" rx task to wait for the acknowledgment,
+- schedules the rx task to the driver with sufficient guard time as required by the driver's configuration while the tx task is still being executed.
 
 Driver:
 
-- calculates the minimum time to ramp-down the radio and ramp it back up in RX mode
+- calculates the minimum time to ramp-down the radio and ramp it back up in rx mode
 - depending on the result: decides to temporarily disable the receiver
-- sets the radio peripheral's Rx DMA pointer to a buffer that will receive the acknowledgement frame,
-- configures and arms a timer to fire at time "ACK timestamp/RMARKER - SHR receive time - RX ramp up time",
-- configures the timer event to trigger the vendor-specific RX ramp-up task,
-- configures the vendor-specific "Rx ready" event to trigger the vendor-specific "Rx start" task,
+- sets the radio peripheral's rx DMA pointer to a buffer that will receive the acknowledgement frame,
+- configures and arms a timer to fire at time "ACK timestamp/RMARKER - SHR receive time - rx ramp up time",
+- configures the timer event to trigger the vendor-specific rx ramp-up task,
+- configures the vendor-specific "rx ready" event to trigger the vendor-specific "rx start" task,
 - configures the "START" interrupt to trigger the "on-entry" action of the "Wait for ACK" state machine state,
 - configures the "END" event to trigger the "on-complete" action of the "Wait for ACK" state machine state.
 - configures and arms a timeout timer signalling a "no ACK" situation,
@@ -600,4 +600,4 @@ This yields the max. time for each round as follows:
 - Round 1: BE=4, 2^BE-1=15, max. delay=15\*320µs=4800µs, incl. CCA/CPU: **4930µs**
 - Rounds 2-5: BE=5, 2^BE-1=31, max. delay=31\*320µs=9920µs, incl. CCA/CPU: **10050µs**
 
-These timings show, that CSMA/CA cannot be treated efficiently inside timed TX tasks alone. This explains the proposed CCA task which can be interleaved with TX, RX and RadioOff tasks to concurrently listen for incoming packets or support low-energy operation during CSMA/CA backoff periods.
+These timings show, that CSMA/CA cannot be treated efficiently inside timed tx tasks alone. This explains the proposed CCA task which can be interleaved with tx, rx and RadioOff tasks to concurrently listen for incoming packets or support low-energy operation during CSMA/CA backoff periods.
