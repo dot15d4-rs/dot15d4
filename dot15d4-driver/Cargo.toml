@@ -35,7 +35,7 @@ arbitrary = { version = "1.3.2", features = ["derive"], optional = true }
 [features]
 nrf = ["dep:cortex-m"]
 nrf52840 = ["dep:nrf52840-hal", "dep:nrf52840-pac", "nrf"]
-nrf52811 = ["dep:nrf52811-hal", "dep:nrf52811-hal", "nrf"]
+nrf52811 = ["dep:nrf52811-hal", "dep:nrf52811-pac", "nrf"]
 nrf5340-net = ["dep:nrf5340-net-hal", "dep:nrf5340-net-pac", "nrf"]
 
 log = ["dep:log", "dot15d4-util/log"]
