@@ -11,7 +11,7 @@ use dot15d4::driver::{
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
 };
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "executor-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -29,13 +29,13 @@ async fn main(spawner: Spawner) {
     dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
     let (peripherals, clocks, mut timer) = dot15d4_examples_nrf52840::config_peripherals();
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
         peripherals.radio,
         clocks,
         timer,
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     );
     let buffer_allocator = mac_buffer_allocator!();

@@ -45,7 +45,8 @@ security = ["dot15d4-frame/security"]
 ies = ["dot15d4-frame/ies"]
 
 # Tracing
-gpio-trace = ["dot15d4-driver/gpio-trace"]
+executor-trace = ["dot15d4-driver/executor-trace"]
+timer-trace = ["dot15d4-driver/timer-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "dot15d4-util/rtos-trace",

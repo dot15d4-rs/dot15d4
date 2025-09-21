@@ -55,7 +55,7 @@ pub enum HardwareSignal {
     RadioDisable,
 
     /// Toggle the outbound alarm pin.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     GpioToggle,
 }
 
@@ -75,7 +75,7 @@ pub enum HardwareEvent {
     RadioDisabled,
 
     /// A toggle event on the inbound alarm pin.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     GpioToggled,
 }
 

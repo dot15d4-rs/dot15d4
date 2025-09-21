@@ -13,7 +13,7 @@ use core::{
 use cortex_m::{asm::wfe, peripheral::Peripherals as CorePeripherals};
 use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU64;
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "timer-trace")]
 use nrf52840_pac::GPIOTE;
 use nrf52840_pac::{interrupt, Peripherals, NVIC, PPI, RADIO, RTC0, TIMER0};
 
@@ -210,14 +210,14 @@ struct State {
     ///
     /// Will only be accessed from scheduling context but is atomic to satisfy
     /// the type system.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     gpiote_out_channel: AtomicUsize,
 
     /// GPIOTE channel used for GPIO event capturing.
     ///
     /// Will only be accessed from scheduling context but is atomic to satisfy
     /// the type system.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     gpiote_in_channel: AtomicUsize,
 
     /// Primary PPI channel used for signal triggering (timer synchronization,
@@ -281,9 +281,9 @@ impl State {
             half_period: AtomicU32::new(0),
             alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
             timer_epoch: Cell::new(LocalClockInstant::from_ticks(0)),
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             gpiote_out_channel: AtomicUsize::new(0),
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             gpiote_in_channel: AtomicUsize::new(1),
             ppi_channel1: AtomicUsize::new(0),
             ppi_channel2: AtomicUsize::new(0),
@@ -313,7 +313,7 @@ impl State {
         unsafe { Peripherals::steal() }.PPI
     }
 
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     fn gpiote() -> GPIOTE {
         // We only access GPIOTE channels that we exclusively own.
         unsafe { Peripherals::steal() }.GPIOTE
@@ -336,7 +336,7 @@ impl State {
         timer: TIMER0,
         ppi_channels: [usize; 2],
         ppi_channel_group: usize,
-        #[cfg(feature = "gpio-trace")] tracing_config: NrfRadioTimerTracingConfig,
+        #[cfg(feature = "timer-trace")] tracing_config: NrfRadioTimerTracingConfig,
     ) {
         assert_eq!(
             self.init_state
@@ -362,7 +362,7 @@ impl State {
         self.ppi_channel_group
             .store(ppi_channel_group, Ordering::Relaxed);
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         {
             let NrfRadioTimerTracingConfig {
                 gpiote_out_channel,
@@ -1107,7 +1107,7 @@ impl State {
             return Err(RadioTimerError::Busy);
         }
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         if matches!(signal, HardwareSignal::GpioToggle) {
             let ch = &ppi.ch[ppi_channel];
 
@@ -1146,7 +1146,7 @@ impl State {
         match event {
             HardwareEvent::RadioRxEnabled | HardwareEvent::RadioDisabled => ppi_channel1(),
             HardwareEvent::RadioFrameStarted => ppi_channel2(),
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => ppi_channel2(),
         }
     }
@@ -1203,14 +1203,14 @@ impl State {
             ObservesEvent(Self::timer_event_channel(event))
         };
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         let gpiote_channel = self.gpiote_in_channel.load(Ordering::Relaxed);
         let radio = Self::radio();
         let event_ptr = match event {
             HardwareEvent::RadioRxEnabled => radio.events_rxready.as_ptr(),
             HardwareEvent::RadioFrameStarted => radio.events_framestart.as_ptr(),
             HardwareEvent::RadioDisabled => radio.events_disabled.as_ptr(),
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => Self::gpiote().events_in[gpiote_channel].as_ptr(),
         };
 
@@ -1321,7 +1321,7 @@ impl State {
                 }
                 observed_evt
             }
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => {
                 let evt_reg = &Self::gpiote().events_in[gpiote_channel];
                 let observed_evt = evt_reg.read().events_in().bit_is_set();
@@ -1363,7 +1363,7 @@ impl State {
 
         // Safety: If we're not tracing, the tick interrupt is only used to
         //         synchronize the timer with the RTC.
-        #[cfg(not(feature = "gpio-trace"))]
+        #[cfg(not(feature = "timer-trace"))]
         Self::rtc().evtenclr.write(|w| w.tick().set_bit());
 
         // Clean up timer registers that we used for synchronization.
@@ -1419,7 +1419,7 @@ impl State {
 
         // Mask the tick event while we're setting synchronization up to avoid
         // race conditions.
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         rtc.evtenclr.write(|w| w.tick().set_bit());
 
         ch.eep
@@ -1473,7 +1473,7 @@ impl State {
             HardwareSignal::RadioRxEnable => (Self::TIMER_CC0_RADIO_RXEN_CHANNEL, 0),
             HardwareSignal::RadioTxEnable => (Self::TIMER_CC0_RADIO_TXEN_CHANNEL, 0),
             HardwareSignal::RadioDisable => (Self::TIMER_CC1_RADIO_DISABLE_CHANNEL, 1),
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             HardwareSignal::GpioToggle => (self.ppi_channel1.load(Ordering::Relaxed), 0),
         }
     }
@@ -1485,7 +1485,7 @@ impl State {
         match event {
             HardwareEvent::RadioRxEnabled | HardwareEvent::RadioDisabled => 0,
             HardwareEvent::RadioFrameStarted => 1,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => 1,
         }
     }
@@ -1893,7 +1893,7 @@ pub struct NrfRadioSleepTimer {
     _inner: (),
 }
 
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "timer-trace")]
 pub struct NrfRadioTimerTracingConfig {
     pub gpiote_out_channel: usize,
     pub gpiote_in_channel: usize,
@@ -1911,14 +1911,14 @@ impl NrfRadioSleepTimer {
         timer: TIMER0,
         ppi_channels: [usize; 2],
         ppi_channel_group: usize,
-        #[cfg(feature = "gpio-trace")] tracing_config: NrfRadioTimerTracingConfig,
+        #[cfg(feature = "timer-trace")] tracing_config: NrfRadioTimerTracingConfig,
     ) -> Self {
         STATE.init(
             rtc,
             timer,
             ppi_channels,
             ppi_channel_group,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             tracing_config,
         );
         Self { _inner: () }
@@ -2244,7 +2244,7 @@ impl Drop for NrfRadioHighPrecisionTimer {
 
         // In case synchronization was interrupted: Clean up registers that were
         // used for synchronization.
-        #[cfg(not(feature = "gpio-trace"))]
+        #[cfg(not(feature = "timer-trace"))]
         State::rtc().evtenclr.write(|w| w.tick().set_bit());
         timer.intenclr.write(|w| w.compare1().set_bit());
 
@@ -2253,7 +2253,7 @@ impl Drop for NrfRadioHighPrecisionTimer {
             timer.events_compare[timer_channel].reset();
             timer.cc[timer_channel].reset();
         }
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         {
             let gpiote_channel = STATE.gpiote_in_channel.load(Ordering::Relaxed);
             State::gpiote().events_in[gpiote_channel].reset();

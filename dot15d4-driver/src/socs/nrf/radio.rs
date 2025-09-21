@@ -49,7 +49,6 @@ use self::executor::NrfInterruptExecutor;
 pub mod export {
     // TODO: Remove HAL dependency.
     pub use nrf52840_hal::clocks::{Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted};
-    pub use nrf52840_pac as pac;
 }
 
 // The nRF hardware only supports default CCA duration.
@@ -249,7 +248,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         radio: pac::RADIO,
         _clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
         timer: NrfRadioSleepTimer,
-        #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
+        #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
     ) -> Self {
         #[cfg(feature = "rtos-trace")]
         crate::radio::trace::instrument();
@@ -305,9 +304,8 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 
         let inner = NrfRadioDriver {
             executor: *self::executor(
-                radio,
                 NrfInterruptPriority::HIGHEST_PRIORITY,
-                #[cfg(feature = "gpio-trace")]
+                #[cfg(feature = "executor-trace")]
                 gpiote_trace_channel,
             ),
         };
@@ -1891,4 +1889,4 @@ fn dma_end_fence() {
     compiler_fence(Ordering::Acquire);
 }
 
-nrf_interrupt_executor!(executor, RADIO, RADIO);
+nrf_interrupt_executor!(executor, RADIO);

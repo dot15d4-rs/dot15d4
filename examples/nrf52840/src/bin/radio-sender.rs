@@ -18,7 +18,9 @@ use dot15d4::{
     },
     util::buffer_allocator,
 };
-use dot15d4_examples_nrf52840::{config_peripherals, gpio_trace::PIN_EXECUTOR, swi_executor};
+#[cfg(feature = "executor-trace")]
+use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
+use dot15d4_examples_nrf52840::{config_peripherals, swi_executor};
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -32,13 +34,13 @@ fn main() -> ! {
 
     let (peripherals, clocks, timer) = config_peripherals();
 
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let _radio = RadioDriver::new(
         peripherals.radio,
         clocks,
         timer,
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     );
     let executor = swi_executor();

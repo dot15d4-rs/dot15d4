@@ -1,6 +1,6 @@
 #![allow(static_mut_refs)]
 
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "executor-trace")]
 use core::cell::Cell;
 use core::{
     cell::UnsafeCell,
@@ -19,13 +19,18 @@ use cortex_m::{
 };
 use dot15d4_util::sync::CancellationGuard;
 use nrf52840_pac::Interrupt;
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "executor-trace")]
 use nrf52840_pac::Peripherals;
 use portable_atomic::{AtomicPtr, Ordering};
 
 #[cfg(feature = "rtos-trace")]
 use crate::executor::trace::MISSED_ISR;
 use crate::executor::{InterruptPriority, PB3};
+
+pub mod export {
+    pub use nrf52840_pac::{interrupt, Interrupt};
+    pub use static_cell::StaticCell;
+}
 
 // Safety: While the task pointer is `null` the scheduling context may mutate
 //         the outer waker. If the task pointer is non-null then the outer_waker
@@ -52,7 +57,7 @@ pub struct State {
 
     // The GPIOTE trace channel must be set before instantiating the executor
     // and is immutable afterwards.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "executor-trace")]
     gpiote_trace_channel: Cell<usize>,
 }
 
@@ -72,7 +77,7 @@ impl State {
             outer_waker: UnsafeCell::new(None),
             inner_waker: unsafe { Waker::from_raw(raw_inner_waker) },
             interrupt,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "executor-trace")]
             gpiote_trace_channel: Cell::new(0),
         }
     }
@@ -85,12 +90,12 @@ impl State {
     pub fn init(
         &self,
         priority: NrfInterruptPriority,
-        #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
+        #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
     ) {
         #[cfg(feature = "rtos-trace")]
         crate::executor::trace::instrument();
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         self.gpiote_trace_channel.set(gpiote_trace_channel);
 
         // Safety: We check proper priority stacking in our `block_on()` and
@@ -140,10 +145,10 @@ impl State {
     }
 
     pub fn on_interrupt(&self) {
-        #[cfg(feature = "rtos-trace")]
+        #[cfg(all(feature = "rtos-trace", feature = "executor-trace"))]
         rtos_trace::trace::isr_enter();
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         let gpiote = {
             // Safety: The GPIOTE trace channel is reserved for exclusive use.
             let gpiote = unsafe { Peripherals::steal() }.GPIOTE;
@@ -182,10 +187,10 @@ impl State {
             rtos_trace::trace::marker(MISSED_ISR);
         }
 
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         gpiote.tasks_out[self.gpiote_trace_channel.get()].write(|w| w.tasks_out().set_bit());
 
-        #[cfg(feature = "rtos-trace")]
+        #[cfg(all(feature = "rtos-trace", feature = "executor-trace"))]
         rtos_trace::trace::isr_exit_to_scheduler();
     }
 
@@ -212,8 +217,9 @@ impl State {
         self.pend_interrupt();
 
         loop {
-            #[cfg(feature = "rtos-trace")]
+            #[cfg(all(feature = "rtos-trace", feature = "executor-trace"))]
             rtos_trace::trace::system_idle();
+
             wfe();
 
             // Safety: Loading the task pointer re-acquires the pinned task for
@@ -342,44 +348,57 @@ impl State {
 // Safety: We synchronize the contents of state via the task atomic.
 unsafe impl Sync for State {}
 
+/// Creates a local module that generates an interrupt executor for the given
+/// interrupt.
+///
+/// Example:
+///
+/// ```
+/// nrf_interrupt_executor!(swi_executor, SWI0_EGU0);
+/// ```
+///
+/// The first argument names the generated module and accessor function. The
+/// second argument designates the interrupt.
+///
+/// Only a single executor can be created per interrupt. The executor will own
+/// the interrupt exclusively. Trying to declare several executors for a single
+/// interrupt or creating an independent interrupt handler will fail the linker.
 #[macro_export]
 macro_rules! nrf_interrupt_executor {
-    ($mod:ident, $interrupt:ident, $peripheral:ident) => {
-        pub mod $mod {
+    ($mod:ident, $interrupt:ident) => {
+        mod $mod {
             use core::{
                 future::Future,
                 ptr,
                 task::{RawWaker, RawWakerVTable},
             };
-            use nrf52840_pac::{interrupt, $peripheral, Interrupt};
-            use static_cell::StaticCell;
 
             use $crate::{
                 executor::{InterruptExecutor, InterruptPriority},
                 interrupt_executor,
-                socs::nrf::executor::{NrfInterruptPriority, NrfPriorityBits, State},
+                socs::nrf::executor::{
+                    export::{interrupt, Interrupt, StaticCell},
+                    NrfInterruptPriority, NrfPriorityBits, State,
+                },
             };
 
             static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor);
             static STATE: State =
                 State::new(Interrupt::$interrupt, RawWaker::new(ptr::null(), &VTABLE));
 
-            #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
             pub struct NrfInterruptExecutor;
 
             impl NrfInterruptExecutor {
                 /// Mutability proves exclusive ownership of the executor.
-                /// Ownership of the software interrupt is transferred to the
-                /// executor.
                 pub(super) fn init(
                     &'static mut self,
-                    _peripheral: $peripheral,
                     priority: NrfInterruptPriority,
-                    #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
+                    #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
                 ) -> &'static mut Self {
                     STATE.init(
                         priority,
-                        #[cfg(feature = "gpio-trace")]
+                        #[cfg(feature = "executor-trace")]
                         gpiote_trace_channel,
                     );
                     self
@@ -414,18 +433,18 @@ macro_rules! nrf_interrupt_executor {
             pub(super) static EXECUTOR: StaticCell<NrfInterruptExecutor> = StaticCell::new();
         }
 
-        /// Safety: Transferring ownership of the interrupt peripheral proves
-        ///         that only a single instance of the executor can be
-        ///         requested.
-        pub fn $mod(
-            peripheral: nrf52840_pac::$peripheral,
+        /// Retrieve the executor singleton.
+        ///
+        /// # Panics
+        ///
+        /// Calling this function more than once will panic.
+        fn $mod(
             priority: $crate::socs::nrf::executor::NrfInterruptPriority,
-            #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
+            #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
         ) -> &'static mut $mod::NrfInterruptExecutor {
             $mod::EXECUTOR.init($mod::NrfInterruptExecutor).init(
-                peripheral,
                 priority,
-                #[cfg(feature = "gpio-trace")]
+                #[cfg(feature = "executor-trace")]
                 gpiote_trace_channel,
             )
         }
@@ -433,5 +452,3 @@ macro_rules! nrf_interrupt_executor {
 }
 
 pub use nrf_interrupt_executor;
-
-nrf_interrupt_executor!(swi0, SWI0_EGU0, SWI0);

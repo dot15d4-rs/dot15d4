@@ -11,15 +11,15 @@ required-features = ["embassy-net"]
 
 [[bin]]
 name = "timer-sig"
-required-features = ["gpio-trace"]
+required-features = ["timer-trace"]
 
 [[bin]]
 name = "timer-evt"
-required-features = ["gpio-trace"]
+required-features = ["timer-trace"]
 
 [[bin]]
 name = "radio-sender"
-required-features = ["gpio-trace"]
+required-features = ["timer-trace"]
 
 [dependencies]
 cortex-m = { version = "0.7", features = [
@@ -35,7 +35,6 @@ embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-tr
     # The time driver is only required for rtos-trace.
     "time-driver-rtc1",
 ], optional = true, default-features = false }
-nrf52840-pac = { version = "0.12", optional = true }
 
 panic-probe = "1.0"
 heapless = "0.8"
@@ -71,7 +70,8 @@ defmt = [
 ]
 log = ["dep:log", "dot15d4/log", "dot15d4-embassy/log"]
 
-gpio-trace = ["dot15d4/gpio-trace"]
+executor-trace = ["dot15d4/executor-trace", "_gpio-trace"]
+timer-trace = ["dot15d4/timer-trace", "_gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "dep:embassy-nrf",
@@ -80,6 +80,7 @@ rtos-trace = [
     "dot15d4-embassy/rtos-trace",
     "log",
 ]
+_gpio-trace = []
 
 # Radio test scenarios
 all_radio_tests = ["rx_to_tx", "tx_to_tx"]
@@ -90,7 +91,6 @@ tx_to_tx = []
 nrf52840 = [
     "dep:cortex-m",
     "dep:cortex-m-rt",
-    "dep:nrf52840-pac",
     "embassy-executor/arch-cortex-m",
     "dot15d4/nrf52840",
     "dot15d4-embassy/nrf52840",

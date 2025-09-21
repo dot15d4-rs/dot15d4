@@ -1,12 +1,12 @@
 #![no_std]
 #![cfg(feature = "nrf52840")]
 
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "timer-trace")]
 use dot15d4::driver::socs::nrf::NrfRadioTimerTracingConfig;
 use dot15d4::driver::{
     executor::{InterruptExecutor, PB3},
     socs::nrf::{
-        executor::{self, NrfInterruptPriority},
+        executor::{nrf_interrupt_executor, NrfInterruptPriority},
         export::{
             pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, RADIO, SCB, UICR},
             Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
@@ -15,7 +15,7 @@ use dot15d4::driver::{
     },
 };
 
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "_gpio-trace")]
 pub mod gpio_trace {
     use dot15d4::driver::socs::nrf::export::pac::Peripherals;
 
@@ -31,19 +31,19 @@ pub mod gpio_trace {
     #[derive(Clone, Copy)]
     pub enum GpioteChannel {
         /// Interrupt executor tracing.
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         Executor,
 
         /// Timer tick tracing.
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         TimerTick,
 
         /// Timer GPIO signal.
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         TimerSignal,
 
         /// Timer GPIO event tracing.
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         TimerEvent,
     }
     use GpioteChannel::*;
@@ -78,19 +78,19 @@ pub mod gpio_trace {
     }
 
     // Tracing pins.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "executor-trace")]
     pub const PIN_EXECUTOR: GpioteConfig = GpioteConfig::new(Executor, P0, 26, Out);
 
     // Timer pins.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     pub const PIN_TIMER_TICK: GpioteConfig = GpioteConfig::new(TimerTick, P0, 27, Out);
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     pub const PIN_TIMER_SIGNAL: GpioteConfig = GpioteConfig::new(TimerSignal, P0, 2, Out);
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     pub const PIN_TIMER_EVENT: GpioteConfig = GpioteConfig::new(TimerEvent, P1, 15, In);
 
     // Synchronization pin to trigger a timer event on another device.
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     pub const PIN_SYNC_OUT: GpioteConfig = GpioteConfig::new(TimerEvent, P1, 14, Out);
 
     pub(super) fn config_gpiote(peripherals: &Peripherals, config: &GpioteConfig) {
@@ -116,13 +116,13 @@ pub mod gpio_trace {
     }
 }
 
-#[cfg(feature = "gpio-trace")]
+#[cfg(feature = "_gpio-trace")]
 use gpio_trace::*;
 
 pub enum PpiChannel {
     RadioTimer1,
     RadioTimer2,
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     RadioTimerTick,
 }
 
@@ -131,7 +131,7 @@ pub enum PpiChannel {
 const TIMER_PPI_CHANNEL_GROUP: usize = 0;
 
 pub struct AvailablePeripherals {
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "_gpio-trace")]
     pub gpiote: GPIOTE,
     pub radio: RADIO,
 }
@@ -149,17 +149,17 @@ pub fn config_peripherals() -> (
     // Enable the DC/DC converter
     peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
 
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "_gpio-trace")]
     {
         #[allow(clippy::single_element_loop)]
         for pin in [
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "executor-trace")]
             &PIN_EXECUTOR,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             &PIN_TIMER_TICK,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             &PIN_TIMER_SIGNAL,
-            #[cfg(feature = "gpio-trace")]
+            #[cfg(feature = "timer-trace")]
             &PIN_TIMER_EVENT,
         ] {
             config_gpiote(&peripherals, pin);
@@ -168,7 +168,7 @@ pub fn config_peripherals() -> (
 
     let clocks = config_clock(peripherals.CLOCK);
 
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "timer-trace")]
     let timer_tracing_config = NrfRadioTimerTracingConfig {
         gpiote_out_channel: PIN_TIMER_SIGNAL.gpiote_channel as usize,
         gpiote_in_channel: PIN_TIMER_EVENT.gpiote_channel as usize,
@@ -183,12 +183,12 @@ pub fn config_peripherals() -> (
             PpiChannel::RadioTimer2 as usize,
         ],
         TIMER_PPI_CHANNEL_GROUP,
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "timer-trace")]
         timer_tracing_config,
     );
 
     let available_peripherals = AvailablePeripherals {
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "_gpio-trace")]
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
     };
@@ -242,13 +242,14 @@ pub fn toggle_gpiote_pin(gpiote: &GPIOTE, gpiote_channel: usize) {
     gpiote.tasks_out[gpiote_channel].write(|w| w.tasks_out().set_bit());
 }
 
+nrf_interrupt_executor!(executor, SWI0_EGU0);
+
 pub fn swi_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
-    #[cfg(feature = "gpio-trace")]
+    #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
-    executor::swi0(
-        unsafe { Peripherals::steal() }.SWI0,
+    executor(
         NrfInterruptPriority::LOWEST_PRIORITY,
-        #[cfg(feature = "gpio-trace")]
+        #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     )
 }
