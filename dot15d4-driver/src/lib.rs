@@ -6,7 +6,10 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "executor")]
 pub mod executor;
+#[cfg(feature = "radio")]
 pub mod radio;
 pub mod socs;
+#[cfg(feature = "timer")]
 pub mod timer;

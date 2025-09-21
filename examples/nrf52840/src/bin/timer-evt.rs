@@ -6,7 +6,6 @@
 
 use core::{future::poll_fn, task::Poll};
 
-use nrf52840_pac::Peripherals;
 use panic_probe as _;
 
 use dot15d4::{
@@ -17,13 +16,9 @@ use dot15d4::{
     },
     util::info,
 };
-use dot15d4_examples_nrf52840::{
-    config_peripherals,
-    gpio_trace::{GpioteChannel, PIN_EXECUTOR},
-    swi_executor,
-};
+use dot15d4_examples_nrf52840::{config_peripherals, gpio_trace::GpioteChannel, swi_executor};
 
-nrf_interrupt_executor!(gpiote_executor, GPIOTE, GPIOTE);
+nrf_interrupt_executor!(gpiote_executor, GPIOTE);
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -33,17 +28,11 @@ fn main() -> ! {
     let (peripherals, _, timer) = config_peripherals();
 
     let swi_executor = swi_executor();
-    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
-    let gpiote_executor = gpiote_executor(
-        peripherals.gpiote,
-        swi_executor.priority().one_higher().unwrap(),
-        #[cfg(feature = "gpio-trace")]
-        gpiote_trace_channel,
-    );
+    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
 
+    let gpiote = peripherals.gpiote;
     let gpiote_channel = GpioteChannel::TimerEvent as usize;
     let gpiote_mask = 1 << gpiote_channel;
-    let gpiote = unsafe { Peripherals::steal() }.GPIOTE;
     let gpiote_event = &gpiote.events_in[gpiote_channel];
 
     swi_executor.block_on(async {

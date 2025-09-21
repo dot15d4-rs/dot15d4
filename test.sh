@@ -3,8 +3,14 @@
 echo "CHECK(examples): ARM, default features"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf -- -D warnings
 
-echo "CHECK(examples): ARM, optional features"
-cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace,gpio-trace -- -D warnings
+echo "CHECK(examples): ARM, rtos-trace + timer-trace"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace,timer-trace -- -D warnings
+
+echo "CHECK(examples): ARM, executor-trace"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features executor-trace -- -D warnings
+
+echo "CHECK(dot15d4-driver/examples): ARM, rtos-trace,log,executor,nrf52840"
+cargo clippy -p dot15d4-driver --examples --target thumbv7em-none-eabihf --features rtos-trace,log,executor,nrf52840 --no-default-features -- -D warnings
 
 echo "TEST(dot15d4-frame): no features"
 cargo test -p dot15d4-frame --no-default-features
