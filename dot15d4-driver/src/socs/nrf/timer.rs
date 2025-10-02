@@ -12,15 +12,19 @@ use core::{
     task::{Poll, Waker},
 };
 
+use cortex_m::peripheral::Peripherals as CorePeripherals;
 use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU32;
 #[cfg(feature = "gpio-trace")]
 use nrf52840_pac::GPIOTE;
 use nrf52840_pac::{interrupt, Peripherals, NVIC, PPI, RADIO, RTC0, TIMER0};
 
-use crate::timer::{
-    HardwareEvent, HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi,
-    RadioTimerError, TimedSignal,
+use crate::{
+    socs::nrf::executor::NrfInterruptPriority,
+    timer::{
+        HardwareEvent, HardwareSignal, LocalClockDuration, LocalClockInstant, RadioTimerApi,
+        RadioTimerError, TimedSignal,
+    },
 };
 
 use super::AlarmChannel;
@@ -214,6 +218,12 @@ impl State {
         }
     }
 
+    fn nvic() -> NVIC {
+        // Safety: We only use the peripheral to adjust properties of interrupts
+        //         we exclusively own.
+        unsafe { CorePeripherals::steal() }.NVIC
+    }
+
     fn rtc() -> RTC0 {
         // We own the RTC peripheral exclusively.
         unsafe { Peripherals::steal() }.RTC0
@@ -308,6 +318,21 @@ impl State {
 
         rtc.tasks_start.write(|w| w.tasks_start().set_bit());
         while rtc.counter.read().counter() == 0 {}
+
+        let mut nvic = Self::nvic();
+
+        let timer_interrupt_priority = NrfInterruptPriority::HIGHEST_PRIORITY.one_lower().unwrap();
+        // Safety: See the documented synchronization approach.
+        unsafe {
+            nvic.set_priority(
+                interrupt::TIMER0,
+                timer_interrupt_priority.to_arm_nvic_repr(),
+            )
+        };
+
+        let rtc_interrupt_priority = timer_interrupt_priority.one_lower().unwrap();
+        // Safety: See the documented synchronization approach.
+        unsafe { nvic.set_priority(interrupt::RTC0, rtc_interrupt_priority.to_arm_nvic_repr()) };
 
         // Clear and enable the timer interrupts.
         NVIC::unpend(interrupt::RTC0);

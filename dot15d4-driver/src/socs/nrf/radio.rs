@@ -65,7 +65,10 @@ use crate::{
     },
 };
 
-use super::{executor::radio::NrfInterruptExecutor, timer::NrfRadioTimer};
+use super::{
+    executor::{radio::NrfInterruptExecutor, NrfInterruptPriority},
+    timer::NrfRadioTimer,
+};
 
 pub mod export {
     // TODO: Remove HAL dependency.
@@ -282,6 +285,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             inner: NrfRadioDriver {
                 executor: *super::executor::radio(
                     radio,
+                    NrfInterruptPriority::HIGHEST_PRIORITY,
                     #[cfg(feature = "gpio-trace")]
                     gpiote,
                     #[cfg(feature = "gpio-trace")]
