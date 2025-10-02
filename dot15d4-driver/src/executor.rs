@@ -1,4 +1,124 @@
-use core::future::Future;
+use core::{
+    future::Future,
+    marker::PhantomData,
+    ops::{Add, Sub},
+};
+
+use paste::paste;
+
+/// A trait representing interrupt priority.
+///
+/// This trait allows us to refer to generic interrupt priorities from other
+/// traits. A (generic) constant wouldn't let us.
+///
+/// Values between two and eight are allowed, see
+/// <https://developer.arm.com/documentation/107706/0100/Exceptions-and-interrupts-overview/Exception-priority-level-definitions>.
+pub trait PriorityBits {
+    const PRIORITY_BITS: usize;
+}
+
+macro_rules! impl_priority_bits {
+    ($num_priority_bits:literal) => {
+        paste! {
+            pub struct [<PB$num_priority_bits>];
+            impl PriorityBits for [<PB$num_priority_bits>] {
+                const PRIORITY_BITS: usize = $num_priority_bits;
+            }
+
+            // TODO: Consider implementing num_traits::ops::checked::CheckedAdd instead.
+            impl Add<u8> for InterruptPriority<[<PB$num_priority_bits>]> {
+                type Output = Option<Self>;
+
+                fn add(self, rhs: u8) -> Self::Output {
+                    Self::try_from(self.0 + rhs).ok()
+                }
+            }
+
+            // TODO: Consider implementing num_traits::ops::checked::CheckedAdd instead.
+            impl Sub<u8> for InterruptPriority<[<PB$num_priority_bits>]> {
+                type Output = Option<Self>;
+
+                fn sub(self, rhs: u8) -> Self::Output {
+                    if rhs > self.0 {
+                        return None;
+                    }
+
+                    Self::try_from(self.0 - rhs).ok()
+                }
+            }
+        }
+    };
+}
+
+impl_priority_bits!(2);
+impl_priority_bits!(3);
+impl_priority_bits!(4);
+impl_priority_bits!(5);
+impl_priority_bits!(6);
+impl_priority_bits!(7);
+impl_priority_bits!(8);
+
+/// Represent interrupt priorities.
+///
+/// The number of available priority bits is platform and product specific.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InterruptPriority<PB: PriorityBits>(u8, PhantomData<PB>);
+
+impl<PB: PriorityBits> InterruptPriority<PB> {
+    const _CHECK_PRIORITY_BITS: () = {
+        assert!(PB::PRIORITY_BITS <= 8);
+    };
+
+    const HIGHEST_PRIORITY_U8: u8 = 0;
+    pub const HIGHEST_PRIORITY: Self = Self(Self::HIGHEST_PRIORITY_U8, PhantomData);
+
+    const LOWEST_PRIORITY_U8: u8 = (2u16.pow(PB::PRIORITY_BITS as u32) - 1u16) as u8;
+    pub const LOWEST_PRIORITY: Self = Self(Self::LOWEST_PRIORITY_U8, PhantomData);
+
+    /// Convert the internal representation to the left-aligned ARM NVIC
+    /// interrupt priority representation.
+    pub fn to_arm_nvic_repr(&self) -> u8 {
+        // NVIC priorities are left aligned.
+        self.0 << (8 - PB::PRIORITY_BITS)
+    }
+
+    /// Convert the left-aligned ARM NVIC interrupt priority representation to
+    /// the internal representation.
+    pub fn from_arm_nvic_repr(priority: u8) -> Self {
+        // NVIC priorities are left aligned.
+        Self(priority >> (8 - PB::PRIORITY_BITS), PhantomData)
+    }
+}
+
+impl<PB: PriorityBits> InterruptPriority<PB>
+where
+    Self: Sub<u8, Output = Option<Self>>,
+{
+    pub fn one_higher(self) -> Option<Self> {
+        self - 1
+    }
+}
+
+impl<PB: PriorityBits> InterruptPriority<PB>
+where
+    Self: Add<u8, Output = Option<Self>>,
+{
+    pub fn one_lower(self) -> Option<Self> {
+        self + 1
+    }
+}
+
+impl<PB: PriorityBits> TryFrom<u8> for InterruptPriority<PB> {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if value > Self::LOWEST_PRIORITY_U8 {
+            Err(())
+        } else {
+            Ok(Self(value, PhantomData))
+        }
+    }
+}
 
 /// A specialized executor meant as a drop-in replacement for a
 /// conventional interrupt handler inside drivers.
@@ -23,6 +143,12 @@ use core::future::Future;
 /// Assigning results to those variables directly keeps the executor simple and
 /// is more efficient.
 pub trait InterruptExecutor {
+    /// The platform's number of priority bits, see [`InterruptPriority`].
+    type PB: PriorityBits;
+
+    /// The priority at which the executor's interrupt runs.
+    fn priority(&self) -> InterruptPriority<Self::PB>;
+
     /// Associates a task with the executor and drives it to completion.
     ///
     /// Use this from your main function or any other non-async function to

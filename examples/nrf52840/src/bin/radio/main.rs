@@ -10,10 +10,9 @@ use panic_probe as _;
 
 #[cfg(feature = "_cortex-m")]
 use cortex_m::asm::wfe;
-use dot15d4::{
-    driver::{constants::PHY_MAX_PACKET_SIZE_127, executor::InterruptExecutor, radio::RadioDriver},
-    util::buffer_allocator,
-};
+use dot15d4::driver::{executor::InterruptExecutor, radio::RadioDriver};
+#[cfg(any(feature = "rx_to_tx", feature = "tx_to_tx"))]
+use dot15d4::{driver::constants::PHY_MAX_PACKET_SIZE_127, util::buffer_allocator};
 #[cfg(feature = "gpio-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor};
@@ -29,6 +28,7 @@ fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
 
+    #[cfg(any(feature = "rx_to_tx", feature = "tx_to_tx"))]
     let _buffer_allocator = buffer_allocator!(PHY_MAX_PACKET_SIZE_127, 2);
 
     let (peripherals, clocks, timer) = config_peripherals();

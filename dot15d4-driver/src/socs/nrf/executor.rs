@@ -11,15 +11,21 @@ use core::{
     task::{Context, Poll, RawWaker, Waker},
 };
 
-use cortex_m::asm::wfe;
+use cortex_m::{
+    asm::wfe,
+    peripheral::scb::VectActive,
+    peripheral::{NVIC, SCB},
+    Peripherals as CorePeripherals,
+};
 use dot15d4_util::sync::CancellationGuard;
-use nrf52840_pac::{Interrupt, NVIC};
+use nrf52840_pac::Interrupt;
 #[cfg(feature = "gpio-trace")]
 use nrf52840_pac::{Peripherals, GPIOTE};
 use portable_atomic::{AtomicPtr, Ordering};
 
 #[cfg(feature = "rtos-trace")]
 use crate::executor::trace::MISSED_ISR;
+use crate::executor::{InterruptPriority, PB3};
 
 // Safety: While the task pointer is `null` the scheduling context may mutate
 //         the outer waker. If the task pointer is non-null then the outer_waker
@@ -50,7 +56,16 @@ struct State {
     gpiote_trace_channel: Cell<usize>,
 }
 
+// TODO: Check this for new nRF products when implemented.
+pub type NrfPriorityBits = PB3;
+pub type NrfInterruptPriority = InterruptPriority<NrfPriorityBits>;
+
 impl State {
+    fn nvic() -> NVIC {
+        // Safety: We only use the NVIC to change the state of own interrupts.
+        unsafe { CorePeripherals::steal() }.NVIC
+    }
+
     const fn new(interrupt: Interrupt, raw_inner_waker: RawWaker) -> Self {
         Self {
             task_ptr: AtomicPtr::new(null_mut()),
@@ -67,12 +82,16 @@ impl State {
     /// concurrent critical sections might be active.
     ///
     /// Using the executor w/o calling `init()` will cause undefined behavior.
-    fn init(&self, _gpiote_trace_channel: usize) {
+    fn init(&self, priority: NrfInterruptPriority, _gpiote_trace_channel: usize) {
         #[cfg(feature = "rtos-trace")]
         crate::executor::trace::instrument();
 
         #[cfg(feature = "gpio-trace")]
         self.gpiote_trace_channel.set(_gpiote_trace_channel);
+
+        // Safety: We check proper priority stacking in our `block_on()` and
+        //         `spawn()` implementations to ensure memory safety.
+        unsafe { Self::nvic().set_priority(self.interrupt, priority.to_arm_nvic_repr()) };
 
         NVIC::unpend(self.interrupt);
         // Safety: See method doc. There should be no concurrent critical sections.
@@ -166,7 +185,12 @@ impl State {
         rtos_trace::trace::isr_exit_to_scheduler();
     }
 
+    fn interrupt_priority(&self) -> NrfInterruptPriority {
+        NrfInterruptPriority::from_arm_nvic_repr(NVIC::get_priority(self.interrupt))
+    }
+
     fn block_on<Task: Future<Output = ()>>(&self, task: Task) {
+        self.assert_priority_stacking();
         debug_assert!(NVIC::is_enabled(self.interrupt), "not initialized");
 
         // Safety: The pinned task must not move while the interrupt accesses
@@ -202,6 +226,7 @@ impl State {
 
     async unsafe fn spawn<Task: Future<Output = ()>>(&self, task: Task) {
         debug_assert!(NVIC::is_enabled(self.interrupt), "not initialized");
+        self.assert_priority_stacking();
 
         // Safety: The pinned task must not move while the interrupt accesses
         //         it. Note that this is not automatically enforced by Pin (as
@@ -281,6 +306,21 @@ impl State {
         #[allow(clippy::drop_non_drop)]
         drop(pinned_task);
     }
+
+    fn assert_priority_stacking(&self) {
+        debug_assert!({
+            let active_prio = match SCB::vect_active() {
+                VectActive::Interrupt { irqn } => Self::nvic().ipr[irqn as usize].read(),
+                VectActive::ThreadMode => 0xff,
+                _ => unreachable!(),
+            };
+            let own_prio = NVIC::get_priority(self.interrupt);
+
+            // Lower values represent higher priorities: The executor must run
+            // at a higher priority than the calling context
+            own_prio < active_prio
+        });
+    }
 }
 
 // Safety: We synchronize the contents of state via the task atomic.
@@ -297,9 +337,12 @@ macro_rules! nrf_interrupt_executor {
             use nrf52840_pac::{interrupt, $peripheral, Interrupt};
             use static_cell::StaticCell;
 
-            use $crate::{executor::InterruptExecutor, interrupt_executor};
+            use $crate::{
+                executor::{InterruptExecutor, InterruptPriority},
+                interrupt_executor,
+            };
 
-            use super::State;
+            use super::{NrfInterruptPriority, NrfPriorityBits, State};
 
             static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor);
             static STATE: State =
@@ -315,14 +358,21 @@ macro_rules! nrf_interrupt_executor {
                 pub(super) fn init(
                     &'static mut self,
                     _peripheral: $peripheral,
+                    priority: NrfInterruptPriority,
                     gpiote_trace_channel: usize,
                 ) -> &'static mut Self {
-                    STATE.init(gpiote_trace_channel);
+                    STATE.init(priority, gpiote_trace_channel);
                     self
                 }
             }
 
             impl InterruptExecutor for NrfInterruptExecutor {
+                type PB = NrfPriorityBits;
+
+                fn priority(&self) -> InterruptPriority<Self::PB> {
+                    STATE.interrupt_priority()
+                }
+
                 fn block_on<Task: Future<Output = ()>>(&mut self, task: Task) {
                     STATE.block_on(task);
                 }
@@ -349,14 +399,17 @@ macro_rules! nrf_interrupt_executor {
         ///         requested.
         pub fn $mod(
             peripheral: nrf52840_pac::$peripheral,
+            priority: $crate::socs::nrf::executor::NrfInterruptPriority,
             #[cfg(feature = "gpio-trace")] _gpiote: &GPIOTE,
             #[cfg(feature = "gpio-trace")] gpiote_trace_channel: usize,
         ) -> &'static mut $mod::NrfInterruptExecutor {
             #[cfg(not(feature = "gpio-trace"))]
             let gpiote_trace_channel = 0;
-            $mod::EXECUTOR
-                .init($mod::NrfInterruptExecutor)
-                .init(peripheral, gpiote_trace_channel)
+            $mod::EXECUTOR.init($mod::NrfInterruptExecutor).init(
+                peripheral,
+                priority,
+                gpiote_trace_channel,
+            )
         }
     };
 }

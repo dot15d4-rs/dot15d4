@@ -1,7 +1,7 @@
 #![no_std]
 
 use dot15d4::driver::socs::nrf::{
-    executor::{self as executor, swi0::NrfInterruptExecutor},
+    executor::{self as executor, swi0::NrfInterruptExecutor, NrfInterruptPriority},
     export::{
         pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, RADIO, SCB, UICR},
         Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
@@ -245,6 +245,7 @@ pub fn swi_executor(
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     executor::swi0(
         swi,
+        NrfInterruptPriority::LOWEST_PRIORITY,
         #[cfg(feature = "gpio-trace")]
         gpiote,
         #[cfg(feature = "gpio-trace")]
