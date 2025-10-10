@@ -15,7 +15,6 @@ embassy-net-driver = { git = "https://github.com/fg-cfh/embassy.git", branch = "
 embedded-hal-async = "1.0.0"
 
 defmt = { version = "1.0", optional = true }
-defmt-rtt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 
 embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
@@ -34,12 +33,11 @@ nrf52840 = ["dep:embassy-nrf", "embassy-nrf/nrf52840", "nrf"]
 log = ["dep:log", "dot15d4/log"]
 defmt = [
     "dep:defmt",
-    "dep:defmt-rtt",
     "dot15d4/defmt",
     "embassy-sync/defmt",
     "embassy-nrf/defmt",
 ]
-rtos-trace = ["dep:rtos-trace", "dot15d4/rtos-trace", "log"]
+rtos-trace = ["dep:rtos-trace", "dot15d4/rtos-trace"]
 
 _clippy-std = []
-_clippy-no-std = ["nrf52840", "rtos-trace"]
+_clippy-no-std = ["nrf52840"]

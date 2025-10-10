@@ -8,12 +8,18 @@
 
 pub mod allocator;
 pub mod frame;
+pub mod log;
+#[cfg(any(
+    feature = "defmt",
+    feature = "log",
+    feature = "rtos-trace",
+    feature = "sync"
+))]
+pub mod rtt;
 pub mod sync;
 pub mod tokens;
 #[cfg(feature = "rtos-trace")]
 pub mod trace;
-
-pub mod log;
 
 #[cfg(any(feature = "defmt", feature = "log"))]
 pub use log::*;

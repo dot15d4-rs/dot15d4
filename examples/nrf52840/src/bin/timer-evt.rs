@@ -3,10 +3,9 @@
 #![no_std]
 #![no_main]
 #![cfg(feature = "nrf52840")]
+#![allow(clippy::uninlined_format_args)]
 
 use core::{future::poll_fn, task::Poll};
-
-use panic_probe as _;
 
 use dot15d4::{
     driver::{
@@ -23,17 +22,21 @@ nrf_interrupt_executor!(gpiote_executor, GPIOTE);
 #[cortex_m_rt::entry]
 fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
-    dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
+    let start_tracing = dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
 
-    let (peripherals, _, timer) = config_peripherals();
+    let resources = config_peripherals(
+        #[cfg(feature = "rtos-trace")]
+        start_tracing,
+    );
 
     let swi_executor = swi_executor();
     let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
 
-    let gpiote = peripherals.gpiote;
+    let gpiote = resources.gpiote;
     let gpiote_channel = GpioteChannel::TimerEvent as usize;
     let gpiote_mask = 1 << gpiote_channel;
     let gpiote_event = &gpiote.events_in[gpiote_channel];
+    let timer = resources.timer;
 
     swi_executor.block_on(async {
         loop {
@@ -60,8 +63,9 @@ fn main() -> ! {
             let result = high_precision_timer
                 .poll_event(HardwareEvent::GpioToggled)
                 .unwrap();
-            let result = result.duration_since_epoch().to_micros();
-            info!("Captured instant: {result}\0");
+            let _result = result.duration_since_epoch().to_micros();
+
+            info!("Captured instant: {}\0", _result);
         }
     });
 

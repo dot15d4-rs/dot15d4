@@ -21,7 +21,7 @@ use dot15d4_driver::{
         export::pac::interrupt,
     },
 };
-use dot15d4_util::info;
+use dot15d4_util::{info, init_rtt_channels, rtt::export::set_defmt_channel};
 use heapless::Vec;
 use nrf52840_pac::{Peripherals, CLOCK, NVIC};
 
@@ -59,7 +59,8 @@ impl Results {
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    dot15d4_util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
+    let channels = init_rtt_channels!();
+    set_defmt_channel(channels.up.0);
 
     let Peripherals {
         POWER: power,
@@ -127,8 +128,6 @@ fn main() -> ! {
         // Safety: All chunks contain at least one value.
         info!("bucket {}: {}\0", timer_ticks, occurrences);
     }
-
-    rtos_trace::trace::stop();
 
     loop {
         wfe();

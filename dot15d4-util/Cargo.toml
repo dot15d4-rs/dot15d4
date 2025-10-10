@@ -17,10 +17,12 @@ log = { version = "0.4", optional = true }
 
 cty = { version = "0.2", optional = true }
 rtos-trace = { version = "0.2", optional = true }
-systemview-target = { version = "0.2", features = [
-    "log",
+rtt-target = { version = "0.6.2", optional = true }
+systemview-target = { version = "0.2.1", features = [
     "callbacks-app",
-    "callbacks-os",  # required for embassy integration
+    "callbacks-os",       # required for embassy integration
+    "log",
+    "ext-rtt-channels-3", # log/defmt, sync and systemview
 ], optional = true }
 
 [dev-dependencies]
@@ -41,19 +43,19 @@ rand = "0.9"
 [features]
 std = ["bitmaps/std", "allocator-api2/std"]
 
-defmt = ["dep:defmt"]
-log = ["dep:log"]
-
+defmt = ["dep:defmt", "dep:rtt-target", "rtt-target/defmt"]
+log = ["dep:log", "dep:rtt-target"]
 rtos-trace = [
     "dep:cty",
     "dep:rtos-trace",
+    "dep:rtt-target",
     "dep:systemview-target",
     "embassy-executor/rtos-trace",
-    "log",
 ]
+sync = ["dep:rtt-target"]
 
 _clippy-std = ["std"]
-_clippy-no-std = ["rtos-trace"]
+_clippy-no-std = []
 
 [[example]]
 name = "sync-channel-buffered"

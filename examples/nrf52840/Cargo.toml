@@ -17,10 +17,6 @@ required-features = ["timer-trace"]
 name = "timer-evt"
 required-features = ["timer-trace"]
 
-[[bin]]
-name = "radio-sender"
-required-features = ["timer-trace"]
-
 [dependencies]
 cortex-m = { version = "0.7", features = [
     "inline-asm",
@@ -49,10 +45,9 @@ embassy-net = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-tr
 ], optional = true }
 
 defmt = { version = "1.0", optional = true }
-defmt-rtt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
-
 rtos-trace = { version = "0.2", optional = true }
+rtt-target = { version = "0.6.2", optional = true }
 
 [features]
 default = ["nrf52840", "embassy-net", "all_radio_tests"]
@@ -61,31 +56,34 @@ embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
 
 defmt = [
     "dep:defmt",
-    "dep:defmt-rtt",
+    "dep:rtt-target",
     "dot15d4/defmt",
     "dot15d4-embassy/defmt",
     "embassy-executor/defmt",
     "embassy-net/defmt",
     "panic-probe/print-defmt",
 ]
-log = ["dep:log", "dot15d4/log", "dot15d4-embassy/log"]
+log = ["dep:log", "dep:rtt-target", "dot15d4/log", "dot15d4-embassy/log"]
 
 executor-trace = ["dot15d4/executor-trace", "_gpio-trace"]
 timer-trace = ["dot15d4/timer-trace", "_gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
+    "dep:rtt-target",
     "dep:embassy-nrf",
     "embassy-executor/rtos-trace",
     "dot15d4/rtos-trace",
     "dot15d4-embassy/rtos-trace",
-    "log",
 ]
 _gpio-trace = []
 
 # Radio test scenarios
-all_radio_tests = ["rx_to_tx", "tx_to_tx"]
-rx_to_tx = []
-tx_to_tx = []
+all_radio_tests = ["rx_tx_rx", "tx_tx"]
+rx_tx_rx = []
+tx_tx = []
+
+# Synchronize test execution between host and target.
+sync = ["dot15d4/sync", "dep:rtt-target"]
 
 # An internal helper attribute that allows us to apply clippy in std mode.
 nrf52840 = [
@@ -96,4 +94,4 @@ nrf52840 = [
     "dot15d4-embassy/nrf52840",
 ]
 _clippy-std = ["embassy-executor/arch-std"]
-_clippy-no-std = ["default", "rtos-trace"]
+_clippy-no-std = ["default"]

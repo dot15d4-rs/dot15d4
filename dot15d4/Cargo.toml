@@ -17,7 +17,7 @@ log = { version = "0.4.21", optional = true }
 defmt = { version = "1.0", optional = true }
 
 paste = "1.0"
-heapless = { version = "0.8.0" }
+heapless = { version = "0.8" }
 
 arbitrary = { version = "1.3.2", features = ["derive"], optional = true }
 
@@ -30,10 +30,10 @@ default = ["security", "ies", "dot15d4-frame/strict"]
 std = ["log"]
 
 ## Use tracing for logging
-log = ["dep:log", "dot15d4-util/log"]
+log = ["dep:log", "dot15d4-driver/log", "dot15d4-util/log"]
 
 ## Use defmt for logging
-defmt = ["dep:defmt", "dot15d4-util/defmt"]
+defmt = ["dep:defmt", "dot15d4-driver/defmt", "dot15d4-util/defmt"]
 
 ## Enable fuzzing
 fuzz = ["dep:arbitrary"]
@@ -51,11 +51,11 @@ rtos-trace = [
     "dep:rtos-trace",
     "dot15d4-util/rtos-trace",
     "dot15d4-driver/rtos-trace",
-    "log",
 ]
+sync = ["dot15d4-util/sync"]
 
 # Support for Nordic nrf52840
 nrf52840 = ["dot15d4-driver/nrf52840"]
 
 _clippy-std = ["std", "fuzz"]
-_clippy-no-std = ["rtos-trace"]
+_clippy-no-std = ["default"]

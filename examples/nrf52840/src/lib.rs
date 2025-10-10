@@ -1,6 +1,8 @@
 #![no_std]
 #![cfg(feature = "nrf52840")]
 
+use panic_probe as _;
+
 #[cfg(feature = "timer-trace")]
 use dot15d4::driver::socs::nrf::NrfRadioTimerTracingConfig;
 use dot15d4::driver::{
@@ -14,6 +16,17 @@ use dot15d4::driver::{
         NrfRadioSleepTimer,
     },
 };
+#[cfg(feature = "defmt")]
+use dot15d4::util::rtt::export::set_defmt_channel;
+#[cfg(feature = "sync")]
+use dot15d4::util::rtt::export::{DownChannel, UpChannel};
+#[cfg(any(
+    feature = "log",
+    feature = "defmt",
+    feature = "rtos-trace",
+    feature = "sync"
+))]
+use dot15d4::util::rtt::init_rtt_channels;
 
 #[cfg(feature = "_gpio-trace")]
 pub mod gpio_trace {
@@ -130,17 +143,21 @@ pub enum PpiChannel {
 /// feature of the timer.
 const TIMER_PPI_CHANNEL_GROUP: usize = 0;
 
-pub struct AvailablePeripherals {
+pub struct AvailableResources {
     #[cfg(feature = "_gpio-trace")]
     pub gpiote: GPIOTE,
     pub radio: RADIO,
+    pub clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
+    pub timer: NrfRadioSleepTimer,
+    #[cfg(feature = "sync")]
+    pub sync_in: DownChannel,
+    #[cfg(feature = "sync")]
+    pub sync_out: UpChannel,
 }
 
-pub fn config_peripherals() -> (
-    AvailablePeripherals,
-    Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
-    NrfRadioSleepTimer,
-) {
+pub fn config_peripherals(
+    #[cfg(feature = "rtos-trace")] start_tracing: fn(),
+) -> AvailableResources {
     let peripherals = Peripherals::take().unwrap();
     let core_peripherals = CorePeripherals::take().unwrap();
 
@@ -148,6 +165,20 @@ pub fn config_peripherals() -> (
 
     // Enable the DC/DC converter
     peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
+
+    #[cfg(any(
+        feature = "log",
+        feature = "defmt",
+        feature = "rtos-trace",
+        feature = "sync"
+    ))]
+    let _channels = init_rtt_channels!();
+
+    #[cfg(feature = "defmt")]
+    set_defmt_channel(_channels.up.0);
+
+    #[cfg(feature = "rtos-trace")]
+    start_tracing();
 
     #[cfg(feature = "_gpio-trace")]
     {
@@ -187,13 +218,17 @@ pub fn config_peripherals() -> (
         timer_tracing_config,
     );
 
-    let available_peripherals = AvailablePeripherals {
+    AvailableResources {
         #[cfg(feature = "_gpio-trace")]
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
-    };
-
-    (available_peripherals, clocks, timer)
+        clocks,
+        timer,
+        #[cfg(feature = "sync")]
+        sync_in: _channels.down.1,
+        #[cfg(feature = "sync")]
+        sync_out: _channels.up.1,
+    }
 }
 
 fn config_reset(uicr: &UICR, nvmc: &NVMC, scb: &SCB) {
