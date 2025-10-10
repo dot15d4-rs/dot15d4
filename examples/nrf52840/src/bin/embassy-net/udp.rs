@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 
-use panic_probe as _;
-
 use dot15d4::driver::{
     radio::RadioDriver,
     socs::nrf::NrfRadioDriver,
@@ -13,6 +11,7 @@ use dot15d4_embassy::{
 };
 #[cfg(feature = "executor-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
+use dot15d4_examples_nrf52840::AvailableResources;
 use embassy_executor::Spawner;
 use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
@@ -26,13 +25,22 @@ const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
-    dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
+    let start_tracing = dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
-    let (peripherals, clocks, mut timer) = dot15d4_examples_nrf52840::config_peripherals();
+    let AvailableResources {
+        radio,
+        clocks,
+        mut timer,
+        ..
+    } = dot15d4_examples_nrf52840::config_peripherals(
+        #[cfg(feature = "rtos-trace")]
+        start_tracing,
+    );
+
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
-        peripherals.radio,
+        radio,
         clocks,
         timer,
         #[cfg(feature = "executor-trace")]

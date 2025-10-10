@@ -12,11 +12,6 @@ pub mod export {
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
-    #[cfg(feature = "defmt")]
-    compile_error!(
-        "Tracing cannot be enabled at the same time as defmt. Logs will be visible in the SystemView application if the 'log' feature is enabled."
-    );
-
     use dot15d4::util::trace::TraceOffset;
 
     const OFFSET: TraceOffset = TraceOffset::Dot15d4Embassy;

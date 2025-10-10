@@ -3,8 +3,8 @@ use dot15d4::{
         radio::{
             phy::Ifs,
             tasks::{
-                CompletedRadioTransition::*, CompletingRxState, ExternalRadioTransition,
-                ListeningRxState, OffState, RxResult, TaskOff, TaskRx, TaskTx, TxResult, TxState,
+                CompletedRadioTransition::*, ExternalRadioTransition, OffState,
+                SelfRadioTransition, TaskOff, TaskTx, TxResult, TxState,
             },
             DriverConfig, RadioDriver,
         },
@@ -13,7 +13,7 @@ use dot15d4::{
     util::allocator::{BufferAllocator, IntoBuffer},
 };
 
-use crate::util::{rx_task, tx_task};
+use crate::util::{log_timing, tx_task};
 
 pub async fn scenarios<Config: DriverConfig>(
     radio: RadioDriver<Config, TaskOff>,
@@ -22,7 +22,6 @@ pub async fn scenarios<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     let anchor_time = timer.now();
@@ -33,11 +32,13 @@ where
     // timed, CCA
     let (radio, _) = timed(radio, anchor_time, true, buffer_allocator).await;
 
-    // best effort, no CCA
+    // best effort, no CCA, SIFS
     let radio = best_effort(radio, false, buffer_allocator).await;
 
-    // best effort, CCA
+    // best effort, CCA, SIFS
     best_effort(radio, true, buffer_allocator).await
+
+    // TODO: Test LIFS
 }
 
 async fn best_effort<Config: DriverConfig>(
@@ -47,41 +48,31 @@ async fn best_effort<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
-    // off -> rx
-    let listening_rx_radio = match off_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), None)
-        .complete_and_transition()
-        .await
-    {
-        Entered(radio_transition_result) => radio_transition_result.this_state,
-        _ => unreachable!(),
-    };
-    let completing_rx_radio = match listening_rx_radio.stop_listening(None).await {
-        Ok((_, completing_rx_radio)) => completing_rx_radio,
-        Err(_) => unreachable!(),
-    };
-
-    // rx -> tx
-    let tx_radio = match completing_rx_radio
-        .schedule_tx(
-            tx_task::<Config>(cca, buffer_allocator),
-            None,
-            Some(Ifs::short()),
-            false,
-        )
+    // off -> tx
+    let mut tx_radio = match off_radio
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), None)
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                RxResult::RxWindowEnded(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            };
+            log_timing("Off->Tx (BE)", &radio_transition_result, cca);
+            radio_transition_result.this_state
+        }
+        _ => unreachable!(),
+    };
+
+    // tx -> tx
+    tx_radio = match tx_radio
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Ifs::short())
+        .complete_and_transition()
+        .await
+    {
+        Entered(radio_transition_result) => {
+            log_timing("Tx->Tx  (BE)", &radio_transition_result, cca);
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -90,6 +81,7 @@ where
     // tx -> off
     match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
+            log_timing("Tx->Off (BE)", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
@@ -106,48 +98,34 @@ async fn timed<Config: DriverConfig>(
 ) -> (RadioDriver<Config, TaskOff>, LocalClockInstant)
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     let frame_period = 10.millis();
 
-    // off -> rx
-    let rx_start = anchor_time + frame_period;
-    let listening_rx_radio = match off_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), Some(rx_start))
-        .complete_and_transition()
-        .await
-    {
-        Entered(radio_transition_result) => radio_transition_result.this_state,
-        _ => unreachable!(),
-    };
-    let completing_rx_radio = match listening_rx_radio
-        .stop_listening(Some(rx_start + 5.millis()))
-        .await
-    {
-        Ok((_, completing_rx_radio)) => completing_rx_radio,
-        Err(_) => unreachable!(),
-    };
-
-    // rx -> tx
-    let tx_at = rx_start + frame_period;
-    let tx_radio = match completing_rx_radio
-        .schedule_tx(
-            tx_task::<Config>(cca, buffer_allocator),
-            Some(tx_at),
-            None,
-            false,
-        )
+    // off -> tx
+    let tx_at = anchor_time + frame_period;
+    let mut tx_radio = match off_radio
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Some(tx_at))
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            match radio_transition_result.prev_task_result {
-                RxResult::RxWindowEnded(radio_frame) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-                _ => unreachable!(),
-            };
+            log_timing("Off->Tx (T)", &radio_transition_result, cca);
+            radio_transition_result.this_state
+        }
+        _ => unreachable!(),
+    };
+
+    // tx -> tx
+    tx_radio = match tx_radio
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Ifs::short())
+        .complete_and_transition()
+        .await
+    {
+        Entered(radio_transition_result) => {
+            log_timing("Tx->Tx  (T)", &radio_transition_result, cca);
+            let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
+            unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -156,6 +134,7 @@ where
     // tx -> off
     let off_radio = match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
+            log_timing("Tx->Off (T)", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state

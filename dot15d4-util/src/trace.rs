@@ -107,10 +107,13 @@ macro_rules! instrument {
         }
 
         rtos_trace::global_os_callbacks! {Application};
+
+        start_tracing
     }};
 
     (embassy cpu_freq: $sysclock_freq:literal Hz) => {{
         $crate::instrument!(_inner: $sysclock_freq);
+        start_tracing
     }};
 
     (_inner: $sysclock_freq:literal) => {
@@ -136,12 +139,17 @@ macro_rules! instrument {
         }
 
         static SYSTEMVIEW: systemview_target::SystemView = systemview_target::SystemView::new();
-        SYSTEMVIEW.init();
 
-        log::set_logger(&SYSTEMVIEW).ok();
-        log::set_max_level(log::LevelFilter::Info);
+        fn start_tracing() {
+            SYSTEMVIEW.init();
 
-        rtos_trace::trace::start();
+            #[cfg(feature = "log")] {
+                log::set_logger(&SYSTEMVIEW).ok();
+                log::set_max_level(log::LevelFilter::Info);
+            }
+
+            rtos_trace::trace::start();
+        }
     };
 }
 

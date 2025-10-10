@@ -3,8 +3,6 @@
 #![no_std]
 #![no_main]
 
-use panic_probe as _;
-
 #[cfg(feature = "rtos-trace")]
 use embassy_nrf as _;
 
@@ -21,18 +19,19 @@ use embassy_executor::Spawner;
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
-    dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
+    let start_tracing = dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
-    let (peripherals, _, mut timer) = config_peripherals();
+    let resources = config_peripherals(
+        #[cfg(feature = "rtos-trace")]
+        start_tracing,
+    );
 
     let toggle_alarm_pin = || {
-        toggle_gpiote_pin(
-            &peripherals.gpiote,
-            PIN_TIMER_SIGNAL.gpiote_channel as usize,
-        );
+        toggle_gpiote_pin(&resources.gpiote, PIN_TIMER_SIGNAL.gpiote_channel as usize);
     };
 
     let executor = swi_executor();
+    let mut timer = resources.timer;
 
     let timer_task = async {
         let mut timeout = timer.now();

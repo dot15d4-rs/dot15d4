@@ -70,11 +70,6 @@ where
 pub mod trace {
     use crate::util::trace::TraceOffset;
 
-    #[cfg(feature = "defmt")]
-    compile_error!(
-        "Tracing cannot be enabled at the same time as defmt. Logs will be visible in the SystemView application if the 'log' feature is enabled."
-    );
-
     const OFFSET: TraceOffset = TraceOffset::Dot15d4;
 
     // Tasks

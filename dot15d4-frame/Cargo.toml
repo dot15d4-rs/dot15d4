@@ -26,4 +26,4 @@ ies = []
 default = ["strict", "security", "ies"]
 
 _clippy-std = []
-_clippy-no-std = []
+_clippy-no-std = ["default"]
