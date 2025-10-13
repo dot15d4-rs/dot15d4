@@ -14,9 +14,9 @@ use nrf52840_pac::{self as pac, radio::state::STATE_A};
 
 #[cfg(feature = "rtos-trace")]
 use crate::radio::trace::{
-    TASK_FALL_BACK, TASK_OFF_RUN, TASK_OFF_SCHEDULE, TASK_RX_FRAME_INFO, TASK_RX_FRAME_STARTED,
-    TASK_RX_RUN, TASK_RX_SCHEDULE, TASK_TRANSITION_TO_OFF, TASK_TRANSITION_TO_RX,
-    TASK_TRANSITION_TO_TX, TASK_TX_RUN, TASK_TX_SCHEDULE,
+    MARKER_RX_FRAME_INFO, MARKER_RX_FRAME_STARTED, MARKER_RX_WINDOW_ENDED, TASK_FALL_BACK,
+    TASK_OFF_COMPLETE, TASK_OFF_ENTRY, TASK_OFF_SCHEDULE, TASK_RX_COMPLETE, TASK_RX_ENTRY,
+    TASK_RX_SCHEDULE, TASK_TX_COMPLETE, TASK_TX_ENTRY, TASK_TX_SCHEDULE,
 };
 use crate::{
     executor::InterruptExecutor,
@@ -403,9 +403,6 @@ impl<State> RadioDriverApi for RadioDriver<NrfRadioDriver, State> {
 
 impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
     async fn transition(&mut self) -> Result<LocalClockInstant, RadioTaskError<TaskOff>> {
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_OFF);
-
         // Shortcut in case we're coming from an ended rx window, see the
         // special case in the implementation of
         // `ExternalRadioTransition::complete_and_transition()`.
@@ -422,6 +419,10 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
                     if r.events_disabled.read().events_disabled().bit_is_set() {
                         r.intenclr.write(|w| w.disabled().set_bit());
                         r.events_disabled.reset();
+
+                        #[cfg(feature = "rtos-trace")]
+                        rtos_trace::trace::task_exec_begin(TASK_OFF_ENTRY);
+
                         Poll::Ready(())
                     } else {
                         r.intenset.write(|w| w.disabled().set_bit());
@@ -445,7 +446,7 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
 
     async fn completion(&mut self, _: bool) -> Result<OffResult, RadioTaskError<TaskOff>> {
         #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_OFF_RUN);
+        rtos_trace::trace::task_exec_begin(TASK_OFF_COMPLETE);
 
         Ok(OffResult::Off)
     }
@@ -627,9 +628,6 @@ impl RadioDriver<NrfRadioDriver, TaskRx> {
 
 impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
     async fn transition(&mut self) -> Result<LocalClockInstant, RadioTaskError<TaskRx>> {
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_RX);
-
         let is_back_to_back_rx = Self::is_back_to_back_rx();
 
         // Wait until the state enters.
@@ -643,6 +641,10 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
                             if r.events_framestart.read().events_framestart().bit_is_set() {
                                 r.intenclr.write(|w| w.framestart().set_bit());
                                 r.events_framestart.reset();
+
+                                #[cfg(feature = "rtos-trace")]
+                                rtos_trace::trace::marker(MARKER_RX_FRAME_STARTED);
+
                                 Poll::Ready(())
                             } else {
                                 r.intenset.write(|w| w.framestart().set_bit());
@@ -656,6 +658,10 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
                                 r.intenclr.write(|w| w.rxready().set_bit());
                                 r.events_disabled.reset();
                                 r.events_rxready.reset();
+
+                                #[cfg(feature = "rtos-trace")]
+                                rtos_trace::trace::task_exec_begin(TASK_RX_ENTRY);
+
                                 Poll::Ready(())
                             } else {
                                 // Double check state in case the radio was already in
@@ -676,9 +682,6 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         }
 
         let entry_event = if is_back_to_back_rx {
-            #[cfg(feature = "rtos-trace")]
-            rtos_trace::trace::marker(TASK_RX_FRAME_STARTED);
-
             HardwareEvent::RadioFrameStarted
         } else {
             HardwareEvent::RadioRxEnabled
@@ -715,14 +718,14 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         &mut self,
         rollback_on_crcerror: bool,
     ) -> Result<RxResult, RadioTaskError<TaskRx>> {
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_RX_RUN);
-
         let r = Self::radio();
 
         let frame_started = self.frame_started().is_some();
         debug_assert!(frame_started || r.state.read().state().is_disabled());
         if !frame_started {
+            #[cfg(feature = "rtos-trace")]
+            rtos_trace::trace::task_exec_begin(TASK_RX_COMPLETE);
+
             dma_end_fence();
 
             return Ok(RxResult::RxWindowEnded(self.take_task().radio_frame));
@@ -737,6 +740,10 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
                     if r.events_end.read().events_end().bit_is_set() {
                         r.intenclr.write(|w| w.end().set_bit());
                         r.events_end.reset();
+
+                        #[cfg(feature = "rtos-trace")]
+                        rtos_trace::trace::task_exec_begin(TASK_RX_COMPLETE);
+
                         Poll::Ready(())
                     } else {
                         r.intenset.write(|w| w.end().set_bit());
@@ -872,6 +879,10 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                         if r.events_framestart.read().events_framestart().bit_is_set() {
                             r.intenclr.write(|w| w.framestart().set_bit());
                             r.events_framestart.reset();
+
+                            #[cfg(feature = "rtos-trace")]
+                            rtos_trace::trace::marker(MARKER_RX_FRAME_STARTED);
+
                             Poll::Ready(())
                         } else {
                             r.intenset.write(|w| w.framestart().set_bit());
@@ -884,9 +895,6 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 })
                 .await;
         }
-
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::marker(TASK_RX_FRAME_STARTED);
 
         let rx_rmarker = self
             .timer()
@@ -942,6 +950,15 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                             });
                             r.events_disabled.reset();
                             r.events_framestart.reset();
+
+                            if disabled {
+                                #[cfg(feature = "rtos-trace")]
+                                rtos_trace::trace::marker(MARKER_RX_WINDOW_ENDED);
+                            } else {
+                                #[cfg(feature = "rtos-trace")]
+                                rtos_trace::trace::marker(MARKER_RX_FRAME_STARTED);
+                            }
+
                             Poll::Ready(())
                         } else {
                             r.intenset.write(|w| {
@@ -960,6 +977,9 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             while r.events_disabled.read().events_disabled().bit_is_clear() {}
             r.events_disabled.reset();
 
+            #[cfg(feature = "rtos-trace")]
+            rtos_trace::trace::marker(MARKER_RX_WINDOW_ENDED);
+
             disabled = true;
         }
 
@@ -970,9 +990,6 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 .unwrap();
             StopListeningResult::RxWindowEnded(disabled_at)
         } else {
-            #[cfg(feature = "rtos-trace")]
-            rtos_trace::trace::marker(TASK_RX_FRAME_STARTED);
-
             debug_assert!(r.events_disabled.read().events_disabled().bit_is_clear());
 
             let rx_rmarker = self
@@ -1169,7 +1186,7 @@ impl CompletingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         };
 
         #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::marker(TASK_RX_FRAME_INFO);
+        rtos_trace::trace::marker(MARKER_RX_FRAME_INFO);
 
         Some(preliminary_frame_info.unwrap_or(PreliminaryFrameInfo {
             mpdu_length: 0,
@@ -1512,9 +1529,6 @@ impl CompletingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 ///       which needs to observe that event.
 impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     async fn transition(&mut self) -> Result<LocalClockInstant, RadioTaskError<TaskTx>> {
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_TRANSITION_TO_TX);
-
         let r = Self::radio();
 
         let tx_task = self.ref_task();
@@ -1566,6 +1580,10 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
                         // pre-condition to being able to schedule (and observe)
                         // a subsequent rx task.
                         r.events_framestart.reset();
+
+                        #[cfg(feature = "rtos-trace")]
+                        rtos_trace::trace::task_exec_begin(TASK_TX_ENTRY);
+
                         Poll::Ready(())
                     } else {
                         r.intenset.write(|w| w.framestart().set_bit());
@@ -1589,9 +1607,6 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     }
 
     async fn completion(&mut self, _: bool) -> Result<TxResult, RadioTaskError<TaskTx>> {
-        #[cfg(feature = "rtos-trace")]
-        rtos_trace::trace::task_exec_begin(TASK_TX_RUN);
-
         let r = Self::radio();
 
         unsafe {
@@ -1601,6 +1616,10 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
                     if r.events_end.read().events_end().bit_is_set() {
                         r.intenclr.write(|w| w.end().set_bit());
                         r.events_end.reset();
+
+                        #[cfg(feature = "rtos-trace")]
+                        rtos_trace::trace::task_exec_begin(TASK_TX_COMPLETE);
+
                         Poll::Ready(())
                     } else {
                         r.intenset.write(|w| w.end().set_bit());
