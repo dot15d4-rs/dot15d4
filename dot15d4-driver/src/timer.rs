@@ -231,80 +231,98 @@ pub trait HighPrecisionTimer {
 
 #[cfg(feature = "rtos-trace")]
 pub mod trace {
-    use dot15d4_util::trace::{
-        systemview_record_u32, systemview_record_u32x2, systemview_record_u32x3,
-        systemview_register_module, SystemviewModule,
-    };
-
     use crate::timer::{HardwareEvent, HardwareSignal, LocalClockInstant};
 
-    // Events
-    #[derive(Clone, Copy)]
-    enum TraceEvents {
-        RtcAlarm,
-        StartHpTimer,
-        ScheduleTimedSignal,
-        ObserveEvent,
-        NumEvents,
-    }
+    #[cfg(feature = "timer-trace")]
+    mod internal {
+        pub use dot15d4_util::trace::{
+            systemview_record_u32, systemview_record_u32x2, systemview_record_u32x3,
+            systemview_register_module, SystemviewModule,
+        };
 
-    impl TraceEvents {
-        fn event_id(&self) -> u32 {
-            *self as u32 + unsafe { TIMER_MODULE }.event_offset()
+        use crate::timer::LocalClockInstant;
+
+        // Events
+        #[derive(Clone, Copy)]
+        pub enum TraceEvents {
+            RtcAlarm,
+            StartHpTimer,
+            ScheduleTimedSignal,
+            ObserveEvent,
+            NumEvents,
+        }
+
+        impl TraceEvents {
+            pub fn event_id(&self) -> u32 {
+                *self as u32 + unsafe { TIMER_MODULE }.event_offset()
+            }
+        }
+
+        static TIMER_MODULE_DESC: &str = "M=timer, \
+            0 Alarm µs=%u rt=%u, \
+            1 Start µs=%u rt=%u, \
+            2 Sig µs=%u tt=%u s=%u \
+            3 Evt e=%u\0";
+        const _: () = assert!(TIMER_MODULE_DESC.len() <= 128);
+        pub static mut TIMER_MODULE: SystemviewModule =
+            SystemviewModule::new(TIMER_MODULE_DESC, TraceEvents::NumEvents as u32);
+
+        #[inline(always)]
+        pub fn to_micros_remainder(instant: LocalClockInstant) -> u32 {
+            // The largest power of 10 that can be represented in a u32.
+            const MAX_U32_POW_10: u64 = 1_000_000_000;
+            (instant.duration_since_epoch().to_micros() % MAX_U32_POW_10) as u32
         }
     }
 
-    use TraceEvents::*;
-
-    static TIMER_MODULE_DESC: &str = "M=timer, \
-        0 Alarm µs=%u rt=%u, \
-        1 Start µs=%u rt=%u, \
-        2 Sig µs=%u tt=%u s=%u \
-        3 Evt e=%u\0";
-    static mut TIMER_MODULE: SystemviewModule =
-        SystemviewModule::new(TIMER_MODULE_DESC, NumEvents as u32);
+    #[cfg(feature = "timer-trace")]
+    use internal::{TraceEvents::*, *};
 
     pub fn instrument() {
-        unsafe { systemview_register_module(&raw mut TIMER_MODULE) };
+        #[cfg(feature = "timer-trace")]
+        unsafe {
+            systemview_register_module(&raw mut TIMER_MODULE)
+        };
     }
 
     #[inline(always)]
-    fn to_micros_remainder(instant: LocalClockInstant) -> u32 {
-        // The largest power of 10 that can be represented in a u32.
-        const MAX_U32_POW_10: u64 = 1_000_000_000;
-        (instant.duration_since_epoch().to_micros() % MAX_U32_POW_10) as u32
+    pub fn record_rtc_alarm(_instant: LocalClockInstant, _rtc_ticks: u32) {
+        #[cfg(feature = "timer-trace")]
+        systemview_record_u32x2(
+            RtcAlarm.event_id(),
+            to_micros_remainder(_instant),
+            _rtc_ticks,
+        );
     }
 
     #[inline(always)]
-    pub fn record_rtc_alarm(instant: LocalClockInstant, rtc_ticks: u32) {
-        systemview_record_u32x2(RtcAlarm.event_id(), to_micros_remainder(instant), rtc_ticks);
-    }
-
-    #[inline(always)]
-    pub fn record_start_hp_timer(instant: LocalClockInstant, rtc_ticks: u32) {
+    pub fn record_start_hp_timer(_instant: LocalClockInstant, _rtc_ticks: u32) {
+        #[cfg(feature = "timer-trace")]
         systemview_record_u32x2(
             StartHpTimer.event_id(),
-            to_micros_remainder(instant),
-            rtc_ticks,
+            to_micros_remainder(_instant),
+            _rtc_ticks,
         );
     }
 
     #[inline(always)]
     pub fn record_schedule_timed_signal(
-        instant: LocalClockInstant,
-        timer_ticks: u32,
-        signal: HardwareSignal,
+        _instant: LocalClockInstant,
+        _timer_ticks: u32,
+        _signal: HardwareSignal,
     ) {
+        #[cfg(feature = "timer-trace")]
         systemview_record_u32x3(
             ScheduleTimedSignal.event_id(),
-            to_micros_remainder(instant),
-            timer_ticks,
-            signal as u32,
+            to_micros_remainder(_instant),
+            _timer_ticks,
+            _signal as u32,
         );
     }
 
     #[inline(always)]
-    pub fn record_observe_event(event: HardwareEvent) {
-        systemview_record_u32(ObserveEvent.event_id(), event as u32);
+    pub fn record_observe_event(_event: HardwareEvent) {
+        #[cfg(feature = "timer-trace")]
+        systemview_record_u32(ObserveEvent.event_id(), _event as u32);
     }
 }
