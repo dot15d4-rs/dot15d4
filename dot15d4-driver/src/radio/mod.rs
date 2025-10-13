@@ -311,36 +311,38 @@ pub(crate) mod trace {
 
     // Tasks
     pub const TASK_OFF_SCHEDULE: u32 = OFFSET.wrap(0);
-    pub const TASK_TRANSITION_TO_OFF: u32 = OFFSET.wrap(1);
-    pub const TASK_OFF_RUN: u32 = OFFSET.wrap(2);
+    pub const TASK_OFF_ENTRY: u32 = OFFSET.wrap(1);
+    pub const TASK_OFF_COMPLETE: u32 = OFFSET.wrap(2);
 
     pub const TASK_RX_SCHEDULE: u32 = OFFSET.wrap(3);
-    pub const TASK_TRANSITION_TO_RX: u32 = OFFSET.wrap(4);
-    pub const TASK_RX_RUN: u32 = OFFSET.wrap(5);
+    pub const TASK_RX_ENTRY: u32 = OFFSET.wrap(4);
+    pub const TASK_RX_COMPLETE: u32 = OFFSET.wrap(5);
 
     pub const TASK_TX_SCHEDULE: u32 = OFFSET.wrap(6);
-    pub const TASK_TRANSITION_TO_TX: u32 = OFFSET.wrap(7);
-    pub const TASK_TX_RUN: u32 = OFFSET.wrap(8);
+    pub const TASK_TX_ENTRY: u32 = OFFSET.wrap(7);
+    pub const TASK_TX_COMPLETE: u32 = OFFSET.wrap(8);
 
     pub const TASK_FALL_BACK: u32 = OFFSET.wrap(9);
 
     // Markers
-    pub const TASK_RX_FRAME_STARTED: u32 = OFFSET.wrap(0);
-    pub const TASK_RX_FRAME_INFO: u32 = OFFSET.wrap(1);
+    pub const MARKER_RX_FRAME_STARTED: u32 = OFFSET.wrap(0);
+    pub const MARKER_RX_FRAME_INFO: u32 = OFFSET.wrap(1);
+    pub const MARKER_RX_WINDOW_ENDED: u32 = OFFSET.wrap(2);
 
     /// Instruments the driver for task tracing.
     pub fn instrument() {
         rtos_trace::trace::task_new_stackless(TASK_OFF_SCHEDULE, "Schedule Off\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_TRANSITION_TO_OFF, "Transition to Off\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_OFF_RUN, "Off\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_OFF_ENTRY, "Off\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_OFF_COMPLETE, "Off->*\0", 0);
         rtos_trace::trace::task_new_stackless(TASK_RX_SCHEDULE, "Schedule Rx\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_TRANSITION_TO_RX, "Transition to RX\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_RX_RUN, "Rx\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_RX_ENTRY, "Rx\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_RX_COMPLETE, "Rx->*\0", 0);
         rtos_trace::trace::task_new_stackless(TASK_TX_SCHEDULE, "Schedule Tx\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_TRANSITION_TO_TX, "Transition to TX\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_TX_RUN, "Tx\0", 0);
-        rtos_trace::trace::task_new_stackless(TASK_FALL_BACK, "Off (fallback)\0", 0);
-        rtos_trace::trace::name_marker(TASK_RX_FRAME_STARTED, "Frame Started\0");
-        rtos_trace::trace::name_marker(TASK_RX_FRAME_INFO, "Preliminary Frame Info\0");
+        rtos_trace::trace::task_new_stackless(TASK_TX_ENTRY, "Tx\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_TX_COMPLETE, "Tx->*\0", 0);
+        rtos_trace::trace::task_new_stackless(TASK_FALL_BACK, "Fall back to Off\0", 0);
+        rtos_trace::trace::name_marker(MARKER_RX_FRAME_STARTED, "Frame Started\0");
+        rtos_trace::trace::name_marker(MARKER_RX_FRAME_INFO, "Preliminary Frame Info\0");
+        rtos_trace::trace::name_marker(MARKER_RX_WINDOW_ENDED, "Rx Window Ended\0");
     }
 }
