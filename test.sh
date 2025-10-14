@@ -20,3 +20,6 @@ cargo test -p dot15d4-frame --no-default-features --features=security,ies
 
 echo "TEST(workspace): std"
 cargo test --features=std
+
+echo "DOC(workspace)"
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items

@@ -29,7 +29,7 @@ fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     dot15d4::util::trace::instrument!(bare_metal cpu_freq: 64_000_000 Hz);
 
-    let buffer_allocator = buffer_allocator!(PHY_MAX_PACKET_SIZE_127, 2);
+    let _buffer_allocator = buffer_allocator!(PHY_MAX_PACKET_SIZE_127, 2);
 
     let (peripherals, clocks, timer) = config_peripherals();
     #[cfg(feature = "gpio-trace")]
@@ -50,9 +50,9 @@ fn main() -> ! {
 
     executor.block_on(async {
         #[cfg(feature = "rx_to_tx")]
-        let radio = rx_to_tx::scenarios(radio, timer, buffer_allocator).await;
+        let radio = rx_to_tx::scenarios(radio, timer, _buffer_allocator).await;
         #[cfg(feature = "tx_to_tx")]
-        let radio = tx_to_tx::scenarios(radio, timer, buffer_allocator).await;
+        let radio = tx_to_tx::scenarios(radio, timer, _buffer_allocator).await;
 
         let _ = radio;
     });

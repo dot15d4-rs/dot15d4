@@ -5,9 +5,7 @@ use crate::driver::{DrvSvcRequest, DrvSvcResponse};
 ///
 /// Alternatively a MAC task can be conceived as a state machine that steps one
 /// driver task at a time, see the [`MacTaskTransition::DrvSvcRequest`] and
-/// [`MacTaskEvent::DrvSvcResponse`] pair. A transition can be ended by a
-/// [`MacTaskEvent::Timeout`] in case a response is not received in time from
-/// the driver service.
+/// [`MacTaskEvent::DrvSvcResponse`] pair.
 ///
 /// The task is instantiated, entered (see [`MacTaskEvent::Entry`]) and driven
 /// by the MAC service in its role as a MAC task executor.

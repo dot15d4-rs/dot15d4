@@ -156,13 +156,13 @@ pub trait RadioDriverApi {
 ///   transition behavior. Implementations will have to ensure that all prior
 ///   effects of the transition will be neutralized before returning an error
 ///   from a transition-related behavior. See
-///   [`CompletedRadioTransition::Rollback`].
+///   [`crate::tasks::CompletedRadioTransition::Rollback`].
 /// - A rollback is typically not possible if one of the transition behaviors
 ///   signals an error _after_ the source state has been left (i.e. the
 ///   state-specific transition() method has been called). Such exceptions
 ///   SHALL NOT leave the driver in an undefined state. Implementations SHALL
 ///   fall back to the off state if the target state cannot be reached, see
-///   [`CompletedRadioTransition::Fallback`].
+///   [`crate::tasks::CompletedRadioTransition::Fallback`].
 /// - We further extend the UML state machine model by defining a "do activity
 ///   result", i.e. the radio task MAY produce a result (e.g. a transmission
 ///   result code or a received radio frame). While the result will typically
@@ -179,7 +179,7 @@ pub trait RadioDriverApi {
 ///     radio task may risk deterministic execution timing if overstretching the
 ///     possibly short scheduling window.
 ///
-///   See [`CompletedRadioTransition::Entered`].
+///   See [`crate::tasks::CompletedRadioTransition::Entered`].
 ///
 /// SAFETY: Radio drivers are not synchronized. All its methods SHALL be called
 ///         from a single scheduler.
