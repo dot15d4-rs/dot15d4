@@ -101,6 +101,7 @@ pub fn tx_task<Config: DriverConfig>(
     }
 }
 
+#[allow(dead_code)]
 pub fn off_task(at: Option<LocalClockInstant>) -> TaskOff {
     let at = if let Some(at) = at {
         Timestamp::Scheduled(at)
