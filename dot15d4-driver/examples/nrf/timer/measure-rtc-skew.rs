@@ -1,8 +1,6 @@
 //! Example used to measure RTC tick skew.
 //!
-//! Usage:
-//!   $> cd examples/nrf
-//!   $> cargo build --examples --features rtos-trace,nrf52840,executor --no-default-features
+//! Usage: See README.md
 
 #![no_std]
 #![no_main]
