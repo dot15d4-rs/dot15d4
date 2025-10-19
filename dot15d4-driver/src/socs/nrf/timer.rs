@@ -689,7 +689,7 @@ impl State {
     /// Retrieve a captured timer value and disables the corresponding PPI
     /// channel. If the event was not observed, the function returns zero and
     /// leaves the PPI channel enabled.
-    fn timer_captured_ticks(&self, event: HardwareEvent) -> u32 {
+    fn timer_get_and_clear_captured_ticks(&self, event: HardwareEvent) -> u32 {
         let event_timer_channel = Self::timer_event_channel(event);
 
         // Safety: Reading a single 32 bit register is atomic.
@@ -1084,6 +1084,7 @@ impl State {
     fn ppi_program_timed_signal(
         &self,
         signal: HardwareSignal,
+        disabled_by_event: Option<HardwareEvent>,
     ) -> Result<
         (
             // ppi channel mask
@@ -1104,6 +1105,17 @@ impl State {
         let ppi_channel_busy = ppi.chen.read().bits() & ppi_channel_mask != 0;
         let timer_channel_busy = timer.cc[timer_channel].read().cc().bits() != 0;
         if ppi_channel_busy || timer_channel_busy {
+                if matches!(disabled_by_event, Some(HardwareEvent::RadioFrameStarted))
+                    && Self::radio()
+                        .events_framestart
+                        .read()
+                        .events_framestart()
+                        .bit_is_set()
+                {
+                    // We share a single timer channel between the disable
+                    // signal and the framestarted event.
+                    return Err(RadioTimerError::Already);
+                };
             return Err(RadioTimerError::Busy);
         }
 
@@ -1298,46 +1310,28 @@ impl State {
         // fork and then disable the signal manually.
         let event_has_been_observed = match event {
             HardwareEvent::RadioRxEnabled => {
-                let evt_reg = &radio.events_rxready;
-                let observed_evt = evt_reg.read().events_rxready().bit_is_set();
-                if observed_evt {
-                    evt_reg.reset();
-                }
-                observed_evt
+                radio.events_rxready.read().events_rxready().bit_is_set()
             }
-            HardwareEvent::RadioFrameStarted => {
-                let evt_reg = &radio.events_framestart;
-                let observed_evt = evt_reg.read().events_framestart().bit_is_set();
-                if observed_evt {
-                    evt_reg.reset();
-                }
-                observed_evt
-            }
+            HardwareEvent::RadioFrameStarted => radio
+                .events_framestart
+                .read()
+                .events_framestart()
+                .bit_is_set(),
             HardwareEvent::RadioDisabled => {
-                let evt_reg = &radio.events_disabled;
-                let observed_evt = evt_reg.read().events_disabled().bit_is_set();
-                if observed_evt {
-                    evt_reg.reset();
-                }
-                observed_evt
+                radio.events_disabled.read().events_disabled().bit_is_set()
             }
             #[cfg(feature = "timer-trace")]
-            HardwareEvent::GpioToggled => {
-                let evt_reg = &Self::gpiote().events_in[gpiote_channel];
-                let observed_evt = evt_reg.read().events_in().bit_is_set();
-                if observed_evt {
-                    evt_reg.reset();
-                }
-                observed_evt
-            }
+            HardwareEvent::GpioToggled => Self::gpiote().events_in[gpiote_channel]
+                .read()
+                .events_in()
+                .bit_is_set(),
         };
 
         if event_has_been_observed {
             match use_case {
                 EventDisablesSignal(_, disables_signal_ppi_channel_group) => {
-                    // Now that the fork is in place and the channel enabled we can check
-                    // whether the event may have been observed before we programmed the
-                    // fork and then disable the signal manually.
+                    // The event had been observed before we programmed the
+                    // fork: We have to disable the signal manually.
                     ppi.tasks_chg[disables_signal_ppi_channel_group]
                         .dis
                         .write(|w| w.dis().set_bit());
@@ -1542,7 +1536,8 @@ impl State {
         timer_ticks: NonZeroU32,
         signal: HardwareSignal,
     ) -> Result<(), RadioTimerError> {
-        let (signal_ppi_channel_mask, timer_channel) = self.ppi_program_timed_signal(signal)?;
+        let (signal_ppi_channel_mask, timer_channel) =
+            self.ppi_program_timed_signal(signal, None)?;
         self.timer_safely_schedule_signal(
             instant,
             timer_ticks,
@@ -1563,7 +1558,8 @@ impl State {
         //         timer to trigger it before we connect the event to disable
         //         the signal. See more detailed safety conditions in
         //         sub-methods.
-        let (signal_ppi_channel_mask, timer_channel) = self.ppi_program_timed_signal(signal)?;
+        let (signal_ppi_channel_mask, timer_channel) =
+            self.ppi_program_timed_signal(signal, Some(event))?;
         self.ppi_program_event(event, Some(signal_ppi_channel_mask))?;
 
         self.timer_safely_schedule_signal(
@@ -2033,18 +2029,18 @@ impl NrfRadioHighPrecisionTimer {
 /// The radio currently requires the following combinations of signals and
 /// events (read the "\" character as "unless"):
 ///
-/// STATE | METHOD         | SIGNALS            | EVENTS
-/// =======================================================================
-/// off   | sched_rx       | rxen               | rx_enabled, framestarted
-/// off   | sched_tx       | txen               | framestarted
-/// off   | switch_off     |                    | disabled
-/// rx    | stop_listening | disable\framestart | framestarted, disabled
-/// rx    | sched_rx       |                    | rx_enabled*, framestarted
-/// rx    | sched_tx       | disable, txen      | framestarted
-/// rx    | sched_off      | disable**          | disabled**
-/// tx    | sched_rx       |                    | rx_enabled, framestarted
-/// tx    | sched_tx       |                    | framestarted
-/// tx    | sched_off      |                    | disabled
+/// STATE | METHOD         | SIGNALS              | EVENTS
+/// =========================================================================
+/// off   | sched_rx       | rxen                 | rx_enabled, framestarted
+/// off   | sched_tx       | txen                 | framestarted
+/// off   | switch_off     |                      | disabled
+/// rx    | stop_listening | disable\framestarted | framestarted, disabled
+/// rx    | sched_rx       |                      | rx_enabled*, framestarted
+/// rx    | sched_tx       | disable, txen        | framestarted
+/// rx    | sched_off      | disable**            | disabled**
+/// tx    | sched_rx       |                      | rx_enabled, framestarted
+/// tx    | sched_tx       |                      | framestarted
+/// tx    | sched_off      |                      | disabled
 ///
 /// *) If an IFS is given we disable and re-enable the radio.
 ///
@@ -2059,12 +2055,12 @@ impl NrfRadioHighPrecisionTimer {
 /// signals:
 /// - rxen/txen: pre-configured PPI-Chs 20/21 + CC0
 /// - disable: pre-configured PPI-Ch 22 + CC1
-/// - disable unless...: like "disable" + PPI-ChG
+/// - disable unless...: like "disable" + PPI-ChGroup
 ///
 /// events:
 /// - rx_enabled/disabled: PPI-Ch1.tep + CC0
 /// - framestarted: PPI-Ch2.tep + CC1
-/// - ...unless framestarted: PPI-Ch2.fork
+/// - ...unless framestarted: like "framestarted" + PPI-Ch2.fork
 ///
 /// In test mode we use:
 /// gpio toggle signal: PPI-Ch1 + CC0
@@ -2080,6 +2076,10 @@ impl NrfRadioHighPrecisionTimer {
 ///
 /// 2. The rx enabled and disabled event pair is mutually exclusive which allows
 ///    us to let them occupy the same channel CC0.
+///
+/// 3. In the "disable unless framestart" case, CC1 initially contains the
+///    timeout for the disable signal. If the framestart event triggers, it'll
+///    overwrite the contents of CC1 which is then no longer needed.
 ///
 /// We use one timer channel (CC2) to ensure that programmed timers are in the
 /// future. We do so by capturing the current timer value _after_ programming
@@ -2217,7 +2217,7 @@ impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
     }
 
     fn poll_event(&self, event: HardwareEvent) -> Option<LocalClockInstant> {
-        let timer_ticks = STATE.timer_captured_ticks(event);
+        let timer_ticks = STATE.timer_get_and_clear_captured_ticks(event);
         if timer_ticks > 0 {
             Some(TickConversion::timer_ticks_to_instant_with_epoch(
                 Self::timer_epoch(),

@@ -2,8 +2,8 @@ use core::{cell::Cell, marker::PhantomData};
 
 use dot15d4::{
     driver::radio::{
-        tasks::{ListeningRxState, OffState, TaskOff, TaskRx, TaskTx, TxState},
-        DriverConfig, RadioDriver, RadioDriverApi,
+        tasks::{ListeningRxState, OffState, RadioDriverApi, TaskOff, TaskRx, TaskTx, TxState},
+        DriverConfig, RadioDriver,
     },
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},
     Device,
@@ -37,7 +37,7 @@ pub struct Ieee802154Stack<RadioDriverImpl: DriverConfig> {
 
 impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, TaskOff>: RadioDriverApi,
+    RadioDriver<RadioDriverImpl, TaskOff>: RadioDriverApi<RadioDriverImpl>,
 {
     pub fn new(
         radio: RadioDriver<RadioDriverImpl, TaskOff>,
@@ -66,9 +66,12 @@ where
 
 impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl> + RadioDriverApi,
-    RadioDriver<RadioDriverImpl, TaskRx>: ListeningRxState<RadioDriverImpl> + RadioDriverApi,
-    RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl> + RadioDriverApi,
+    RadioDriver<RadioDriverImpl, TaskOff>:
+        OffState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskRx>:
+        ListeningRxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskTx>:
+        TxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
 {
     pub async fn run(&self) -> ! {
         let radio = self.radio.take().expect("already running");

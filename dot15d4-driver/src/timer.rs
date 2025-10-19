@@ -168,14 +168,19 @@ pub trait HighPrecisionTimer {
     /// implementation dependent.
     ///
     /// Returns an error if the timed signal could not be scheduled, e.g. due to
-    /// lack of resources or late scheduling.
+    /// lack of resources ([`RadioTimerError::Busy`]) or late scheduling
+    /// ([`RadioTimerError::Overdue`]).
     fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> Result<&Self, RadioTimerError>;
 
     /// Programs a hardware signal to be sent over the event bus at a precise
     /// instant unless the given event happens before.
     ///
     /// Returns an error if the timed signal could not be scheduled, e.g. due to
-    /// lack of resources or late scheduling.
+    /// lack of resources ([`RadioTimerError::Busy`]) or late scheduling
+    /// ([`RadioTimerError::Overdue`]).
+    ///
+    /// Returns [`RadioTimerError::Already`] if the event was already pending
+    /// when calling the method.
     fn schedule_timed_signal_unless(
         &self,
         timed_signal: TimedSignal,
@@ -204,8 +209,11 @@ pub trait HighPrecisionTimer {
     /// Prepares the timer to listen for a hardware event and capture the
     /// high-precision timestamp of the event if it occurs.
     ///
-    /// Returns an error if the timer cannot observe the event, e.g. due to lack
-    /// of resources.
+    /// Returns [`RadioTimerError::Busy`] if the timer cannot observe the event
+    /// due to lack of resources.
+    ///
+    /// Returns [`RadioTimerError::Already`] if the event was already pending
+    /// when calling the method.
     ///
     /// This method SHALL be idempotent, i.e. if the event is already being
     /// observed, then calling this method SHALL be a no-op and return
