@@ -52,7 +52,7 @@ rtos-trace = [
     "dot15d4-util/rtos-trace",
     "dot15d4-driver/rtos-trace",
 ]
-sync = ["dot15d4-util/sync"]
+terminal = ["dot15d4-util/terminal"]
 
 # Support for Nordic nrf52840
 nrf52840 = ["dot15d4-driver/nrf52840"]

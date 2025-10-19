@@ -17,4 +17,4 @@ up_channels = [
     { channel = 0, mode = "NoBlockSkip", format = "Defmt", show_location = false },
 ]
 down_channels = [{ channel = 0, mode = "NoBlockSkip" }]
-tabs = [{ up_channel = 0, down_channel = 0, name = "Log" }]
+tabs = [{ up_channel = 0, down_channel = 0, name = "Terminal" }]

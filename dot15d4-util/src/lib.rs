@@ -9,12 +9,7 @@
 pub mod allocator;
 pub mod frame;
 pub mod log;
-#[cfg(any(
-    feature = "defmt",
-    feature = "log",
-    feature = "rtos-trace",
-    feature = "sync"
-))]
+#[cfg(any(feature = "defmt", feature = "log", feature = "rtos-trace",))]
 pub mod rtt;
 pub mod sync;
 pub mod tokens;

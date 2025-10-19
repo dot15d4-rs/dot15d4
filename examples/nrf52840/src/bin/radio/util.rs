@@ -137,31 +137,29 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
     }
 }
 
-#[cfg(feature = "sync")]
-pub mod sync {
+#[cfg(feature = "terminal")]
+pub mod terminal {
     use dot15d4::util::{error, info, rtt::RTT_SYNC_BUF_LEN};
-    use rtt_target::{DownChannel, UpChannel};
+    use rtt_target::DownChannel;
 
-    enum SyncCommand {
+    enum TerminalCommand {
         Start,
         Unknown,
         Invalid,
     }
 
-    pub struct TestSynchronization {
+    pub struct Terminal {
         sync_in: DownChannel,
-        sync_out: UpChannel,
         read_idx: usize,
         write_idx: usize,
         len: usize,
         buf: [u8; RTT_SYNC_BUF_LEN],
     }
 
-    impl TestSynchronization {
-        pub fn new(sync_in: DownChannel, sync_out: UpChannel) -> Self {
+    impl Terminal {
+        pub fn new(sync_in: DownChannel) -> Self {
             Self {
                 sync_in,
-                sync_out,
                 read_idx: 0,
                 write_idx: 0,
                 len: 0,
@@ -169,11 +167,11 @@ pub mod sync {
             }
         }
 
-        fn is_full(&self) -> bool {
+        fn buffer_is_full(&self) -> bool {
             self.len == self.buf.len()
         }
 
-        fn capacity(&self) -> usize {
+        fn buffer_capacity(&self) -> usize {
             self.buf.len()
         }
 
@@ -185,12 +183,12 @@ pub mod sync {
 
         fn consume(&mut self, num_bytes: usize) {
             self.read_idx += num_bytes;
-            self.read_idx %= self.capacity();
+            self.read_idx %= self.buffer_capacity();
             self.len -= num_bytes;
         }
 
         fn read(&mut self) -> Result<usize, ()> {
-            if self.is_full() {
+            if self.buffer_is_full() {
                 error!("Received invalid command.");
                 self.reset();
                 return Err(());
@@ -206,7 +204,7 @@ pub mod sync {
             let remaining_buffer = &mut self.buf[writable_range];
 
             let bytes_read = self.sync_in.read(remaining_buffer);
-            self.write_idx += bytes_read % self.capacity();
+            self.write_idx += bytes_read % self.buffer_capacity();
             self.len += bytes_read;
 
             Ok(bytes_read)
@@ -233,23 +231,23 @@ pub mod sync {
                     return Ok(line_len);
                 }
 
-                start = end % self.capacity();
+                start = end % self.buffer_capacity();
                 line_len += bytes_read;
             }
         }
 
-        fn read_command(&mut self) -> SyncCommand {
+        fn read_command(&mut self) -> TerminalCommand {
             let line_len = if let Ok(line_len) = self.read_line() {
                 // Don't compare newline character.
                 line_len - 1
             } else {
                 error!("Received invalid command.");
-                return SyncCommand::Invalid;
+                return TerminalCommand::Invalid;
             };
 
-            'command: for command in [SyncCommand::Start] {
+            'command: for command in [TerminalCommand::Start] {
                 let command_as_bytes = match command {
-                    SyncCommand::Start => b"start".as_slice(),
+                    TerminalCommand::Start => b"start".as_slice(),
                     _ => unreachable!(),
                 };
 
@@ -261,11 +259,11 @@ pub mod sync {
                     }
 
                     idx += 1;
-                    cursor = (cursor + 1) % self.capacity();
+                    cursor = (cursor + 1) % self.buffer_capacity();
                 }
 
                 self.consume(line_len + 1);
-                info!("Received '{}' command.", unsafe {
+                info!("< {}", unsafe {
                     str::from_utf8_unchecked(command_as_bytes)
                 });
                 return command;
@@ -273,19 +271,20 @@ pub mod sync {
 
             self.consume(line_len + 1);
             error!("Received unknown command.");
-            SyncCommand::Unknown
+            TerminalCommand::Unknown
         }
 
-        pub fn start(&mut self) {
-            self.sync_out.write(b"ready\n");
+        pub fn start(mut self) -> Self {
+            info!("> ready");
             match self.read_command() {
-                SyncCommand::Start => {}
+                TerminalCommand::Start => {}
                 _ => super::done(),
             }
+            self
         }
 
-        pub fn done(&mut self) {
-            self.sync_out.write(b"done\n");
+        pub fn done(self) {
+            info!("> done");
         }
     }
 }

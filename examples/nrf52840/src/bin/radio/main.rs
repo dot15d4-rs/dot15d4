@@ -28,8 +28,8 @@ use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor, AvailableResources};
 
 use util::done;
-#[cfg(feature = "sync")]
-use util::sync::TestSynchronization;
+#[cfg(feature = "terminal")]
+use util::terminal::Terminal;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -40,22 +40,16 @@ fn main() -> ! {
         radio,
         clocks,
         timer,
-        #[cfg(feature = "sync")]
+        #[cfg(feature = "terminal")]
         sync_in,
-        #[cfg(feature = "sync")]
-        sync_out,
         ..
     } = config_peripherals(
         #[cfg(feature = "rtos-trace")]
         start_tracing,
     );
 
-    #[cfg(feature = "sync")]
-    let mut test_sync = {
-        let mut test_sync = TestSynchronization::new(sync_in, sync_out);
-        test_sync.start();
-        test_sync
-    };
+    #[cfg(feature = "terminal")]
+    let terminal = Terminal::new(sync_in).start();
 
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
@@ -81,8 +75,8 @@ fn main() -> ! {
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::stop();
 
-    #[cfg(feature = "sync")]
-    test_sync.done();
+    #[cfg(feature = "terminal")]
+    terminal.done();
 
     done();
 }

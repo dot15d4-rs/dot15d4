@@ -4,7 +4,7 @@ pub mod export {
     pub use rtt_target::{rtt_init, DownChannel, UpChannel};
 }
 
-pub const RTT_SYNC_BUF_LEN: usize = 20;
+pub const RTT_SYNC_BUF_LEN: usize = 16;
 
 #[macro_export]
 macro_rules! rtt_channels {
@@ -13,7 +13,7 @@ macro_rules! rtt_channels {
         $crate::rtt::rtt_channels!{ _channels { up: {} down: {} } tail { $( $channel:$name )+ } }
     };
 
-    // Add Defmt/Log channel.
+    // Add Defmt/Log/Terminal channel.
     (
         _channels { up: { $( $up:tt )* } down: { $( $down:tt )* } }
         tail { $channel:literal:terminal $( $tail:tt )* }
@@ -21,21 +21,7 @@ macro_rules! rtt_channels {
         $crate::rtt::rtt_channels!{
             _channels {
                 up: { $( $up )* $channel: { size: 1024, name: "Terminal" } }
-                down: { $( $down )* $channel: { size: 16, name: "Terminal" } }
-            }
-            tail { $( $tail )* }
-        }
-    };
-
-    // Add Sync channel.
-    (
-        _channels { up: { $( $up:tt )* } down: { $( $down:tt )* } }
-        tail { $channel:literal:sync $( $tail:tt )* }
-    ) => {
-        $crate::rtt::rtt_channels!{
-            _channels {
-                up: { $( $up )* $channel: { size: $crate::rtt::RTT_SYNC_BUF_LEN, name: "Sync" } }
-                down: { $( $down )* $channel: { size: $crate::rtt::RTT_SYNC_BUF_LEN, name: "Sync" } }
+                down: { $( $down )* $channel: { size: $crate::rtt::RTT_SYNC_BUF_LEN, name: "Terminal" } }
             }
             tail { $( $tail )* }
         }
@@ -69,19 +55,11 @@ macro_rules! rtt_channels {
 
 pub use rtt_channels;
 
-// If rtos-trace is enabled then we always need to allocate three channels
-// although the sync channel might not be needed. This is due to the
-// systemview-target crate requiring a fixed number of external RTT channels to
-// be allocated. As this is not a production feature the overhead is tolerable.
 #[cfg(feature = "rtos-trace")]
 #[macro_export]
-macro_rules! init_rtt_channels { () => { $crate::rtt::rtt_channels!(0:terminal, 1:sync, 2:systemview) }; }
+macro_rules! init_rtt_channels { () => { $crate::rtt::rtt_channels!(0:terminal, 1:systemview) }; }
 
-#[cfg(all(feature = "sync", not(feature = "rtos-trace")))]
-#[macro_export]
-macro_rules! init_rtt_channels { () => { $crate::rtt::rtt_channels!(0:terminal, 1:sync) }; }
-
-#[cfg(all(not(feature = "sync"), not(feature = "rtos-trace")))]
+#[cfg(not(feature = "rtos-trace"))]
 #[macro_export]
 macro_rules! init_rtt_channels { () => { $crate::rtt::rtt_channels!(0:terminal) }; }
 
