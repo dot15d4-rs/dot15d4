@@ -18,14 +18,9 @@ use dot15d4::driver::{
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
-#[cfg(feature = "sync")]
-use dot15d4::util::rtt::export::{DownChannel, UpChannel};
-#[cfg(any(
-    feature = "log",
-    feature = "defmt",
-    feature = "rtos-trace",
-    feature = "sync"
-))]
+#[cfg(feature = "terminal")]
+use dot15d4::util::rtt::export::DownChannel;
+#[cfg(any(feature = "log", feature = "defmt", feature = "rtos-trace",))]
 use dot15d4::util::rtt::init_rtt_channels;
 
 #[cfg(feature = "_gpio-trace")]
@@ -149,10 +144,8 @@ pub struct AvailableResources {
     pub radio: RADIO,
     pub clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
     pub timer: NrfRadioSleepTimer,
-    #[cfg(feature = "sync")]
+    #[cfg(feature = "terminal")]
     pub sync_in: DownChannel,
-    #[cfg(feature = "sync")]
-    pub sync_out: UpChannel,
 }
 
 pub fn config_peripherals(
@@ -166,12 +159,7 @@ pub fn config_peripherals(
     // Enable the DC/DC converter
     peripherals.POWER.dcdcen.write(|w| w.dcdcen().enabled());
 
-    #[cfg(any(
-        feature = "log",
-        feature = "defmt",
-        feature = "rtos-trace",
-        feature = "sync"
-    ))]
+    #[cfg(any(feature = "log", feature = "defmt", feature = "rtos-trace",))]
     let _channels = init_rtt_channels!();
 
     #[cfg(feature = "defmt")]
@@ -224,10 +212,8 @@ pub fn config_peripherals(
         radio: peripherals.RADIO,
         clocks,
         timer,
-        #[cfg(feature = "sync")]
-        sync_in: _channels.down.1,
-        #[cfg(feature = "sync")]
-        sync_out: _channels.up.1,
+        #[cfg(feature = "terminal")]
+        sync_in: _channels.down.0,
     }
 }
 

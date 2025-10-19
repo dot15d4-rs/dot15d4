@@ -22,7 +22,7 @@ systemview-target = { version = "0.2.1", features = [
     "callbacks-app",
     "callbacks-os",       # required for embassy integration
     "log",
-    "ext-rtt-channels-3", # log/defmt, sync and systemview
+    "ext-rtt-channels-2", # log/defmt, sync and systemview
 ], optional = true }
 
 [dev-dependencies]
@@ -52,7 +52,7 @@ rtos-trace = [
     "dep:systemview-target",
     "embassy-executor/rtos-trace",
 ]
-sync = ["dep:rtt-target"]
+terminal = ["defmt"]
 
 _clippy-std = ["std"]
 _clippy-no-std = []

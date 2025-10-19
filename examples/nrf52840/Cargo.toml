@@ -77,8 +77,8 @@ rtos-trace = [
 ]
 _gpio-trace = []
 
-# Synchronize test execution between host and target.
-sync = ["dot15d4/sync", "dep:rtt-target"]
+# interactive terminal support
+terminal = ["dot15d4/terminal", "defmt"]
 
 # An internal helper attribute that allows us to apply clippy in std mode.
 nrf52840 = [

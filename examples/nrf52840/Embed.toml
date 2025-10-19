@@ -13,19 +13,8 @@ enabled = true
 
 [rtt.rtt]
 enabled = true
-
 up_channels = [
     { channel = 0, mode = "NoBlockSkip", format = "Defmt", show_location = false },
-    { channel = 1, mode = "NoBlockSkip", format = "String", show_timestamps = false },
 ]
-
-down_channels = [
-    { channel = 0, mode = "NoBlockSkip" },
-    { channel = 1, mode = "NoBlockSkip" },
-]
-
-tabs = [
-    { up_channel = 0, down_channel = 0, name = "Log" },
-    { up_channel = 1, down_channel = 1, name = "Terminal" },
-    { up_channel = 2, down_channel = 2, name = "SystemView", hide = true },
-]
+down_channels = [{ channel = 0, mode = "NoBlockSkip" }]
+tabs = [{ up_channel = 0, down_channel = 0, name = "Terminal" }]
