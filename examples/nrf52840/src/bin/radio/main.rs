@@ -8,16 +8,19 @@
 #![cfg(feature = "nrf52840")]
 #![allow(clippy::uninlined_format_args)]
 
-#[cfg(feature = "rx_tx_rx")]
-mod rx_tx_rx;
-#[cfg(feature = "tx_tx")]
+mod rx_off;
+mod tx_rx;
 mod tx_tx;
 mod util;
 
-use dot15d4::driver::{executor::InterruptExecutor, radio::RadioDriver};
-#[cfg(any(feature = "rx_tx_rx", feature = "tx_tx"))]
 use dot15d4::{
-    driver::radio::phy::{OQpsk250KBit, Phy, PhyConfig},
+    driver::{
+        executor::InterruptExecutor,
+        radio::{
+            phy::{OQpsk250KBit, Phy, PhyConfig},
+            RadioDriver,
+        },
+    },
     util::buffer_allocator,
 };
 #[cfg(feature = "executor-trace")]
@@ -65,17 +68,14 @@ fn main() -> ! {
     );
     let executor = swi_executor();
 
-    #[cfg(any(feature = "rx_tx_rx", feature = "tx_tx"))]
     let buffer_allocator = buffer_allocator!(
         { <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize },
         2
     );
     executor.block_on(async {
-        #[cfg(feature = "rx_tx_rx")]
-        let radio = rx_tx_rx::scenarios(radio, timer, buffer_allocator).await;
-        #[cfg(feature = "tx_tx")]
-        let radio = tx_tx::scenarios(radio, timer, buffer_allocator).await;
-        let _ = radio;
+        let radio = rx_off::scenarios(radio, timer, buffer_allocator).await;
+        let radio = tx_rx::scenarios(radio, timer, buffer_allocator).await;
+        let _ = tx_tx::scenarios(radio, timer, buffer_allocator).await;
     });
 
     #[cfg(feature = "rtos-trace")]

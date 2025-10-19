@@ -247,6 +247,28 @@ pub enum RadioTaskError<Task: RadioTask> {
     Task(Task::Error),
 }
 
+/// Basic features to be implemented by all radio drivers, independent of driver
+/// state.
+pub trait RadioDriverApi<RadioDriverImpl: DriverConfig> {
+    fn ieee802154_address(&self) -> [u8; 8];
+
+    /// Switches the radio off immediately and unconditionally.
+    ///
+    /// This method will be called whenever a non-recoverable error is
+    /// encountered. The method must place the driver into the well-defined off
+    /// state under all conditions. If this is not possible, it SHALL panic.
+    ///
+    /// Returns the off state and the precise time at which the state entered.
+    ///
+    /// # Panics
+    ///
+    /// If the radio cannot fall back to off state at any time, this is
+    /// considered a fatal error.
+    fn switch_off(
+        self,
+    ) -> impl Future<Output = (RadioDriver<RadioDriverImpl, TaskOff>, LocalClockInstant)>;
+}
+
 /// Methods to be implemented by all an IEEE 802.15.4 radio driver state machine
 /// states.
 pub trait RadioState<Task: RadioTask> {
@@ -396,22 +418,6 @@ pub trait OffState<RadioDriverImpl: DriverConfig>: RadioState<TaskOff> + Sized {
         tx_task: TaskTx,
         at: Option<LocalClockInstant>,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskOff, TaskTx>;
-
-    /// Switches the radio off immediately and unconditionally.
-    ///
-    /// This method will be called whenever a non-recoverable error is
-    /// encountered. The method must place the driver into the well-defined off
-    /// state under all conditions. If this is not possible, it SHALL panic.
-    ///
-    /// Returns the off state and the precise time at which the state entered.
-    ///
-    /// # Panics
-    ///
-    /// If the radio cannot fall back to off state at any time, this is
-    /// considered a fatal error.
-    fn switch_off<AnyState: RadioTask>(
-        any_state: RadioDriver<RadioDriverImpl, AnyState>,
-    ) -> impl Future<Output = (Self, LocalClockInstant)>;
 }
 
 pub struct PreliminaryFrameInfo<'frame> {
@@ -421,37 +427,25 @@ pub struct PreliminaryFrameInfo<'frame> {
     pub addressing_fields: Option<AddressingFields<&'frame [u8]>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum StopListeningResult {
-    FrameStarted(LocalClockInstant),
-    RxWindowEnded(LocalClockInstant),
+pub enum StopListeningResult<
+    RadioDriverImpl: DriverConfig,
+    RxState: ReceivingRxState<RadioDriverImpl>,
+> {
+    FrameStarted(LocalClockInstant, RxState),
+    RxWindowEnded(RadioTransitionResult<RadioDriverImpl, TaskRx, TaskOff>),
 }
 
-/// The radio reception state is split into two sub-states:
+/// The radio reception state is split into two sub-states: listening state
+/// (this state) and receiving state (see below).
 ///
-/// - Listening reception state (this state): This state is active while the
-///   reception window is open. In this state scheduling of the subsequent state
-///   is often not possible because it is not known whether a frame will arrive,
-///   whether an arriving frame is valid and whether it requires acknowledgement
-///   or contains IEs that possibly need to be reacted to by upper layers.
+/// The listening state is active while the receiver is on but no incoming frame
+/// has been observed, yet. In this state scheduling of the subsequent state is
+/// often not possible because it is not known whether a frame will arrive,
+/// whether the arriving frame is valid and whether it requires acknowledgement
+/// or contains IEs that possibly need to be reacted to by upper layers.
 ///
-/// - Completing reception state (see below): In this state it is known that
-///   either the rx window closed without a frame being observed or a frame
-///   started and needs to be received. The completing state allows to schedule
-///   subsequent state immediately or after partially receiving the frame to
-///   determine whether it needs to be acknowledged or whether it contains
-///   certain "early" information elements required to decide upon follow-up
-///   action.
-///
-/// This is the generic characterization of the "Receiver ON" (rx) state while
-/// listening for incoming frames frame, i.e. the start of a frame SHALL be
-/// recognized while in this state.
-///
-/// The listening reception state is special in that its outcome depends on the
-/// behavior of other devices outside the control of this device. Therefore the
-/// follow-up task can not yet be safely scheduled: It cannot be decided whether
-/// a frame will be received and if so, whether it is valid and requires
-/// acknowledgement.
+/// This is the generic characterization of the "Receiver ON" (rx) state, i.e.
+/// the start of a frame SHALL be recognized while in this state.
 pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + Sized {
     /// Utility method to calculate the PHY specific time that a PPDU with the
     /// given PSDU (=MPDU) size occupies the physical channel.
@@ -478,21 +472,21 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// subsequent tasks:
     ///
     /// - If frame reception is ongoing when calling this method: Immediately
-    ///   returns with the RMARKER timestamp of the incoming frame. Continues
-    ///   receiving the frame in the background.
+    ///   returns with the RMARKER timestamp of the incoming frame and continues
+    ///   in the receiving state.
     ///
-    /// - If no frame has started and no timeout has been given: Stops listening
-    ///   and immediately returns without a timestamp.
+    /// - If no frame has started and no timeout has been given: Immediately
+    ///   turns the radio off and continues in the "Radio Off" state.
     ///
     /// - If no frame has started and a timeout has been given for the latest
     ///   frame start: Waits until the radio observes the start of a frame or
     ///   the timeout expires, whatever happens earlier. If a frame starts:
     ///   Immediately returns the RMARKER timestamp of the incoming frame and
-    ///   continues receiving the frame. Otherwise stops listening at the
-    ///   precise instant designated by the timeout and returns without a
-    ///   timestamp.
+    ///   continues in the receiving state. Otherwise stops listening at the
+    ///   precise instant designated by the timeout and continues in the "Radio
+    ///   Off" state.
     ///
-    /// Frames starting after this method returns SHALL be ignored.
+    /// Inbound frames starting after this method returns SHALL be ignored.
     ///
     /// This function SHOULD return as quickly as possible once a
     /// synchronization header or timeout has been observed by the receiver.
@@ -512,8 +506,8 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     ///
     /// rx_task_end:
     ///
-    ///   Depends on the subsequent task, see [`CompletingRxState::schedule_tx`]
-    ///   and [`CompletingRxState::schedule_off`]. Can be derived from the
+    ///   Depends on the subsequent task, see [`ReceivingRxState::schedule_tx`]
+    ///   and [`ReceivingRxState::schedule_off`]. Can be derived from the
     ///   earliest timed off and earliest timed tx respectively, see picture
     ///   below.
     ///
@@ -541,18 +535,17 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
         latest_frame_start: Option<LocalClockInstant>,
     ) -> impl Future<
         Output = Result<
-            (StopListeningResult, impl CompletingRxState<RadioDriverImpl>),
+            StopListeningResult<RadioDriverImpl, impl ReceivingRxState<RadioDriverImpl>>,
             (SchedulingError, Self),
         >,
     >;
 }
 
-/// Completing reception state
+/// Receiving state
 ///
-/// This is a generic characterization of the rx state after the latest possible
-/// start time of an incoming frame passed and the receiver is no longer in a
-/// listening state. The radio will continue to receive an incoming frame,
-/// though, while in this state.
+/// This is a generic characterization of the rx state after the start of an
+/// incoming frame has been observed. The radio will receive the incoming frame
+/// while in this state.
 ///
 /// This state is different from the [`ListeningRxState`] in that the behavior
 /// of external devices no longer imposes restrictions on the ability to decide
@@ -561,9 +554,8 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
 /// Scheduling of subsequent tasks SHALL be done concurrently with frame
 /// reception to ensure standard-conforming timing.
 ///
-/// When transitioning away from the rx state, then the target state depends on
-/// the outcome of the rx task in combination with the `rollback_on_crcerror`
-/// flag:
+/// When transitioning away from the rx state, the target state depends on the
+/// outcome of the rx task in combination with the `rollback_on_crcerror` flag:
 ///
 /// - If the `rollback_on_crcerror` flag is true, the transition will be rolled
 ///   back in case of a CRC error. This is useful when acknowledgment is
@@ -576,7 +568,7 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
 ///   incoming frame that does not require acknowledgment. In this case we
 ///   expect the scheduled task to be executed independently of the preceding rx
 ///   result.
-pub trait CompletingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
+pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
     /// If a frame has started within the reception window then returns the
     /// preliminary frame information, otherwise returns [`None`].
     ///
@@ -657,17 +649,15 @@ pub trait CompletingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
     ///               - (cca ? macUnitBackoffPeriod : 0)
     ///               - IFS
     ///
-    /// The receiver SHALL be disabled at this instant, even if a frame is
-    /// currently being received.
+    /// The receiver SHALL be disabled at this instant, even if the incoming
+    /// frame has not ended, yet.
     ///
     /// Note that the RMARKER offset is PHY-dependent, e.g. rx_time(SHR) in case
     /// of O-QPSK.
     ///
-    /// If a frame is received, then the receiver SHOULD be disabled as soon as
-    /// the frame ends to optimize for energy efficiency.
-    ///
-    /// If no frame start has been observed, then the receiver SHOULD be
-    /// disabled immediately to save power.
+    /// If the incoming frame ends before the given timeout then the receiver
+    /// SHOULD be disabled as soon as the frame ends to optimize for energy
+    /// efficiency.
     ///
     /// Note: It is the scheduler's task to cater for possible clock drift (i.e.
     ///       to widen the rx window) as appropriate.
@@ -689,15 +679,12 @@ pub trait CompletingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
     ///
     ///   rx_task_end = at
     ///
-    /// The receiver SHALL be disabled at this instant, even if a frame is
-    /// currently being received.
+    /// The receiver SHALL be disabled at this instant, even if the incoming
+    /// frame has not ended, yet.
     ///
-    /// If a frame is received and ends before the scheduled time, then the
-    /// receiver SHOULD be disabled as soon as the frame ends to optimize for
-    /// energy efficiency.
-    ///
-    /// If no frame is observed, then the receiver SHOULD already have been
-    /// disabled by [`ListeningRxState::stop_listening()`].
+    /// If the incoming frame ends before the given timeout then the receiver
+    /// SHOULD be disabled as soon as the frame ends to optimize for energy
+    /// efficiency.
     ///
     /// See the trait documentation for an explanation of the
     /// `rollback_on_crcerror` flag.`
@@ -936,7 +923,7 @@ impl<
     for RadioTransition<RadioDriverImpl, ThisTask, NextTask, OnScheduled, OnCompleted, Cleanup>
 where
     RadioDriver<RadioDriverImpl, ThisTask>: RadioState<ThisTask>,
-    RadioDriver<RadioDriverImpl, NextTask>: RadioState<NextTask>,
+    RadioDriver<RadioDriverImpl, NextTask>: RadioState<NextTask> + RadioDriverApi<RadioDriverImpl>,
     RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl>,
 {
     async fn complete_and_transition(
@@ -1005,33 +992,26 @@ where
             inner,
             sleep_timer,
             high_precision_timer,
-            stop_listening_result,
             ..
         } = self.from_radio;
-
-        // Special case: When an rx window ended we are already in off state at
-        // this point.
-        let measured_entry = match stop_listening_result {
-            Some(StopListeningResult::RxWindowEnded(off_at)) => Some(off_at),
-            _ => None,
-        };
-
         let mut next_state = RadioDriver {
             inner,
             sleep_timer,
             high_precision_timer,
             scheduled_entry,
-            measured_entry,
-            stop_listening_result: None,
+            measured_entry: None,
+            rx_frame_started: None,
             task: Some(self.next_task),
         };
         let next_state_entry = next_state.transition().await;
 
-        let fallback = |next_task_error, prev_task_result, any_state| async {
+        let fallback = |next_task_error,
+                        prev_task_result,
+                        any_state: RadioDriver<RadioDriverImpl, NextTask>| async {
             #[cfg(feature = "rtos-trace")]
             rtos_trace::trace::task_exec_end();
 
-            let (mut off_state, entry) = RadioDriver::switch_off(any_state).await;
+            let (mut off_state, entry) = any_state.switch_off().await;
             off_state.measured_entry = Some(entry);
             CompletedRadioTransition::Fallback(
                 RadioTransitionResult::new(prev_task_result, off_state, entry, None),
@@ -1110,7 +1090,7 @@ impl<
     for RadioTransition<RadioDriverImpl, ThisTask, NextTask, OnScheduled, OnCompleted, Cleanup>
 where
     RadioDriver<RadioDriverImpl, ThisTask>: RadioState<ThisTask>,
-    RadioDriver<RadioDriverImpl, NextTask>: RadioState<NextTask>,
+    RadioDriver<RadioDriverImpl, NextTask>: RadioState<NextTask> + RadioDriverApi<RadioDriverImpl>,
     RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl>,
 {
     async fn complete_and_transition(
@@ -1156,32 +1136,26 @@ where
             inner,
             sleep_timer,
             high_precision_timer,
-            stop_listening_result,
             ..
         } = self.from_radio;
-
-        // The rx back-to-back transition must not leave the radio in off state.
-        debug_assert!(!matches!(
-            stop_listening_result,
-            Some(StopListeningResult::RxWindowEnded(_))
-        ));
-
         let mut next_state = RadioDriver {
             inner,
             sleep_timer,
             high_precision_timer,
             scheduled_entry,
             measured_entry: None,
-            stop_listening_result: None,
+            rx_frame_started: None,
             task: Some(self.next_task),
         };
         let next_state_entry = next_state.transition().await;
 
-        let fallback = |next_task_error, prev_task_result, any_state| async {
+        let fallback = |next_task_error,
+                        prev_task_result,
+                        any_state: RadioDriver<RadioDriverImpl, NextTask>| async {
             #[cfg(feature = "rtos-trace")]
             rtos_trace::trace::task_exec_end();
 
-            let (mut off_state, entry) = RadioDriver::switch_off(any_state).await;
+            let (mut off_state, entry) = any_state.switch_off().await;
             off_state.measured_entry = Some(entry);
             CompletedRadioTransition::Fallback(
                 RadioTransitionResult::new(prev_task_result, off_state, entry, None),
@@ -1237,7 +1211,7 @@ pub struct RadioTransitionResult<
 impl<RadioDriverImpl: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>
     RadioTransitionResult<RadioDriverImpl, PrevTask, ThisTask>
 {
-    fn new(
+    pub(crate) fn new(
         prev_task_result: PrevTask::Result,
         this_state: RadioDriver<RadioDriverImpl, ThisTask>,
         measured_entry: LocalClockInstant,

@@ -2,14 +2,14 @@
 
 use core::fmt::Debug;
 
-use crate::{
-    radio::tasks::StopListeningResult,
-    timer::{LocalClockInstant, RadioTimerApi, RadioTimerError},
-};
+use crate::timer::{LocalClockInstant, RadioTimerApi, RadioTimerError};
 
 use self::{
     phy::PhyConfig,
-    tasks::{RadioState, RadioTask, RadioTaskError, SchedulingError, TaskOff},
+    tasks::{
+        RadioState, RadioTask, RadioTaskError, RadioTransitionResult, ReceivingRxState, RxResult,
+        SchedulingError, StopListeningResult, TaskOff, TaskRx,
+    },
 };
 
 pub mod config;
@@ -75,12 +75,6 @@ pub type HighPrecisionTimerOf<RadioDriverImpl> =
     <<RadioDriverImpl as DriverConfig>::Timer as RadioTimerApi>::HighPrecisionTimer;
 
 pub type PhyOf<RadioDriverImpl> = <RadioDriverImpl as DriverConfig>::Phy;
-
-/// Basic features to be implemented by all radio drivers, independent of driver
-/// state.
-pub trait RadioDriverApi {
-    fn ieee802154_address(&self) -> [u8; 8];
-}
 
 /// Generic IEEE 802.15.4 radio driver state machine.
 ///
@@ -214,14 +208,12 @@ pub struct RadioDriver<RadioDriverImpl: DriverConfig, Task> {
     /// soon as the task entered. See [`tasks::RadioState::transition`] for a
     /// definition of the semantics of this timestamp.
     pub(crate) measured_entry: Option<LocalClockInstant>,
-    /// The precise time at which the radio stopped listening: Either
-    /// communicates the RMARKER of an incoming frame or the time at which the
-    /// radio entered the disabled state.
+    /// The RMARKER of an incoming frame.
     ///
-    /// This value is observed at the end of the listening reception state and
-    /// available throughout the completing reception state. Not available in
-    /// any other radio state.
-    stop_listening_result: Option<StopListeningResult>,
+    /// This value is observed at the end of the listening rx state and
+    /// available throughout the receiving rx state. Not available in any other
+    /// radio state.
+    rx_frame_started: Option<LocalClockInstant>,
     /// The currently active task which may be consumed by the driver at any
     /// time during task execution.
     pub(crate) task: Option<Task>,
@@ -241,7 +233,7 @@ where
             high_precision_timer: None,
             scheduled_entry: Some(LocalClockInstant::from_ticks(0)),
             measured_entry: Some(LocalClockInstant::from_ticks(0)),
-            stop_listening_result: None,
+            rx_frame_started: None,
             task: Some(TaskOff),
         }
     }
@@ -250,6 +242,35 @@ where
         let off_entry = self.transition().await;
         debug_assert!(off_entry.is_ok());
         (self, off_entry.unwrap())
+    }
+}
+
+impl<RadioDriverImpl: DriverConfig> RadioDriver<RadioDriverImpl, TaskRx>
+where
+    RadioDriver<RadioDriverImpl, TaskOff>: RadioState<TaskOff>,
+{
+    pub(crate) async fn rx_window_ended<RxState: ReceivingRxState<RadioDriverImpl>>(
+        mut self,
+        disabled_at: Option<LocalClockInstant>,
+    ) -> StopListeningResult<RadioDriverImpl, RxState> {
+        let rx_result = RxResult::RxWindowEnded(self.task.take().unwrap().radio_frame);
+        let (off_state, measured_entry) = RadioDriver {
+            inner: self.inner,
+            sleep_timer: self.sleep_timer,
+            high_precision_timer: self.high_precision_timer,
+            scheduled_entry: disabled_at,
+            measured_entry: None,
+            rx_frame_started: None,
+            task: Some(TaskOff),
+        }
+        .wait_until_off()
+        .await;
+        StopListeningResult::RxWindowEnded(RadioTransitionResult::new(
+            rx_result,
+            off_state,
+            measured_entry,
+            disabled_at,
+        ))
     }
 }
 
@@ -272,17 +293,14 @@ impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl
         drop(self.high_precision_timer.take());
     }
 
-    pub(crate) fn set_stop_listening_result(&mut self, stop_listening_result: StopListeningResult) {
-        debug_assert!(self.stop_listening_result.is_none());
+    pub(crate) fn set_rx_frame_started(&mut self, rx_frame_started: LocalClockInstant) {
+        debug_assert!(self.rx_frame_started.is_none());
 
-        self.stop_listening_result = Some(stop_listening_result)
+        self.rx_frame_started = Some(rx_frame_started)
     }
 
-    pub(crate) fn frame_started(&self) -> Option<LocalClockInstant> {
-        match self.stop_listening_result {
-            Some(StopListeningResult::FrameStarted(frame_started)) => Some(frame_started),
-            _ => None,
-        }
+    pub(crate) fn rx_frame_started(&self) -> Option<LocalClockInstant> {
+        self.rx_frame_started
     }
 
     pub(crate) fn take_task(&mut self) -> Task {

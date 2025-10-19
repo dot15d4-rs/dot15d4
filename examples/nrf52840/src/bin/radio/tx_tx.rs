@@ -57,7 +57,7 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing("Off->Tx (BE)", &radio_transition_result, cca);
+            log_timing("Off->Tx(BE)", &radio_transition_result, cca);
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -70,7 +70,7 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing("Tx->Tx  (BE)", &radio_transition_result, cca);
+            log_timing("Tx->Tx (BE)", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
@@ -81,7 +81,7 @@ where
     // tx -> off
     match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            log_timing("Tx->Off (BE)", &radio_transition_result, cca);
+            log_timing("Tx->Off(BE)", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
@@ -110,7 +110,7 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing("Off->Tx (T)", &radio_transition_result, cca);
+            log_timing("Off->Tx(T )", &radio_transition_result, cca);
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -123,7 +123,7 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing("Tx->Tx  (T)", &radio_transition_result, cca);
+            log_timing("Tx->Tx (T )", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
@@ -134,7 +134,7 @@ where
     // tx -> off
     let off_radio = match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            log_timing("Tx->Off (T)", &radio_transition_result, cca);
+            log_timing("Tx->Off(T )", &radio_transition_result, cca);
             let TxResult::Sent(radio_frame, ..) = radio_transition_result.prev_task_result;
             unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
             radio_transition_result.this_state
