@@ -52,6 +52,13 @@ rtos-trace = [
     "dot15d4-util/rtos-trace",
     "dot15d4-driver/rtos-trace",
 ]
+
+# Use an external sleep timer clock source.
+# Note: Must NOT be activated while a crystal oscillator is installed. May
+#       damage hardware if not properly configured.
+ext-lf-clk = ["dot15d4-driver/ext-lf-clk"]
+
+# Interactive terminal support
 terminal = ["dot15d4-util/terminal"]
 
 # Support for Nordic nrf52840

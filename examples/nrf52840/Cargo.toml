@@ -77,6 +77,11 @@ rtos-trace = [
 ]
 _gpio-trace = []
 
+# Use an external sleep timer clock source.
+# Note: Must NOT be activated while a crystal oscillator is installed. May
+#       damage hardware if not properly configured.
+ext-lf-clk = ["dot15d4/ext-lf-clk"]
+
 # interactive terminal support
 terminal = ["dot15d4/terminal", "defmt"]
 

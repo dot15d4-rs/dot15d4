@@ -3,6 +3,8 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "ext-lf-clk")]
+use dot15d4::driver::nrf_interrupt_executor;
 #[cfg(feature = "rtos-trace")]
 use embassy_nrf as _;
 
@@ -14,7 +16,12 @@ use dot15d4::driver::{
 use dot15d4_examples_nrf52840::{
     config_peripherals, gpio_trace::PIN_TIMER_SIGNAL, swi_executor, toggle_gpiote_pin,
 };
+#[cfg(feature = "ext-lf-clk")]
+use dot15d4_examples_nrf52840::{observe_gpio_event, wait_for_gpio_event};
 use embassy_executor::Spawner;
+
+#[cfg(feature = "ext-lf-clk")]
+nrf_interrupt_executor!(gpiote_executor, GPIOTE);
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -26,15 +33,27 @@ async fn main(_spawner: Spawner) {
         start_tracing,
     );
 
+    let swi_executor = swi_executor();
+    #[cfg(feature = "ext-lf-clk")]
+    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
+
+    let mut timer = resources.timer;
+    let gpiote = resources.gpiote;
+
     let toggle_alarm_pin = || {
-        toggle_gpiote_pin(&resources.gpiote, PIN_TIMER_SIGNAL.gpiote_channel as usize);
+        toggle_gpiote_pin(&gpiote, PIN_TIMER_SIGNAL.gpiote_channel as usize);
     };
 
-    let executor = swi_executor();
-    let mut timer = resources.timer;
-
     let timer_task = async {
+        // We specify absolute uptime values so that we can test timer
+        // synchronization when working with synchronized devices.
+        #[cfg(not(feature = "ext-lf-clk"))]
         let mut timeout = timer.now();
+        #[cfg(feature = "ext-lf-clk")]
+        let mut timeout = {
+            wait_for_gpio_event(gpiote_executor, &gpiote).await;
+            observe_gpio_event(gpiote_executor, &timer, &gpiote).await
+        };
 
         for _ in 0..10 {
             const PERIOD: LocalClockDuration = LocalClockDuration::micros(500);
@@ -67,7 +86,7 @@ async fn main(_spawner: Spawner) {
         toggle_alarm_pin();
     };
 
-    unsafe { executor.spawn(timer_task).await };
+    unsafe { swi_executor.spawn(timer_task).await };
 
     toggle_alarm_pin();
 

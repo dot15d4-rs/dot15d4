@@ -28,10 +28,7 @@ async fn main(spawner: Spawner) {
     let start_tracing = dot15d4::util::trace::instrument!(embassy cpu_freq: 64_000_000 Hz);
 
     let AvailableResources {
-        radio,
-        clocks,
-        mut timer,
-        ..
+        radio, mut timer, ..
     } = dot15d4_examples_nrf52840::config_peripherals(
         #[cfg(feature = "rtos-trace")]
         start_tracing,
@@ -41,7 +38,6 @@ async fn main(spawner: Spawner) {
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
         radio,
-        clocks,
         timer,
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
