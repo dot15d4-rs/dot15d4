@@ -1,20 +1,23 @@
 #![no_std]
 #![cfg(feature = "nrf52840")]
 
+#[cfg(feature = "timer-trace")]
+use core::{future::poll_fn, task::Poll};
+
 use panic_probe as _;
 
-#[cfg(feature = "timer-trace")]
-use dot15d4::driver::socs::nrf::NrfRadioTimerTracingConfig;
 use dot15d4::driver::{
     executor::{InterruptExecutor, PB3},
     socs::nrf::{
         executor::{nrf_interrupt_executor, NrfInterruptPriority},
-        export::{
-            pac::{CorePeripherals, Peripherals, CLOCK, GPIOTE, NVMC, RADIO, SCB, UICR},
-            Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted,
-        },
-        NrfRadioSleepTimer,
+        export::pac::{CorePeripherals, Peripherals, GPIOTE, NVMC, RADIO, SCB, UICR},
+        LfClockSource, NrfRadioSleepTimer, NrfRadioTimerConfig,
     },
+};
+#[cfg(feature = "timer-trace")]
+use dot15d4::driver::{
+    socs::nrf::NrfRadioTimerTracingConfig,
+    timer::{export::ExtU64, HardwareEvent, HighPrecisionTimer, LocalClockInstant, RadioTimerApi},
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
@@ -91,15 +94,11 @@ pub mod gpio_trace {
 
     // Timer pins.
     #[cfg(feature = "timer-trace")]
-    pub const PIN_TIMER_TICK: GpioteConfig = GpioteConfig::new(TimerTick, P0, 27, Out);
+    pub const PIN_TIMER_TICK: GpioteConfig = GpioteConfig::new(TimerTick, P0, 31, Out);
     #[cfg(feature = "timer-trace")]
-    pub const PIN_TIMER_SIGNAL: GpioteConfig = GpioteConfig::new(TimerSignal, P0, 2, Out);
+    pub const PIN_TIMER_SIGNAL: GpioteConfig = GpioteConfig::new(TimerSignal, P0, 29, Out);
     #[cfg(feature = "timer-trace")]
-    pub const PIN_TIMER_EVENT: GpioteConfig = GpioteConfig::new(TimerEvent, P1, 15, In);
-
-    // Synchronization pin to trigger a timer event on another device.
-    #[cfg(feature = "timer-trace")]
-    pub const PIN_SYNC_OUT: GpioteConfig = GpioteConfig::new(TimerEvent, P1, 14, Out);
+    pub const PIN_TIMER_EVENT: GpioteConfig = GpioteConfig::new(TimerEvent, P0, 2, In);
 
     pub(super) fn config_gpiote(peripherals: &Peripherals, config: &GpioteConfig) {
         if matches!(config.direction, In) {
@@ -142,7 +141,6 @@ pub struct AvailableResources {
     #[cfg(feature = "_gpio-trace")]
     pub gpiote: GPIOTE,
     pub radio: RADIO,
-    pub clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
     pub timer: NrfRadioSleepTimer,
     #[cfg(feature = "terminal")]
     pub sync_in: DownChannel,
@@ -185,32 +183,36 @@ pub fn config_peripherals(
         }
     }
 
-    let clocks = config_clock(peripherals.CLOCK);
+    #[cfg(not(feature = "ext-lf-clk"))]
+    let sleep_timer_clk_src = LfClockSource::Xtal;
+    #[cfg(feature = "ext-lf-clk")]
+    let sleep_timer_clk_src = LfClockSource::External;
+    let timer_config = NrfRadioTimerConfig {
+        rtc: peripherals.RTC0,
+        timer: peripherals.TIMER0,
+        clock: peripherals.CLOCK,
+        sleep_timer_clk_src,
 
-    #[cfg(feature = "timer-trace")]
-    let timer_tracing_config = NrfRadioTimerTracingConfig {
-        gpiote_out_channel: PIN_TIMER_SIGNAL.gpiote_channel as usize,
-        gpiote_in_channel: PIN_TIMER_EVENT.gpiote_channel as usize,
-        gpiote_tick_channel: PIN_TIMER_TICK.gpiote_channel as usize,
-        ppi_tick_channel: PpiChannel::RadioTimerTick as usize,
-    };
-    let timer = NrfRadioSleepTimer::new(
-        peripherals.RTC0,
-        peripherals.TIMER0,
-        [
+        ppi_channels: [
             PpiChannel::RadioTimer1 as usize,
             PpiChannel::RadioTimer2 as usize,
         ],
-        TIMER_PPI_CHANNEL_GROUP,
+        ppi_channel_group: TIMER_PPI_CHANNEL_GROUP,
+
         #[cfg(feature = "timer-trace")]
-        timer_tracing_config,
-    );
+        tracing_config: NrfRadioTimerTracingConfig {
+            gpiote_out_channel: PIN_TIMER_SIGNAL.gpiote_channel as usize,
+            gpiote_in_channel: PIN_TIMER_EVENT.gpiote_channel as usize,
+            gpiote_tick_channel: PIN_TIMER_TICK.gpiote_channel as usize,
+            ppi_tick_channel: PpiChannel::RadioTimerTick as usize,
+        },
+    };
+    let timer = NrfRadioSleepTimer::new(timer_config);
 
     AvailableResources {
         #[cfg(feature = "_gpio-trace")]
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
-        clocks,
         timer,
         #[cfg(feature = "terminal")]
         sync_in: _channels.down.0,
@@ -251,16 +253,51 @@ fn soft_reset(scb: &SCB) {
     unsafe { scb.aircr.write(AIRCR_VECTKEY_MASK | SYSRESETREQ) };
 }
 
-fn config_clock(clock: CLOCK) -> Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted> {
-    // Enable external oscillators.
-    Clocks::new(clock)
-        .enable_ext_hfosc()
-        .set_lfclk_src_external(LfOscConfiguration::NoExternalNoBypass)
-        .start_lfclk()
-}
-
 pub fn toggle_gpiote_pin(gpiote: &GPIOTE, gpiote_channel: usize) {
     gpiote.tasks_out[gpiote_channel].write(|w| w.tasks_out().set_bit());
+}
+
+#[cfg(feature = "timer-trace")]
+pub async fn wait_for_gpio_event<Executor: InterruptExecutor>(
+    executor: &mut Executor,
+    gpiote: &GPIOTE,
+) {
+    const GPIOTE_CHANNEL: usize = GpioteChannel::TimerEvent as usize;
+    const GPIOTE_MASK: u32 = 1 << GPIOTE_CHANNEL;
+
+    let gpiote_event = &gpiote.events_in[GPIOTE_CHANNEL];
+
+    let wait_for_event = poll_fn(|_| {
+        if gpiote_event.read().events_in().bit_is_set() {
+            gpiote.intenclr.write(|w| unsafe { w.bits(GPIOTE_MASK) });
+            gpiote_event.reset();
+            Poll::Ready(())
+        } else {
+            gpiote.intenset.write(|w| unsafe { w.bits(GPIOTE_MASK) });
+            Poll::Pending
+        }
+    });
+    unsafe { executor.spawn(wait_for_event) }.await;
+}
+
+#[cfg(feature = "timer-trace")]
+pub async fn observe_gpio_event<Timer: RadioTimerApi, Executor: InterruptExecutor>(
+    executor: &mut Executor,
+    timer: &Timer,
+    gpiote: &GPIOTE,
+) -> LocalClockInstant {
+    let timeout = timer.now() + 1.millis();
+    let high_precision_timer = timer.start_high_precision_timer(Some(timeout)).unwrap();
+
+    high_precision_timer
+        .observe_event(HardwareEvent::GpioToggled)
+        .unwrap();
+
+    wait_for_gpio_event(executor, gpiote).await;
+
+    high_precision_timer
+        .poll_event(HardwareEvent::GpioToggled)
+        .unwrap()
 }
 
 nrf_interrupt_executor!(executor, SWI0_EGU0);

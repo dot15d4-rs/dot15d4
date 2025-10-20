@@ -1,3 +1,17 @@
+# This configuration has been tested with a yapicoprobe flashed to a
+# pico2, mounted on a breadboard and connected to an nRF52840 dongle via
+# SWDIO/CLK.
+
+# The dongle may be powered from the pico2 at 3.3V via VCC OUT. This
+# requires SB2 to be cut and SB1 to be soldered.
+
+# Powering via VBUS is dangerous. By default the internal DC/DC converter will
+# step VDD voltage down to 1.8V. In this state the pico2 will drive SWD inputs
+# to voltages above the absolute maximum rating (VDD+0.3).
+
+[default.probe]
+speed = 6000 # Configure lower speeds in case of connection issues.
+
 [default.general]
 chip = "nRF52840_xxAA"
 

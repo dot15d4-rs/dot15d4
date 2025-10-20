@@ -8,8 +8,6 @@ use core::{
 };
 
 use dot15d4_util::{debug, frame::FramePdu, sync::CancellationGuard};
-// TODO: Remove HAL dependency.
-use nrf52840_hal::clocks::{Clocks, ExternalOscillator, LfOscStarted};
 use nrf52840_pac::{self as pac, radio::state::STATE_A};
 
 #[cfg(feature = "rtos-trace")]
@@ -45,11 +43,6 @@ use super::{
 };
 
 use self::executor::NrfInterruptExecutor;
-
-pub mod export {
-    // TODO: Remove HAL dependency.
-    pub use nrf52840_hal::clocks::{Clocks, ExternalOscillator, LfOscConfiguration, LfOscStarted};
-}
 
 // The nRF hardware only supports default CCA duration.
 const _: () = {
@@ -249,7 +242,8 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
     ///   peripheral.
     pub fn new(
         radio: pac::RADIO,
-        _clocks: Clocks<ExternalOscillator, ExternalOscillator, LfOscStarted>,
+        // Note: The nRF radio timer implicitly enforces clock policy for the
+        //       radio.
         timer: NrfRadioSleepTimer,
         #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
     ) -> Self {

@@ -15,7 +15,7 @@ use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU64;
 #[cfg(feature = "timer-trace")]
 use nrf52840_pac::GPIOTE;
-use nrf52840_pac::{interrupt, Peripherals, NVIC, PPI, RADIO, RTC0, TIMER0};
+use nrf52840_pac::{interrupt, Peripherals, CLOCK, NVIC, PPI, RADIO, RTC0, TIMER0};
 
 use crate::{
     socs::nrf::executor::NrfInterruptPriority,
@@ -330,14 +330,7 @@ impl State {
     ///
     /// This must be called during early initialization while no concurrent
     /// critical sections are active.
-    pub fn init(
-        &self,
-        rtc: RTC0,
-        timer: TIMER0,
-        ppi_channels: [usize; 2],
-        ppi_channel_group: usize,
-        #[cfg(feature = "timer-trace")] tracing_config: NrfRadioTimerTracingConfig,
-    ) {
+    pub fn init(&self, config: NrfRadioTimerConfig) {
         assert_eq!(
             self.init_state
                 .swap(InitializationState::Initializing as u8, Ordering::AcqRel),
@@ -347,7 +340,10 @@ impl State {
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::instrument();
 
-        let [ppi_channel1, ppi_channel2] = ppi_channels;
+        super::start_hf_oscillator(&config.clock);
+        super::start_lf_clock(&config.clock, config.sleep_timer_clk_src);
+
+        let [ppi_channel1, ppi_channel2] = config.ppi_channels;
         debug_assert!(ppi_channel1 <= 19);
         debug_assert!(ppi_channel2 <= 19);
         debug_assert_ne!(ppi_channel1, ppi_channel2);
@@ -358,9 +354,12 @@ impl State {
             Ordering::Relaxed,
         );
 
-        debug_assert!(ppi_channel_group <= 5);
+        debug_assert!(config.ppi_channel_group <= 5);
         self.ppi_channel_group
-            .store(ppi_channel_group, Ordering::Relaxed);
+            .store(config.ppi_channel_group, Ordering::Relaxed);
+
+        let rtc = config.rtc;
+        let timer = config.timer;
 
         #[cfg(feature = "timer-trace")]
         {
@@ -369,7 +368,7 @@ impl State {
                 gpiote_in_channel,
                 gpiote_tick_channel,
                 ppi_tick_channel,
-            } = tracing_config;
+            } = config.tracing_config;
 
             debug_assert!(gpiote_out_channel <= 7);
             debug_assert!(gpiote_in_channel <= 7);
@@ -1897,26 +1896,27 @@ pub struct NrfRadioTimerTracingConfig {
     pub ppi_tick_channel: usize,
 }
 
+pub struct NrfRadioTimerConfig {
+    pub rtc: RTC0,
+    pub timer: TIMER0,
+    // We take ownership of the clock to enforce clock policy:
+    // - The radio requires an external HF crystal oscillator.
+    // - The hybrid timer requires the LF oscillator to be continuously enabled.
+    pub clock: CLOCK,
+    pub sleep_timer_clk_src: super::LfClockSource,
+    pub ppi_channels: [usize; 2],
+    pub ppi_channel_group: usize,
+    #[cfg(feature = "timer-trace")]
+    pub tracing_config: NrfRadioTimerTracingConfig,
+}
+
 impl NrfRadioSleepTimer {
     pub const FREQUENCY: TimerRateU64<32_768> = TimerRateU64::from_raw(1);
 
     /// Instantiate the timer for the first time. Consumes the required
     /// peripherals. Further copies can then be created.
-    pub fn new(
-        rtc: RTC0,
-        timer: TIMER0,
-        ppi_channels: [usize; 2],
-        ppi_channel_group: usize,
-        #[cfg(feature = "timer-trace")] tracing_config: NrfRadioTimerTracingConfig,
-    ) -> Self {
-        STATE.init(
-            rtc,
-            timer,
-            ppi_channels,
-            ppi_channel_group,
-            #[cfg(feature = "timer-trace")]
-            tracing_config,
-        );
+    pub fn new(config: NrfRadioTimerConfig) -> Self {
+        STATE.init(config);
         Self { _inner: () }
     }
 }

@@ -38,7 +38,6 @@ fn main() -> ! {
 
     let AvailableResources {
         radio,
-        clocks,
         timer,
         #[cfg(feature = "terminal")]
         sync_in,
@@ -55,7 +54,6 @@ fn main() -> ! {
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
         radio,
-        clocks,
         timer,
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
