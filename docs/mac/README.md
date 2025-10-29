@@ -51,7 +51,7 @@ We target
 - Don't distinguish between frame representation and frame buffer (zerocopy, RAM efficiency).
 - Generic headroom/tailroom info must be available at all spots where packets might be allocated before allocation and without exposing driver or lower-stack details.
 - Pass around references to buffers rather than the buffer itself.
-- Don't tie buffer or frame livetimes to the livetime of long-lived objects like services, sockets, interfaces or other elements of the network stack.
+- Don't tie buffer or frame lifetimes to the lifetime of long-lived objects like services, sockets, interfaces or other elements of the network stack.
 - Avoid move semantics when it results in copying large pieces of memory.
 - Hide resource-intensive features behind feature gates (security, IEs, ...).
 
