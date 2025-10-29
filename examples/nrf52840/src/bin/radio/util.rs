@@ -1,15 +1,22 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use cortex_m::asm::wfe;
+#[cfg(all(feature = "timer-trace", not(debug_assertions)))]
+use dot15d4::driver::timer::{export::ExtU64, HardwareSignal, LocalClockDuration, TimedSignal};
+#[cfg(any(feature = "defmt", feature = "log"))]
+use dot15d4::driver::{radio::HighPrecisionTimerOf, timer::HighPrecisionTimer};
 use dot15d4::{
-    driver::radio::{
-        frame::{
-            Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
-            PanId, RadioFrame,
+    driver::{
+        radio::{
+            frame::{
+                Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
+                PanId, RadioFrame,
+            },
+            phy::PhyConfig,
+            tasks::{RadioTask, RadioTransitionResult, TaskRx, TaskTx},
+            DriverConfig, PhyOf,
         },
-        phy::PhyConfig,
-        tasks::{RadioTask, RadioTransitionResult, TaskRx, TaskTx},
-        DriverConfig, PhyOf,
+        timer::{LocalClockInstant, RadioTimerApi},
     },
     mac::frame::{
         repr::{MpduRepr, SeqNrRepr},
@@ -18,8 +25,7 @@ use dot15d4::{
     util::allocator::BufferAllocator,
 };
 
-#[cfg(any(feature = "defmt", feature = "log"))]
-use dot15d4::driver::{radio::HighPrecisionTimerOf, timer::HighPrecisionTimer};
+use crate::{TestSuite, TEST_SLOT_DURATION};
 
 // PAN ID: 7B:3C
 const PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0x3C, 0x7B]);
@@ -83,14 +89,153 @@ pub fn tx_task<Config: DriverConfig>(cca: bool, buffer_allocator: BufferAllocato
     TaskTx { radio_frame, cca }
 }
 
+// Allocates the given test slot and returns the slot's start time.
+// Panics if the slot cannot be allocated.
+pub async fn allocate_test_slot<Timer: RadioTimerApi>(
+    timer: &mut Timer,
+    anchor_time: LocalClockInstant,
+    test_suite: TestSuite,
+    test_slot: usize,
+    best_effort: bool,
+) -> LocalClockInstant {
+    const TEST_SLOT_DURATION_NS: u64 = TEST_SLOT_DURATION.ticks();
+
+    let anchor_time_ns = anchor_time.ticks();
+    let test_start_time_ns =
+        anchor_time_ns + (test_suite.slot() + test_slot) as u64 * TEST_SLOT_DURATION_NS;
+    let test_start_time = LocalClockInstant::from_ticks(test_start_time_ns);
+
+    // Note: Bit banging test marker codes at an acceptable frequency only works
+    //       in release mode.
+    #[cfg(all(feature = "timer-trace", not(debug_assertions)))]
+    if test_slot == 0 {
+        // Signal the start of a new test suite by bit-banging the
+        // manchester-encoded test suite number to the timer GPIO trace. This
+        // requires the high precision timer to be available which is the case
+        // at the beginning of each test suite as by convention the radio must
+        // be off at this point.
+
+        let test_slot_marker_time = test_start_time - 1.millis();
+        let mut high_precision_timer = timer
+            .start_high_precision_timer(Some(test_slot_marker_time - Timer::GUARD_TIME))
+            .unwrap();
+
+        const MANCHESTER_HALF_PERIOD_NS: u64 = LocalClockDuration::micros(20).ticks();
+
+        let test_slot_marker_time_ns = test_slot_marker_time.ticks();
+        for (index, &toggle_at_tick) in test_suite.manchester_encode().iter().enumerate() {
+            if index > 0 && toggle_at_tick == 0 {
+                break;
+            }
+
+            let toggle_at = LocalClockInstant::from_ticks(
+                test_slot_marker_time_ns + toggle_at_tick as u64 * MANCHESTER_HALF_PERIOD_NS,
+            );
+            let timed_signal = TimedSignal::new(toggle_at, HardwareSignal::GpioToggle);
+            high_precision_timer
+                .schedule_timed_signal(timed_signal)
+                .unwrap();
+
+            // Safety: We run from the main thread (i.e. at a lower priority than the
+            //         timer) and don't migrate away from it.
+            unsafe { high_precision_timer.wait_for(HardwareSignal::GpioToggle) }.await;
+        }
+    }
+
+    if best_effort {
+        // Safety: see above.
+        unsafe { timer.wait_until(test_start_time) }.await.unwrap();
+    }
+
+    test_start_time
+}
+
+impl TestSuite {
+    pub fn manchester_encode(&self) -> &[u8] {
+        const MANCHESTER0: [u8; 10] = TestSuite::manchester_encode_internal(0);
+        const MANCHESTER1: [u8; 10] = TestSuite::manchester_encode_internal(1);
+        const MANCHESTER2: [u8; 10] = TestSuite::manchester_encode_internal(2);
+        const MANCHESTER3: [u8; 10] = TestSuite::manchester_encode_internal(3);
+        const MANCHESTER4: [u8; 10] = TestSuite::manchester_encode_internal(4);
+        const MANCHESTER5: [u8; 10] = TestSuite::manchester_encode_internal(5);
+        const MANCHESTER6: [u8; 10] = TestSuite::manchester_encode_internal(6);
+        const MANCHESTER7: [u8; 10] = TestSuite::manchester_encode_internal(7);
+
+        match self {
+            TestSuite::SingleTimedRxOff => &MANCHESTER0,
+            TestSuite::SingleTimedTxRx => &MANCHESTER1,
+            TestSuite::SingleTimedTxTxWithoutCca => &MANCHESTER2,
+            TestSuite::SingleTimedTxTxWithCca => &MANCHESTER3,
+            TestSuite::SingleBestEffortRxOff => &MANCHESTER4,
+            TestSuite::SingleBestEffortTxRx => &MANCHESTER5,
+            TestSuite::SingleBestEffortTxTxWithoutCca => &MANCHESTER6,
+            TestSuite::SingleBestEffortTxTxWithCca => &MANCHESTER7,
+        }
+    }
+
+    const fn manchester_encode_internal<const NUM_TICKS: usize>(n: u8) -> [u8; NUM_TICKS] {
+        let num_bits = NUM_TICKS / 2;
+        debug_assert!(n < (1 << (num_bits - 1)));
+
+        let mut toggles = [0; NUM_TICKS];
+
+        let mut current_signal_level = false;
+        let mut tick = 0;
+        let mut num_toggles = 0;
+
+        // Add a 1-bit preamble.
+        let n = (n << 1) | 1;
+
+        // Process each bit, LSB first.
+        let mut bit_pos: usize = 0;
+        while bit_pos < num_bits {
+            let bit_value = ((n >> bit_pos) & 1) == 1;
+
+            // Manchester encoding:
+            // 0: Low->High
+            // 1: High->Low
+
+            // The required signal at the start of a bit equals the bit value.
+            if current_signal_level != bit_value {
+                // The initial signal level doesn't match: toggle it.
+                toggles[num_toggles] = tick;
+                num_toggles += 1;
+            }
+            tick += 1;
+
+            toggles[num_toggles] = tick;
+            num_toggles += 1;
+            tick += 1;
+
+            current_signal_level = !bit_value;
+            bit_pos += 1;
+        }
+
+        // Always toggle back to zero.
+        if current_signal_level {
+            toggles[num_toggles] = tick;
+        }
+
+        toggles
+    }
+}
+
 pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>(
     _label: &str,
+    _anchor_time: LocalClockInstant,
+    _test_suite: TestSuite,
+    _test_slot: usize,
+    _entry: usize,
     _radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
     _cca: bool,
 ) {
     #[cfg(any(feature = "defmt", feature = "log"))]
     {
-        let cca_hint = if _cca { " with CCA" } else { "" };
+        use crate::TEST_SLOT_DURATION_MS;
+
+        let cca_hint = if _cca { " - with CCA" } else { "" };
+        let anchor_time_ns = _anchor_time.ticks();
+        let ts_ms = (_test_suite.slot() + _test_slot) * TEST_SLOT_DURATION_MS;
 
         let RadioTransitionResult {
             scheduled_entry,
@@ -98,14 +243,24 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
             ..
         } = _radio_transition_result;
         let (scheduled_ns, measured_ns) = (
-            scheduled_entry.map(|ts| ts.ticks()).unwrap_or(0),
-            measured_entry.ticks(),
+            scheduled_entry
+                .map(|ts| ts.ticks() - anchor_time_ns)
+                .unwrap_or(0),
+            measured_entry.ticks() - anchor_time_ns,
         );
         let difference_ns = if scheduled_ns > 0 {
             measured_ns as i64 - scheduled_ns as i64
         } else {
             0
         };
+
+        if _entry == 1 {
+            if _test_slot == 0 {
+                dot15d4::util::log::info!("Test Suite {}", _test_suite as usize);
+            }
+
+            dot15d4::util::log::info!(" @ {} ms:", ts_ms);
+        }
 
         // We allow +/- one high precision clock tick offset between scheduled and
         // measured timestamps.
@@ -114,177 +269,25 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
         if scheduled_ns != 0 {
             if difference_ns.unsigned_abs() <= tolerance_ns {
                 dot15d4::util::log::info!(
-                    "{}{}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns)\0",
+                    "  {}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns){}\0",
                     _label,
-                    cca_hint,
                     scheduled_ns,
                     measured_ns,
-                    difference_ns
+                    difference_ns,
+                    cca_hint,
                 );
             } else {
                 dot15d4::util::log::error!(
-                    "{}{}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns)\0",
+                    "  {}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns){}\0",
                     _label,
-                    cca_hint,
                     scheduled_ns,
                     measured_ns,
-                    difference_ns
+                    difference_ns,
+                    cca_hint,
                 );
             }
         } else {
-            dot15d4::util::log::info!("{}{}: Actual: {} ns\0", _label, cca_hint, measured_ns,);
-        }
-    }
-}
-
-#[cfg(feature = "terminal")]
-pub mod terminal {
-    use dot15d4::util::{error, info, rtt::RTT_SYNC_BUF_LEN};
-    use rtt_target::DownChannel;
-
-    enum TerminalCommand {
-        Start,
-        Unknown,
-        Invalid,
-    }
-
-    pub struct Terminal {
-        sync_in: DownChannel,
-        read_idx: usize,
-        write_idx: usize,
-        len: usize,
-        buf: [u8; RTT_SYNC_BUF_LEN],
-    }
-
-    impl Terminal {
-        pub fn new(sync_in: DownChannel) -> Self {
-            Self {
-                sync_in,
-                read_idx: 0,
-                write_idx: 0,
-                len: 0,
-                buf: [0; RTT_SYNC_BUF_LEN],
-            }
-        }
-
-        fn buffer_is_full(&self) -> bool {
-            self.len == self.buf.len()
-        }
-
-        fn buffer_capacity(&self) -> usize {
-            self.buf.len()
-        }
-
-        fn reset(&mut self) {
-            self.read_idx = 0;
-            self.write_idx = 0;
-            self.len = 0;
-        }
-
-        fn consume(&mut self, num_bytes: usize) {
-            self.read_idx += num_bytes;
-            self.read_idx %= self.buffer_capacity();
-            self.len -= num_bytes;
-        }
-
-        fn read(&mut self) -> Result<usize, ()> {
-            if self.buffer_is_full() {
-                error!("Received invalid command.");
-                self.reset();
-                return Err(());
-            }
-
-            let writable_range = if self.write_idx >= self.read_idx {
-                // Note: Equality means "empty" because we just checked that the
-                //       buffer is not full.
-                self.write_idx..RTT_SYNC_BUF_LEN
-            } else {
-                self.write_idx..self.read_idx
-            };
-            let remaining_buffer = &mut self.buf[writable_range];
-
-            let bytes_read = self.sync_in.read(remaining_buffer);
-            self.write_idx += bytes_read % self.buffer_capacity();
-            self.len += bytes_read;
-
-            Ok(bytes_read)
-        }
-
-        fn read_line(&mut self) -> Result<usize, ()> {
-            let mut start = self.read_idx;
-            let mut line_len = 0;
-            loop {
-                let bytes_read = self.read()?;
-                if bytes_read == 0 {
-                    continue;
-                }
-
-                let end = start + bytes_read;
-
-                if let Some(index) = self.buf[start..end]
-                    .iter()
-                    .enumerate()
-                    .find(|(_, &byte)| byte == b'\n')
-                    .map(|(index, _)| index)
-                {
-                    line_len += index + 1;
-                    return Ok(line_len);
-                }
-
-                start = end % self.buffer_capacity();
-                line_len += bytes_read;
-            }
-        }
-
-        fn read_command(&mut self) -> TerminalCommand {
-            let line_len = if let Ok(line_len) = self.read_line() {
-                // Don't compare newline character.
-                line_len - 1
-            } else {
-                error!("Received invalid command.");
-                return TerminalCommand::Invalid;
-            };
-
-            'command: for command in [TerminalCommand::Start] {
-                let command_as_bytes = match command {
-                    TerminalCommand::Start => b"start".as_slice(),
-                    _ => unreachable!(),
-                };
-
-                let mut cursor = self.read_idx;
-                let mut idx = 0;
-                while idx < line_len {
-                    if idx >= command_as_bytes.len() || self.buf[cursor] != command_as_bytes[idx] {
-                        continue 'command;
-                    }
-
-                    idx += 1;
-                    cursor = (cursor + 1) % self.buffer_capacity();
-                }
-
-                self.consume(line_len + 1);
-                info!("< {}", unsafe {
-                    str::from_utf8_unchecked(command_as_bytes)
-                });
-                return command;
-            }
-
-            self.consume(line_len + 1);
-            error!("Received unknown command.");
-            TerminalCommand::Unknown
-        }
-
-        pub fn start(mut self) -> Self {
-            info!("> ready");
-            match self.read_command() {
-                TerminalCommand::Start => {}
-                _ => super::done(),
-            }
-            self
-        }
-
-        pub fn done(self) {
-            info!("> done");
+            dot15d4::util::log::info!("  {}: Actual: {} ns{}\0", _label, measured_ns, cca_hint,);
         }
     }
 }

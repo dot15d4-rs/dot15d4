@@ -23,8 +23,6 @@ use dot15d4::driver::{
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
-#[cfg(feature = "terminal")]
-use dot15d4::util::rtt::export::DownChannel;
 #[cfg(any(feature = "log", feature = "defmt", feature = "rtos-trace",))]
 use dot15d4::util::rtt::init_rtt_channels;
 
@@ -162,8 +160,6 @@ pub struct AvailableResources {
     pub gpiote: GPIOTE,
     pub radio: RADIO,
     pub timer: NrfRadioSleepTimer,
-    #[cfg(feature = "terminal")]
-    pub sync_in: DownChannel,
 }
 
 pub fn config_peripherals(
@@ -207,9 +203,9 @@ pub fn config_peripherals(
         }
     }
 
-    #[cfg(not(feature = "ext-lf-clk"))]
+    #[cfg(not(feature = "device-sync"))]
     let sleep_timer_clk_src = LfClockSource::Xtal;
-    #[cfg(feature = "ext-lf-clk")]
+    #[cfg(feature = "device-sync")]
     let sleep_timer_clk_src = LfClockSource::External;
     let timer_config = NrfRadioTimerConfig {
         rtc: peripherals.RTC0,
@@ -238,8 +234,6 @@ pub fn config_peripherals(
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
         timer,
-        #[cfg(feature = "terminal")]
-        sync_in: _channels.down.0,
     }
 }
 
@@ -286,18 +280,22 @@ pub async fn wait_for_gpio_event<Executor: InterruptExecutor>(
     executor: &mut Executor,
     gpiote: &GPIOTE,
 ) {
-    const GPIOTE_CHANNEL: usize = GpioteChannel::TimerEvent as usize;
-    const GPIOTE_MASK: u32 = 1 << GPIOTE_CHANNEL;
+    const TIMER_EVENT_GPIOTE_CHANNEL: usize = GpioteChannel::TimerEvent as usize;
+    const TIMER_EVENT_GPIOTE_MASK: u32 = 1 << TIMER_EVENT_GPIOTE_CHANNEL;
 
-    let gpiote_event = &gpiote.events_in[GPIOTE_CHANNEL];
+    let gpiote_event = &gpiote.events_in[TIMER_EVENT_GPIOTE_CHANNEL];
 
     let wait_for_event = poll_fn(|_| {
         if gpiote_event.read().events_in().bit_is_set() {
-            gpiote.intenclr.write(|w| unsafe { w.bits(GPIOTE_MASK) });
+            gpiote
+                .intenclr
+                .write(|w| unsafe { w.bits(TIMER_EVENT_GPIOTE_MASK) });
             gpiote_event.reset();
             Poll::Ready(())
         } else {
-            gpiote.intenset.write(|w| unsafe { w.bits(GPIOTE_MASK) });
+            gpiote
+                .intenset
+                .write(|w| unsafe { w.bits(TIMER_EVENT_GPIOTE_MASK) });
             Poll::Pending
         }
     });

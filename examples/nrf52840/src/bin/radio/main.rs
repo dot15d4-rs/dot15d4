@@ -13,6 +13,10 @@ mod tx_rx;
 mod tx_tx;
 mod util;
 
+#[cfg(not(feature = "device-sync"))]
+use dot15d4::driver::timer::RadioTimerApi;
+#[cfg(feature = "device-sync")]
+use dot15d4::{driver::nrf_interrupt_executor, util::info};
 use dot15d4::{
     driver::{
         executor::InterruptExecutor,
@@ -20,6 +24,7 @@ use dot15d4::{
             phy::{OQpsk250KBit, Phy, PhyConfig},
             RadioDriver,
         },
+        timer::LocalClockDuration,
     },
     util::buffer_allocator,
 };
@@ -28,10 +33,67 @@ use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 #[cfg(feature = "radio-trace")]
 use dot15d4_examples_nrf52840::radio_tracing_config;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor, AvailableResources};
+#[cfg(feature = "device-sync")]
+use dot15d4_examples_nrf52840::{observe_gpio_event, wait_for_gpio_event};
 
-use util::done;
-#[cfg(feature = "terminal")]
-use util::terminal::Terminal;
+use self::util::done;
+
+#[cfg(feature = "device-sync")]
+nrf_interrupt_executor!(gpiote_executor, GPIOTE);
+
+const TEST_SLOT_DURATION_MS: usize = 10;
+const TEST_SLOT_DURATION: LocalClockDuration =
+    LocalClockDuration::millis(TEST_SLOT_DURATION_MS as u64);
+
+use rx_off::Test as RxOffTest;
+use tx_rx::Test as TxRxTest;
+use tx_tx::Test as TxTxTest;
+
+#[repr(usize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TestSuite {
+    SingleTimedRxOff,
+    SingleTimedTxRx,
+    SingleTimedTxTxWithoutCca,
+    SingleTimedTxTxWithCca,
+    SingleBestEffortRxOff,
+    SingleBestEffortTxRx,
+    SingleBestEffortTxTxWithoutCca,
+    SingleBestEffortTxTxWithCca,
+}
+
+#[repr(usize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TestSuiteSlot {
+    // Timed tests occupy a well-defined number of time slots.
+    SingleTimedRxOff = 0,
+    SingleTimedTxRx = RxOffTest::NumSlots as usize,
+    SingleTimedTxTxWithoutCca = Self::SingleTimedTxRx as usize + TxRxTest::NumSlots as usize,
+    SingleTimedTxTxWithCca = Self::SingleTimedTxTxWithoutCca as usize + TxTxTest::NumSlots as usize,
+    // Best effort tests occupy one time slot each.
+    SingleBestEffortRxOff,
+    SingleBestEffortTxRx,
+    SingleBestEffortTxTxWithoutCca,
+    SingleBestEffortTxTxWithCca,
+}
+
+impl TestSuite {
+    pub fn slot(&self) -> usize {
+        (match self {
+            TestSuite::SingleTimedRxOff => TestSuiteSlot::SingleTimedRxOff,
+            TestSuite::SingleTimedTxRx => TestSuiteSlot::SingleTimedTxRx,
+            TestSuite::SingleTimedTxTxWithoutCca => TestSuiteSlot::SingleTimedTxTxWithoutCca,
+            TestSuite::SingleTimedTxTxWithCca => TestSuiteSlot::SingleTimedTxTxWithCca,
+            TestSuite::SingleBestEffortRxOff => TestSuiteSlot::SingleBestEffortRxOff,
+            TestSuite::SingleBestEffortTxRx => TestSuiteSlot::SingleBestEffortTxRx,
+            TestSuite::SingleBestEffortTxTxWithoutCca => {
+                TestSuiteSlot::SingleBestEffortTxTxWithoutCca
+            }
+            TestSuite::SingleBestEffortTxTxWithCca => TestSuiteSlot::SingleBestEffortTxTxWithCca,
+        }) as usize
+            + 1
+    }
+}
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -40,17 +102,14 @@ fn main() -> ! {
 
     let AvailableResources {
         radio,
-        timer,
-        #[cfg(feature = "terminal")]
-        sync_in,
+        #[cfg(feature = "device-sync")]
+        gpiote,
+        mut timer,
         ..
     } = config_peripherals(
         #[cfg(feature = "rtos-trace")]
         start_tracing,
     );
-
-    #[cfg(feature = "terminal")]
-    let terminal = Terminal::new(sync_in).start();
 
     #[cfg(feature = "executor-trace")]
     let executor_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
@@ -62,23 +121,49 @@ fn main() -> ! {
         #[cfg(feature = "radio-trace")]
         radio_tracing_config(),
     );
-    let executor = swi_executor();
+    let swi_executor = swi_executor();
+    #[cfg(feature = "device-sync")]
+    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
 
     let buffer_allocator = buffer_allocator!(
         { <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize },
         2
     );
-    executor.block_on(async {
-        let radio = rx_off::scenarios(radio, timer, buffer_allocator).await;
-        let radio = tx_rx::scenarios(radio, timer, buffer_allocator).await;
-        let _ = tx_tx::scenarios(radio, timer, buffer_allocator).await;
+
+    swi_executor.block_on(async {
+        #[cfg(not(feature = "device-sync"))]
+        let anchor_time = timer.now();
+        #[cfg(feature = "device-sync")]
+        let anchor_time = {
+            info!("Waiting for timer synchronization.");
+            wait_for_gpio_event(gpiote_executor, &gpiote).await;
+            observe_gpio_event(gpiote_executor, &timer, &gpiote).await
+        };
+
+        // Timed Tests
+
+        let radio = rx_off::timed(&mut timer, radio, anchor_time, buffer_allocator).await;
+        let radio = tx_rx::timed(&mut timer, radio, anchor_time, buffer_allocator).await;
+        // no CCA
+        let radio = tx_tx::timed(&mut timer, radio, anchor_time, false, buffer_allocator).await;
+        // CCA
+        let radio = tx_tx::timed(&mut timer, radio, anchor_time, true, buffer_allocator).await;
+
+        // Best Effort Tests
+
+        let radio = rx_off::best_effort(&mut timer, radio, anchor_time, buffer_allocator).await;
+        let radio = tx_rx::best_effort(&mut timer, radio, anchor_time, buffer_allocator).await;
+        // no CCA, SIFS
+        let radio =
+            tx_tx::best_effort(&mut timer, radio, anchor_time, false, buffer_allocator).await;
+        // CCA, SIFS
+        let _ = tx_tx::best_effort(&mut timer, radio, anchor_time, true, buffer_allocator).await;
+
+        // TODO: Test LIFS
     });
 
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::stop();
-
-    #[cfg(feature = "terminal")]
-    terminal.done();
 
     done();
 }

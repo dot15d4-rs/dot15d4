@@ -80,13 +80,13 @@ const _: () = {
 // debug-embed: 10
 const T_MEASURED_RAMP_UP_ERROR: LocalClockDuration =
     LocalClockDuration::from_ticks(10 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
-// all: 4
+// all: 5
 const T_MEASURED_RAMP_DOWN_ERROR: LocalClockDuration =
-    LocalClockDuration::from_ticks(4 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+    LocalClockDuration::from_ticks(5 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 // Ozone/JRun/SystemView: 4
-// debug-embed: 9
+// debug-embed: 8
 const T_MEASURED_TURNAROUND_ERROR: LocalClockDuration =
-    LocalClockDuration::from_ticks(9 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+    LocalClockDuration::from_ticks(8 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 // all: 195
 const T_MEASURED_TX_FRAMESTART_ERROR: LocalClockDuration =
     LocalClockDuration::from_ticks(195 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());

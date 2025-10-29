@@ -50,13 +50,8 @@ defmt = ["dep:defmt", "dot15d4-util/defmt"]
 
 # Use an external sleep timer clock source.
 #
-# Note: Must NOT be activated while a crystal oscillator is installed. May
-#       damage hardware if not properly configured.
-#
-# If the 'timer-trace' feature is also enabled, then the RTC uptime counter
-# start will by synchronized across devices. Timer initialization will block
-# until the 'PIN_TIMER_EVENT' pin is toggled which will then start the RTC.
-
+# Note: MUST be enabled while the LF clock pin (X1) is actively driven by an
+#       external signal otherwise your hardware may be damaged.
 ext-lf-clk = []
 
 # GPIO tracing

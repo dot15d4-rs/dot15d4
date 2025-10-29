@@ -78,13 +78,16 @@ rtos-trace = [
 ]
 _gpio-trace = []
 
-# Use an external sleep timer clock source.
-# Note: Must NOT be activated while a crystal oscillator is installed. May
-#       damage hardware if not properly configured.
-ext-lf-clk = ["dot15d4/ext-lf-clk"]
-
-# interactive terminal support
-terminal = ["dot15d4/terminal", "defmt"]
+# Synchronize the clock of multiple test devices with an external sleep timer
+# clock source and GPIO synchronization signals.
+#
+# If enabled, a common anchor time point will by established across devices.
+# Examples will block until the external clock signal is observed and the
+# 'PIN_TIMER_EVENT' pin is toggled up and back down.
+#
+# Note: MUST be enabled while the LF clock pin (X1) is actively driven by an
+#       external signal otherwise your hardware may be damaged.
+device-sync = ["dot15d4/ext-lf-clk", "timer-trace"]
 
 # An internal helper attribute that allows us to apply clippy in std mode.
 nrf52840 = [
