@@ -373,11 +373,12 @@ Minimal requirements for the "best effort" fragment of the overall model:
 Requirements specific to the timed/scheduled fragment of the overall model:
 
 - **R06.01** Each task MAY be assigned a precise start time by upper layers,
-  defined by a single edge of the radio clock (see timer driver framework
-  specification). This implicitly allocates an execution window to each task
-  between its own start tick and the start tick of the subsequent task. Tasks
-  that do not have a start time SHALL be executed "as fast as possible" as soon
-  as the previous tasks has finished ("best effort execution")
+  defined by a single edge of the radio clock (see [timer driver framework
+  specification](../timer/README.md)). This implicitly allocates an execution
+  window to each task between its own start tick and the start tick of the
+  subsequent task. Tasks that do not have a start time SHALL be executed "as
+  fast as possible" as soon as the previous tasks has finished ("best effort
+  execution")
 - **R06.02** Upper layers SHALL ensure that tasks are scheduled in advance
   respecting protocol- and driver-specific guard times. Upper layers SHALL
   allocate sufficiently large task execution windows for each task. Drivers
@@ -646,7 +647,7 @@ Timed tasks may contain the following data:
 - a sufficiently precise (in protocol / energy efficiency terms) timestamp that
   determines an RMARKER relative to the local monotonic and overflow-protected
   radio clock, given in (parts of) nanoseconds, radio clock ticks or symbols
-  (see the timer driver specification).
+  (see the [timer driver specification](../timer/README.md)).
   - The significance of the timestamp depends on the task type.
   - In case of rx tasks, the timestamp points to the expected earliest RMARKER at
     which a packet is to be expected at the local antenna.
