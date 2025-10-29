@@ -11,6 +11,8 @@ use dot15d4_embassy::{
 };
 #[cfg(feature = "executor-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
+#[cfg(feature = "radio-trace")]
+use dot15d4_examples_nrf52840::radio_tracing_config;
 use dot15d4_examples_nrf52840::AvailableResources;
 use embassy_executor::Spawner;
 use embassy_net::{
@@ -35,12 +37,14 @@ async fn main(spawner: Spawner) {
     );
 
     #[cfg(feature = "executor-trace")]
-    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    let executor_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     let radio = RadioDriver::new(
         radio,
         timer,
         #[cfg(feature = "executor-trace")]
-        gpiote_trace_channel,
+        executor_trace_channel,
+        #[cfg(feature = "radio-trace")]
+        radio_tracing_config(),
     );
     let buffer_allocator = mac_buffer_allocator!();
 

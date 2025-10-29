@@ -67,6 +67,7 @@ log = ["dep:log", "dep:rtt-target", "dot15d4/log", "dot15d4-embassy/log"]
 
 executor-trace = ["dot15d4/executor-trace", "_gpio-trace"]
 timer-trace = ["dot15d4/timer-trace", "_gpio-trace"]
+radio-trace = ["dot15d4/radio-trace", "_gpio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "dep:rtt-target",

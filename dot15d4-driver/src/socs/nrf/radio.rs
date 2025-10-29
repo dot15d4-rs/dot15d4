@@ -219,6 +219,16 @@ impl<Task> RadioDriver<NrfRadioDriver, Task> {
 /// been received.
 const BCC_FC_BITS: u32 = 2 * 8;
 
+#[cfg(feature = "radio-trace")]
+pub struct NrfRadioTracingConfig {
+    pub gpiote_frame_channel: usize,
+    pub gpiote_trx_channel: usize,
+    pub ppi_framestart_channel: usize,
+    pub ppi_frameend_channel: usize,
+    pub ppi_trxstart_channel: usize,
+    pub ppi_trxend_channel: usize,
+}
+
 /// "Radio Off" state.
 ///
 /// Entry: DISABLED event
@@ -245,10 +255,58 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         // Note: The nRF radio timer implicitly enforces clock policy for the
         //       radio.
         timer: NrfRadioSleepTimer,
-        #[cfg(feature = "executor-trace")] gpiote_trace_channel: usize,
+        #[cfg(feature = "executor-trace")] executor_trace_channel: usize,
+        #[cfg(feature = "radio-trace")] tracing_config: NrfRadioTracingConfig,
     ) -> Self {
         #[cfg(feature = "rtos-trace")]
         crate::radio::trace::instrument();
+
+        #[cfg(feature = "radio-trace")]
+        {
+            // Safety: We only use explicitly allocated PPI and GPIOTE
+            //         resources.
+            let ppi = unsafe { pac::Peripherals::steal().PPI };
+            let gpiote = unsafe { pac::Peripherals::steal().GPIOTE };
+
+            // Route framestart and end events to the frame pin.
+            let framestart_event = radio.events_framestart.as_ptr() as u32;
+            let framestart_task =
+                gpiote.tasks_set[tracing_config.gpiote_frame_channel].as_ptr() as u32;
+            let ch = &ppi.ch[tracing_config.ppi_framestart_channel];
+            ch.eep.write(|w| w.eep().variant(framestart_event));
+            ch.tep.write(|w| w.tep().variant(framestart_task));
+            ppi.fork[tracing_config.ppi_framestart_channel].tep.reset();
+
+            let frameend_event = radio.events_end.as_ptr() as u32;
+            let frameend_task =
+                gpiote.tasks_clr[tracing_config.gpiote_frame_channel].as_ptr() as u32;
+            let ch = &ppi.ch[tracing_config.ppi_frameend_channel];
+            ch.eep.write(|w| w.eep().variant(frameend_event));
+            ch.tep.write(|w| w.tep().variant(frameend_task));
+            ppi.fork[tracing_config.ppi_frameend_channel].tep.reset();
+
+            // Route ready and disabled events to the trx pin.
+            let trxstart_event = radio.events_ready.as_ptr() as u32;
+            let trxstart_task = gpiote.tasks_set[tracing_config.gpiote_trx_channel].as_ptr() as u32;
+            let ch = &ppi.ch[tracing_config.ppi_trxstart_channel];
+            ch.eep.write(|w| w.eep().variant(trxstart_event));
+            ch.tep.write(|w| w.tep().variant(trxstart_task));
+            ppi.fork[tracing_config.ppi_trxstart_channel].tep.reset();
+
+            let trxend_event = radio.events_disabled.as_ptr() as u32;
+            let trxend_task = gpiote.tasks_clr[tracing_config.gpiote_trx_channel].as_ptr() as u32;
+            let ch = &ppi.ch[tracing_config.ppi_trxend_channel];
+            ch.eep.write(|w| w.eep().variant(trxend_event));
+            ch.tep.write(|w| w.tep().variant(trxend_task));
+            ppi.fork[tracing_config.ppi_trxend_channel].tep.reset();
+
+            let ppi_channel_mask = (1 << tracing_config.ppi_framestart_channel)
+                | (1 << tracing_config.ppi_frameend_channel)
+                | (1 << tracing_config.ppi_trxstart_channel)
+                | (1 << tracing_config.ppi_trxend_channel);
+            // Safety: We operate on allocated channels only.
+            ppi.chenset.write(|w| unsafe { w.bits(ppi_channel_mask) });
+        }
 
         // Disable and enable to reset peripheral
         radio.power.write(|w| w.power().disabled());
@@ -303,7 +361,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             executor: *self::executor(
                 NrfInterruptPriority::HIGHEST_PRIORITY,
                 #[cfg(feature = "executor-trace")]
-                gpiote_trace_channel,
+                executor_trace_channel,
             ),
         };
 
