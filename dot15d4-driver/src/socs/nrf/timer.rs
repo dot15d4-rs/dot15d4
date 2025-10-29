@@ -521,12 +521,12 @@ impl State {
     }
 
     /// Returns 'true' while the high-precision timer is being synchronized to
-    /// the RTC.
+    /// the RTC via the "next tick" synchronization approach.
     ///
     /// Acquires alarm memory.
     ///
     /// May be called from both, interrupt and scheduling context.
-    fn is_rtc_synchronizing_timer(&self) -> bool {
+    fn is_rtc_pending_immediate_synchronization(&self) -> bool {
         let state = self.alarms[AlarmChannel::HighPrecisionTimer as usize]
             .state
             .load(Ordering::Relaxed);
@@ -556,12 +556,12 @@ impl State {
     }
 
     /// Transfer ownership of the RTC alarm to interrupt context to synchronize
-    /// the high-precision timer.
+    /// the high-precision timer via the "next tick" approach.
     ///
     /// Releases the high-precision timer alarm memory.
     ///
     /// Called exclusively from scheduling context.
-    fn rtc_start_timer_synchronization(&self) {
+    fn rtc_start_immediate_timer_synchronization(&self) {
         compiler_fence(Ordering::Release);
         self.alarms[AlarmChannel::HighPrecisionTimer as usize]
             .state
@@ -679,7 +679,7 @@ impl State {
     unsafe fn set_timer_epoch(&self, rtc_tick: u64) {
         debug_assert!(
             self.is_rtc_alarm_pending(AlarmChannel::HighPrecisionTimer)
-                || self.is_rtc_synchronizing_timer()
+                || self.is_rtc_pending_immediate_synchronization()
         );
         self.timer_epoch
             .set(TickConversion::rtc_tick_to_instant(rtc_tick));
@@ -752,7 +752,7 @@ impl State {
     fn on_timer_interrupt(&self) {
         let timer = Self::timer();
 
-        if self.is_rtc_synchronizing_timer() {
+        if self.is_rtc_pending_immediate_synchronization() {
             self.timer_synchronize();
 
             // While we synchronize, no other interrupts must be enabled.
@@ -1093,17 +1093,27 @@ impl State {
         ),
         RadioTimerError,
     > {
-        // See the high-precision timer trait implementation docs for resource
-        // assignments.
-        let (ppi_channel, timer_channel) = self.timer_signal_channels(signal);
-        let ppi_channel_mask = 1 << ppi_channel;
-
         let ppi = Self::ppi();
         let timer = Self::timer();
 
-        let ppi_channel_busy = ppi.chen.read().bits() & ppi_channel_mask != 0;
-        let timer_channel_busy = timer.cc[timer_channel].read().cc().bits() != 0;
-        if ppi_channel_busy || timer_channel_busy {
+        let (ppi_channel, timer_channel) = self.timer_signal_channels(signal);
+        let ppi_channel_mask = 1 << ppi_channel;
+
+        let previous_timer_fired = timer.events_compare[timer_channel]
+            .read()
+            .events_compare()
+            .bit_is_set();
+        if previous_timer_fired {
+            // The previously programmed signal was already emitted, the timer
+            // is programmed not to overflow, i.e. the compare event cannot be
+            // triggered again at this point. We reset the compare event but
+            // leave the channel enabled so that a new compare value can be
+            // programmed subsequently.
+            timer.events_compare[timer_channel].write(|w| w.events_compare().clear_bit());
+            debug_assert_ne!(ppi.chen.read().bits() & ppi_channel_mask, 0);
+        } else {
+            let timer_channel_busy = timer.cc[timer_channel].read().cc().bits() != 0;
+            if timer_channel_busy {
                 if matches!(disabled_by_event, Some(HardwareEvent::RadioFrameStarted))
                     && Self::radio()
                         .events_framestart
@@ -1115,7 +1125,18 @@ impl State {
                     // signal and the framestarted event.
                     return Err(RadioTimerError::Already);
                 };
-            return Err(RadioTimerError::Busy);
+                return Err(RadioTimerError::Busy);
+            }
+
+            // We've checked that the cc register is zero. The timer is programmed
+            // not to overflow, i.e. the compare event cannot be triggered at
+            // this point. Therefore we don't risk a race by enabling the
+            // channel and resetting the compare event here.
+            //
+            // Safety: The ppi channel has been asserted to be in range and not
+            //         currently in use.
+            debug_assert_eq!(ppi.chen.read().bits() & ppi_channel_mask, 0);
+            ppi.chenset.write(|w| unsafe { w.bits(ppi_channel_mask) });
         }
 
         #[cfg(feature = "timer-trace")]
@@ -1130,19 +1151,6 @@ impl State {
             ch.tep.write(|w| w.tep().variant(gpiote_out_task as u32));
             ppi.fork[ppi_channel].tep.reset();
         }
-
-        // We've checked that the cc register is zero. The timer is programmed
-        // not to overflow, i.e. the compare event and the ppi channel cannot be
-        // triggered at this point. Therefore we don't risk a race by enabling
-        // the channel and resetting the compare event here.
-        //
-        // Safety: The ppi channel has been asserted to be in range and not
-        //         currently in use.
-        ppi.chenset.write(|w| unsafe { w.bits(ppi_channel_mask) });
-        debug_assert!(timer.events_compare[timer_channel]
-            .read()
-            .events_compare()
-            .bit_is_clear());
 
         // Safety: The channel mask is always non-zero, see above.
         Ok((
@@ -1447,7 +1455,7 @@ impl State {
 
         // Safety: Alarm ownership must be transferred to interrupt context
         //         before enabling event routing.
-        self.rtc_start_timer_synchronization();
+        self.rtc_start_immediate_timer_synchronization();
         rtc.evtenset.write(|w| w.tick().set_bit());
     }
 
@@ -2005,7 +2013,12 @@ impl NrfRadioHighPrecisionTimer {
     pub const FREQUENCY: TimerRateU64<16_000_000> = TimerRateU64::from_raw(1);
 
     fn timer_epoch() -> LocalClockInstant {
-        while STATE.is_rtc_synchronizing_timer() {}
+        // Note: This only works if the timer interrupt is running at a higher
+        //       priority than the scheduling context. Immediate synchronization
+        //       blocks for at most one RTC tick.
+        while STATE.is_rtc_pending_immediate_synchronization() {
+            wfe();
+        }
         // Safety: We waited until the timer is synchronized.
         unsafe { STATE.timer_epoch() }
     }
@@ -2208,8 +2221,9 @@ impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
         crate::timer::trace::record_observe_event(event);
 
         // Note: This only works if the timer interrupt is running at a higher
-        //       priority than the scheduling context.
-        while STATE.is_rtc_synchronizing_timer() {
+        //       priority than the scheduling context. Immediate synchronization
+        //       blocks for at most one RTC tick.
+        while STATE.is_rtc_pending_immediate_synchronization() {
             wfe();
         }
 

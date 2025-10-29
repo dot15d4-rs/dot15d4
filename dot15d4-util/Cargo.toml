@@ -52,7 +52,6 @@ rtos-trace = [
     "dep:systemview-target",
     "embassy-executor/rtos-trace",
 ]
-terminal = ["defmt"]
 
 _clippy-std = ["std"]
 _clippy-no-std = []
