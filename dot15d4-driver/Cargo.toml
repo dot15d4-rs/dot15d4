@@ -62,6 +62,7 @@ ext-lf-clk = []
 # GPIO tracing
 executor-trace = ["executor"]
 timer-trace = ["timer"]
+radio-trace = ["radio"]
 
 # SystemView tracing
 rtos-trace = ["dep:rtos-trace", "dot15d4-util/rtos-trace"]

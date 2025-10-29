@@ -3,8 +3,11 @@
 echo "CHECK(examples): ARM, default features"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf -- -D warnings
 
-echo "CHECK(examples): ARM, rtos-trace + timer-trace"
-cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace,timer-trace -- -D warnings
+echo "CHECK(examples): ARM, timer-trace,radio-trace"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features timer-trace,radio-trace -- -D warnings
+
+echo "CHECK(examples): ARM, rtos-trace"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace -- -D warnings
 
 echo "CHECK(examples): ARM, executor-trace"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features executor-trace -- -D warnings

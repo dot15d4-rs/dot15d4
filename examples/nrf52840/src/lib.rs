@@ -6,6 +6,8 @@ use core::{future::poll_fn, task::Poll};
 
 use panic_probe as _;
 
+#[cfg(feature = "radio-trace")]
+use dot15d4::driver::socs::nrf::NrfRadioTracingConfig;
 use dot15d4::driver::{
     executor::{InterruptExecutor, PB3},
     socs::nrf::{
@@ -17,7 +19,7 @@ use dot15d4::driver::{
 #[cfg(feature = "timer-trace")]
 use dot15d4::driver::{
     socs::nrf::NrfRadioTimerTracingConfig,
-    timer::{export::ExtU64, HardwareEvent, HighPrecisionTimer, LocalClockInstant, RadioTimerApi},
+    timer::{HardwareEvent, HighPrecisionTimer, LocalClockInstant, RadioTimerApi},
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
@@ -56,6 +58,12 @@ pub mod gpio_trace {
         /// Timer GPIO event tracing.
         #[cfg(feature = "timer-trace")]
         TimerEvent,
+
+        /// Radio GPIO event tracing.
+        #[cfg(feature = "radio-trace")]
+        RadioFrame,
+        #[cfg(feature = "radio-trace")]
+        RadioTrx,
     }
     use GpioteChannel::*;
 
@@ -99,6 +107,10 @@ pub mod gpio_trace {
     pub const PIN_TIMER_SIGNAL: GpioteConfig = GpioteConfig::new(TimerSignal, P0, 29, Out);
     #[cfg(feature = "timer-trace")]
     pub const PIN_TIMER_EVENT: GpioteConfig = GpioteConfig::new(TimerEvent, P0, 2, In);
+    #[cfg(feature = "radio-trace")]
+    pub const PIN_RADIO_FRAME: GpioteConfig = GpioteConfig::new(RadioFrame, P0, 15, Out);
+    #[cfg(feature = "radio-trace")]
+    pub const PIN_RADIO_TRX: GpioteConfig = GpioteConfig::new(RadioTrx, P0, 17, Out);
 
     pub(super) fn config_gpiote(peripherals: &Peripherals, config: &GpioteConfig) {
         if matches!(config.direction, In) {
@@ -131,6 +143,14 @@ pub enum PpiChannel {
     RadioTimer2,
     #[cfg(feature = "timer-trace")]
     RadioTimerTick,
+    #[cfg(feature = "radio-trace")]
+    RadioFrameStart,
+    #[cfg(feature = "radio-trace")]
+    RadioFrameEnd,
+    #[cfg(feature = "radio-trace")]
+    RadioTrxStart,
+    #[cfg(feature = "radio-trace")]
+    RadioTrxEnd,
 }
 
 /// PPI channel group required to implement the "timed signal unless event"
@@ -178,6 +198,10 @@ pub fn config_peripherals(
             &PIN_TIMER_SIGNAL,
             #[cfg(feature = "timer-trace")]
             &PIN_TIMER_EVENT,
+            #[cfg(feature = "radio-trace")]
+            &PIN_RADIO_FRAME,
+            #[cfg(feature = "radio-trace")]
+            &PIN_RADIO_TRX,
         ] {
             config_gpiote(&peripherals, pin);
         }
@@ -286,8 +310,7 @@ pub async fn observe_gpio_event<Timer: RadioTimerApi, Executor: InterruptExecuto
     timer: &Timer,
     gpiote: &GPIOTE,
 ) -> LocalClockInstant {
-    let timeout = timer.now() + 1.millis();
-    let high_precision_timer = timer.start_high_precision_timer(Some(timeout)).unwrap();
+    let high_precision_timer = timer.start_high_precision_timer(None).unwrap();
 
     high_precision_timer
         .observe_event(HardwareEvent::GpioToggled)
@@ -298,6 +321,18 @@ pub async fn observe_gpio_event<Timer: RadioTimerApi, Executor: InterruptExecuto
     high_precision_timer
         .poll_event(HardwareEvent::GpioToggled)
         .unwrap()
+}
+
+#[cfg(feature = "radio-trace")]
+pub fn radio_tracing_config() -> NrfRadioTracingConfig {
+    NrfRadioTracingConfig {
+        gpiote_frame_channel: PIN_RADIO_FRAME.gpiote_channel as usize,
+        gpiote_trx_channel: PIN_RADIO_TRX.gpiote_channel as usize,
+        ppi_framestart_channel: PpiChannel::RadioFrameStart as usize,
+        ppi_frameend_channel: PpiChannel::RadioFrameEnd as usize,
+        ppi_trxstart_channel: PpiChannel::RadioTrxStart as usize,
+        ppi_trxend_channel: PpiChannel::RadioTrxEnd as usize,
+    }
 }
 
 nrf_interrupt_executor!(executor, SWI0_EGU0);

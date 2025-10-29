@@ -47,6 +47,7 @@ ies = ["dot15d4-frame/ies"]
 # Tracing
 executor-trace = ["dot15d4-driver/executor-trace"]
 timer-trace = ["dot15d4-driver/timer-trace"]
+radio-trace = ["dot15d4-driver/radio-trace"]
 rtos-trace = [
     "dep:rtos-trace",
     "dot15d4-util/rtos-trace",
