@@ -71,7 +71,7 @@ pub fn tx_task<Config: DriverConfig>(
     buffer_allocator: BufferAllocator,
 ) -> TaskTx {
     let mut mpdu = MPDU_REPR
-        .into_parsed_mpdu::<Config>(
+        .into_writer::<Config>(
             FrameVersion::Ieee802154_2006,
             FrameType::Data,
             PAYLOAD.len() as u16,

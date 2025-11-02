@@ -19,8 +19,8 @@ use super::seq_nr::SeqNrRepr;
 /// The MPDU representation contains just enough structural information to
 /// calculate the required size of an MPDU buffer.
 ///
-/// To read or write content a [`crate::fields::MpduParser`] can be derived via
-/// [`MpduRepr::into_parsed_mpdu()`].
+/// To create and populate a new MPDU, an owning [`crate::fields::MpduParser`]
+/// can be derived via [`MpduRepr::into_writer()`].
 ///
 /// The MPDU representation does not refer to a
 /// [`dot15d4_driver::radio::DriverConfig`] so that it can be re-used across
