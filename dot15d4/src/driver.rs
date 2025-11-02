@@ -24,7 +24,7 @@ use self::{
             is_frame_valid_and_for_us, RadioFrame, RadioFrameRepr, RadioFrameSized,
             RadioFrameUnsized,
         },
-        phy::{Ifs, PhyConfig},
+        phy::Ifs,
         tasks::{
             CompletedRadioTransition, ExternalRadioTransition, ListeningRxState, OffState,
             RadioDriverApi, RadioTaskError, RadioTransitionResult, ReceivingRxState, RxError,
@@ -554,32 +554,8 @@ where
                         };
                     drop(tx_request_ref);
 
-                    let latest_frame_start = if let Timestamp::Scheduled(at) = at {
-                        // rx_task_end
-                        //   = at - (cca ? macUnitBackoffPeriod : 0) - LIFS
-                        //     - rmarker_offset
-                        //
-                        // latest_frame_start
-                        //   = rx_task_end - ppdu_rx_time(phyMaxPacketSize)
-                        //     + rmarker_offset
-                        //   = at - (cca ? macUnitBackoffPeriod : 0) - LIFS
-                        //     - ppdu_rx_time(phyMaxPacketSize)
-                        //
-                        // Note:
-                        //  - The RMARKER offsets cancel each other out.
-                        //  - As we may still receive a max-sized frame, we need
-                        //    to cater for LIFS in the worst case.
-                        let ifs = <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_LIFS_PERIOD;
-                        let max_ppdu_rx = listening_rx_driver.ppdu_rx_duration(
-                            <PhyOf<RadioDriverImpl> as PhyConfig>::PHY_MAX_PACKET_SIZE,
-                        );
-                        let mut latest_frame_start = at - ifs - max_ppdu_rx;
-                        if cca {
-                            let back_off_period =
-                                <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD;
-                            latest_frame_start -= back_off_period
-                        }
-                        Some(latest_frame_start)
+                    let latest_frame_start = if let Timestamp::Scheduled(tx_at) = at {
+                        Some(listening_rx_driver.latest_rx_frame_start_before_tx(tx_at, cca, None))
                     } else {
                         None
                     };

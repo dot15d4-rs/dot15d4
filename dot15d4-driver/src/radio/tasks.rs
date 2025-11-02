@@ -1,6 +1,9 @@
 use core::{convert::Infallible, future::Future, marker::PhantomData};
 
-use crate::timer::{LocalClockDuration, LocalClockInstant, RadioTimerError};
+use crate::{
+    radio::phy::PhyConfig,
+    timer::{LocalClockDuration, LocalClockInstant, RadioTimerError},
+};
 
 use super::{
     config::Channel,
@@ -452,6 +455,77 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     ///
     /// See [`ListeningRxState::stop_listening`] for an application.
     fn ppdu_rx_duration(&self, psdu_size: u16) -> LocalClockDuration;
+
+    /// Utility method to calculate the latest possible frame start of an
+    /// inbound frame (in terms of its RMARKER and of the given expected max
+    /// PSDU size) such that a timed transmission at the given tx instant (in
+    /// terms of its RMARKER and optionally including sufficient time for CCA)
+    /// can still be scheduled in time.
+    ///
+    /// If no PSDU size is given, then the max PSDU size of the driver's PHY is
+    /// used in the calculation.
+    ///
+    /// See [`ListeningRxState::stop_listening()`] and
+    /// [`ReceivingRxState::schedule_tx()`] for further information about how
+    /// this is calculated.
+    fn latest_rx_frame_start_before_tx(
+        &self,
+        tx_at: LocalClockInstant,
+        cca: bool,
+        expected_max_psdu_size: Option<u16>,
+    ) -> LocalClockInstant {
+        // rx_task_end
+        //   = tx_at - (cca ? macUnitBackoffPeriod : 0) - LIFS
+        //     - rmarker_offset
+        //
+        // latest_frame_start
+        //   = rx_task_end - ppdu_rx_time(phyMaxPacketSize)
+        //     + rmarker_offset
+        //   = tx_at - (cca ? macUnitBackoffPeriod : 0) - LIFS
+        //     - ppdu_rx_time(phyMaxPacketSize)
+        //
+        // Note:
+        //  - The RMARKER offsets cancel each other out.
+        //  - As we may still receive a max-sized frame, we need
+        //    to cater for LIFS. Shorter frames will end earlier
+        //    anyway.
+        let psdu_size = expected_max_psdu_size
+            .unwrap_or(<PhyOf<RadioDriverImpl> as PhyConfig>::PHY_MAX_PACKET_SIZE);
+        let max_ppdu_rx = self.ppdu_rx_duration(psdu_size);
+        let mut latest_frame_start =
+            tx_at - <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_LIFS_PERIOD - max_ppdu_rx;
+        if cca {
+            let back_off_period = <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD;
+            latest_frame_start -= back_off_period
+        }
+        latest_frame_start
+    }
+
+    /// Utility method to calculate the latest possible frame start of an
+    /// inbound frame (in terms of its RMARKER and of the given expected max
+    /// PSDU size) if the radio shall be switched off at the given instant.
+    ///
+    /// If no PSDU size is given, then the max PSDU size of the driver's PHY is
+    /// used in the calculation.
+    ///
+    /// See [`ListeningRxState::stop_listening()`] and
+    /// [`ReceivingRxState::schedule_off()`] for further information about how
+    /// this is calculated.
+    fn latest_rx_frame_start_before_off(
+        &self,
+        off_at: LocalClockInstant,
+        expected_max_psdu_size: Option<u16>,
+    ) -> LocalClockInstant {
+        // latest_frame_start
+        //   = rx_task_end - ppdu_rx_time(phyMaxPacketSize)
+        //     + rmarker_offset
+        //   = off_at - ppdu_rx_time(phyMaxPacketSize)
+        //     + rmarker_offset
+        let psdu_size = expected_max_psdu_size
+            .unwrap_or(<PhyOf<RadioDriverImpl> as PhyConfig>::PHY_MAX_PACKET_SIZE);
+        let max_ppdu_rx = self.ppdu_rx_duration(psdu_size);
+        off_at - max_ppdu_rx + <PhyOf<RadioDriverImpl> as PhyConfig>::RMARKER_OFFSET
+    }
 
     /// Waits indefinitely until the radio observes the start of a frame.
     /// Immediately returns the RMARKER timestamp of an incoming frame.
