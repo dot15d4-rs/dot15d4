@@ -1,23 +1,19 @@
 use dot15d4::{
     driver::{
         radio::{
-            phy::Ifs,
             tasks::{
                 CompletedRadioTransition::*, ExternalRadioTransition, ListeningRxState, OffState,
-                RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxResult, TxState,
+                RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxState,
             },
             DriverConfig, RadioDriver,
         },
         timer::LocalClockInstant,
     },
-    util::{
-        allocator::{BufferAllocator, IntoBuffer},
-        error,
-    },
+    util::allocator::{BufferAllocator, IntoBuffer},
 };
 
 use crate::{
-    util::{allocate_test_slot, log_timing, rx_task, tx_task},
+    util::{allocate_test_slot, log_transition_result, rx_task},
     TestSuite,
 };
 
@@ -32,50 +28,31 @@ where
     RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
-    let _ = allocate_test_slot(timer, anchor_time, TestSuite::SingleBestEffortTxRx, 0, true).await;
+    let _ = allocate_test_slot(
+        timer,
+        anchor_time,
+        TestSuite::SingleBestEffortRxOff,
+        0,
+        true,
+    )
+    .await;
 
-    // off -> tx
-    let tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(false, buffer_allocator), None)
+    // off -> rx
+    let listening_rx_radio = match off_radio
+        .schedule_rx(rx_task::<Config>(buffer_allocator), None)
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
-                "Off->Tx(BE)",
-                anchor_time,
-                TestSuite::SingleBestEffortTxRx,
+            log_transition_result(
+                "Off->Rx(BE)",
+                TestSuite::SingleBestEffortRxOff,
                 0,
                 1,
-                &radio_transition_result,
-                false,
-            );
-            radio_transition_result.this_state
-        }
-        _ => unreachable!(),
-    };
-
-    // tx -> rx
-    let listening_rx_radio = match tx_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), Ifs::short())
-        .complete_and_transition()
-        .await
-    {
-        Entered(radio_transition_result) => {
-            log_timing(
-                "Tx->Rx (BE)",
                 anchor_time,
-                TestSuite::SingleBestEffortTxRx,
-                0,
-                2,
                 &radio_transition_result,
                 false,
             );
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame, ..) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-            };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -84,12 +61,12 @@ where
     // rx -> rx window ended
     match listening_rx_radio.stop_listening(None).await {
         Ok(StopListeningResult::RxWindowEnded(radio_transition_result)) => {
-            log_timing(
+            log_transition_result(
                 "Rx->End(BE)",
-                anchor_time,
-                TestSuite::SingleBestEffortTxRx,
+                TestSuite::SingleBestEffortRxOff,
                 0,
-                3,
+                2,
+                anchor_time,
                 &radio_transition_result,
                 false,
             );
@@ -108,7 +85,7 @@ where
 #[repr(usize)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Test {
-    OffToTxToRx,
+    OffToRx,
     RxToRxWindowEnd,
     NumSlots,
 }
@@ -124,60 +101,30 @@ where
     RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
-    // off -> tx
-    let tx_at = allocate_test_slot(
+    // off -> rx
+    let rx_start = allocate_test_slot(
         timer,
         anchor_time,
-        TestSuite::SingleTimedTxRx,
-        Test::OffToTxToRx as usize,
+        TestSuite::SingleTimedRxOff,
+        Test::OffToRx as usize,
         false,
     )
     .await;
-    let tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(false, buffer_allocator), Some(tx_at))
+    let listening_rx_radio = match off_radio
+        .schedule_rx(rx_task::<Config>(buffer_allocator), Some(rx_start))
         .complete_and_transition()
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
-                "Off->Tx(T)",
-                anchor_time,
-                TestSuite::SingleTimedTxRx,
-                Test::OffToTxToRx as usize,
+            log_transition_result(
+                "Off->Rx(T)",
+                TestSuite::SingleTimedRxOff,
+                Test::OffToRx as usize,
                 1,
-                &radio_transition_result,
-                false,
-            );
-            radio_transition_result.this_state
-        }
-        _ => {
-            let _slot = (tx_at - anchor_time).ticks();
-            error!("Slot: {}", _slot);
-            unreachable!()
-        }
-    };
-
-    // tx -> rx
-    let listening_rx_radio = match tx_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), Ifs::short())
-        .complete_and_transition()
-        .await
-    {
-        Entered(radio_transition_result) => {
-            log_timing(
-                "Tx->Rx (T)",
                 anchor_time,
-                TestSuite::SingleTimedTxRx,
-                Test::OffToTxToRx as usize,
-                2,
                 &radio_transition_result,
                 false,
             );
-            match radio_transition_result.prev_task_result {
-                TxResult::Sent(radio_frame, ..) => {
-                    unsafe { buffer_allocator.deallocate_buffer(radio_frame.into_buffer()) };
-                }
-            };
             radio_transition_result.this_state
         }
         _ => unreachable!(),
@@ -187,19 +134,19 @@ where
     let off_at = allocate_test_slot(
         timer,
         anchor_time,
-        TestSuite::SingleTimedTxRx,
+        TestSuite::SingleTimedRxOff,
         Test::RxToRxWindowEnd as usize,
         false,
     )
     .await;
     match listening_rx_radio.stop_listening(Some(off_at)).await {
         Ok(StopListeningResult::RxWindowEnded(radio_transition_result)) => {
-            log_timing(
+            log_transition_result(
                 "Rx->End(T)",
-                anchor_time,
-                TestSuite::SingleTimedTxRx,
+                TestSuite::SingleTimedRxOff,
                 Test::RxToRxWindowEnd as usize,
                 1,
+                anchor_time,
                 &radio_transition_result,
                 false,
             );

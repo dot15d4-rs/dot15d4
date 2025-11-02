@@ -14,7 +14,7 @@ use dot15d4::{
 };
 
 use crate::{
-    util::{allocate_test_slot, log_timing, tx_task},
+    util::{allocate_test_slot, log_transition_result, tx_task},
     TestSuite,
 };
 
@@ -43,12 +43,12 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Off->Tx(BE)",
-                anchor_time,
                 test_suite,
                 0,
                 1,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
@@ -64,12 +64,12 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Tx->Tx (BE)",
-                anchor_time,
                 test_suite,
                 0,
                 2,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
@@ -83,12 +83,12 @@ where
     // tx -> off
     match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Tx->Off(BE)",
-                anchor_time,
                 test_suite,
                 0,
                 3,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
@@ -139,12 +139,12 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Off->Tx(T)",
-                anchor_time,
                 test_suite,
                 Test::OffToTxToTxToOff as usize,
                 1,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
@@ -160,12 +160,12 @@ where
         .await
     {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Tx->Tx (T)",
-                anchor_time,
                 test_suite,
                 Test::OffToTxToTxToOff as usize,
                 2,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
@@ -179,12 +179,12 @@ where
     // tx -> off
     let off_radio = match tx_radio.schedule_off().complete_and_transition().await {
         Entered(radio_transition_result) => {
-            log_timing(
+            log_transition_result(
                 "Tx->Off(T)",
-                anchor_time,
                 test_suite,
                 Test::OffToTxToTxToOff as usize,
                 3,
+                anchor_time,
                 &radio_transition_result,
                 cca,
             );
