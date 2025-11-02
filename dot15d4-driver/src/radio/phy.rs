@@ -76,6 +76,17 @@ pub trait PhyConfig {
     ///       than being a MAC PIB property as the other IFS types. This
     ///       also explains the distinct nomenclature.
     const AIFS: LocalClockDuration;
+
+    /// This is the time it takes for a frame to be received up to the beginning
+    /// of the first symbol after the frame's start-of-frame (SFD) marker. This
+    /// offset does not take the propagation time from/to the antenna into
+    /// account, i.e. it is the offset measured at a fixed point on the signal
+    /// propagation path.
+    ///
+    /// To calculate an offset from the antenna, the phyTxRmarkerOffset or
+    /// phyRxRmarkerOffset PIB attributes must be added, see IEEE 802.15.4-2024,
+    /// sections 10.29.1.1 and 12.3.2, table 12-2.
+    const RMARKER_OFFSET: LocalClockDuration;
 }
 
 /// O-QPSK 250kBit PHY
@@ -177,6 +188,7 @@ impl PhyConfig for Phy<OQpsk250KBit> {
     const MAC_SIFS_PERIOD: LocalClockDuration = Self::SymbolPeriods::from_ticks(12).convert();
     const MAC_LIFS_PERIOD: LocalClockDuration = Self::SymbolPeriods::from_ticks(40).convert();
     const AIFS: LocalClockDuration = Self::MAC_SIFS_PERIOD;
+    const RMARKER_OFFSET: LocalClockDuration = OQpsk250KBit::T_SHR;
 }
 
 const _: () =
