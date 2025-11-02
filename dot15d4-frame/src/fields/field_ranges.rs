@@ -221,7 +221,8 @@ impl MpduFieldRanges<MpduWithSecurity> {
         ies: IeListRepr,
         mpdu_length_wo_fcs: u16,
     ) -> Result<MpduFieldRanges<MpduWithAllFields>> {
-        let mpdu_less_ies_and_payload_length = self.last_offset();
+        let mpdu_less_ies_and_payload_length =
+            self.last_offset() - self.offset_frame_control as u16;
         if mpdu_less_ies_and_payload_length > mpdu_length_wo_fcs {
             return Err(Error);
         }
@@ -257,7 +258,7 @@ impl MpduFieldRanges<MpduWithSecurity> {
         &self,
         mpdu_length_wo_fcs: u16,
     ) -> Result<MpduFieldRanges<MpduWithAllFields>> {
-        let mpdu_less_payload_length = self.last_offset();
+        let mpdu_less_payload_length = self.last_offset() - self.offset_frame_control as u16;
         if mpdu_less_payload_length > mpdu_length_wo_fcs {
             return Err(Error);
         }
