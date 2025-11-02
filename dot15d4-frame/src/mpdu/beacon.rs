@@ -64,7 +64,7 @@ where
     };
     let min_buffer_size = beacon_frame_repr.min_buffer_size::<Config>(beacon_payload_length)?;
     let buffer = buffer_allocator.allocate_buffer(min_buffer_size).await;
-    match beacon_frame_repr.into_parsed_mpdu::<Config>(
+    match beacon_frame_repr.into_writer::<Config>(
         FrameVersion::Ieee802154_2006,
         FrameType::Beacon,
         0,

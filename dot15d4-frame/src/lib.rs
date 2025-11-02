@@ -166,7 +166,7 @@ mod test {
 
         const PAYLOAD_LENGTH: u16 = 5;
         let parsed_mpdu = MPDU_REPR
-            .into_parsed_mpdu::<FakeDriverConfig>(
+            .into_writer::<FakeDriverConfig>(
                 FrameVersion::Ieee802154,
                 FrameType::Data,
                 PAYLOAD_LENGTH,

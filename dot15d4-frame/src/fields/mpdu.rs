@@ -168,7 +168,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
     ///   channels and the extended bitmap length for the long version of a
     ///   Channel Hopping IE and the number of slotframes and links within each
     ///   slotframe for a TSCH Slotframe and Link IE.
-    pub fn into_parsed_mpdu<Config: DriverConfig>(
+    pub fn into_writer<Config: DriverConfig>(
         &self,
         frame_version: FrameVersion,
         frame_type: FrameType,
@@ -288,7 +288,7 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>, State> MpduParser<ReadOnlyMpdu, State> {
 ///
 /// Note: Only parts of the frame control field that don't change the MPDU
 ///       structurally may be edited. All other fields must be initialized via
-///       [`MpduRepr::into_parsed_mpdu()`].
+///       [`MpduRepr::into_writer()`].
 impl<WriteOnlyMpdu: AsMut<MpduFrame>, State> MpduParser<WriteOnlyMpdu, State> {
     /// See [`FrameControl::set_ack_request()`]
     pub fn set_ack_request(&mut self, ack_request: bool) {

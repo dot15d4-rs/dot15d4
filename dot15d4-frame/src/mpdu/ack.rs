@@ -35,7 +35,7 @@ pub fn imm_ack_frame<Config: DriverConfig>(
     // Safety: We give a valid configuration and therefore expect the operation
     //         not to fail.
     let mut ack_frame = IMM_ACK_FRAME_REPR
-        .into_parsed_mpdu::<Config>(FrameVersion::Ieee802154_2006, FrameType::Ack, 0, buffer)
+        .into_writer::<Config>(FrameVersion::Ieee802154_2006, FrameType::Ack, 0, buffer)
         .unwrap();
     let _ = ack_frame.try_set_sequence_number(seq_num);
     ack_frame
