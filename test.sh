@@ -9,6 +9,9 @@ cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf 
 echo "CHECK(examples): ARM, device-sync"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features device-sync -- -D warnings
 
+echo "CHECK(examples): ARM, device-sync-client"
+cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features device-sync-client -- -D warnings
+
 echo "CHECK(examples): ARM, rtos-trace"
 cargo clippy -p dot15d4-examples-nrf52840 --bins --target thumbv7em-none-eabihf --features rtos-trace -- -D warnings
 

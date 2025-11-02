@@ -1,10 +1,16 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use cortex_m::asm::wfe;
+#[cfg(any(feature = "defmt", feature = "log"))]
+use dot15d4::driver::radio::HighPrecisionTimerOf;
+#[cfg(any(
+    all(feature = "timer-trace", not(debug_assertions)),
+    feature = "defmt",
+    feature = "log"
+))]
+use dot15d4::driver::timer::HighPrecisionTimer;
 #[cfg(all(feature = "timer-trace", not(debug_assertions)))]
 use dot15d4::driver::timer::{export::ExtU64, HardwareSignal, LocalClockDuration, TimedSignal};
-#[cfg(any(feature = "defmt", feature = "log"))]
-use dot15d4::driver::{radio::HighPrecisionTimerOf, timer::HighPrecisionTimer};
 use dot15d4::{
     driver::{
         radio::{
@@ -40,7 +46,8 @@ const ADDR2: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_owned([
     0x78, 0x56, 0x8F, 0x00, 0x00, 0x7D, 0x1A, 0x02,
 ]));
 
-const PAYLOAD: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+pub const PAYLOAD: [u8; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const PAYLOAD_LEN: u16 = PAYLOAD.len() as u16;
 
 const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
     .with_frame_control(SeqNrRepr::Yes)
@@ -67,24 +74,24 @@ pub fn rx_task<Config: DriverConfig>(buffer_allocator: BufferAllocator) -> TaskR
 
 #[allow(dead_code)]
 pub fn tx_task<Config: DriverConfig>(cca: bool, buffer_allocator: BufferAllocator) -> TaskTx {
-    let mut mpdu = MPDU_REPR
+    let mut mpdu_writer = MPDU_REPR
         .into_writer::<Config>(
             FrameVersion::Ieee802154_2006,
             FrameType::Data,
-            PAYLOAD.len() as u16,
+            PAYLOAD_LEN,
             buffer_allocator
                 .try_allocate_buffer(<PhyOf<Config> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize)
                 .unwrap(),
         )
         .unwrap();
 
-    mpdu.set_sequence_number(SEQ_NR.fetch_add(1, Ordering::Relaxed));
-    let mut addressing = mpdu.addressing_fields_mut();
+    mpdu_writer.set_sequence_number(SEQ_NR.fetch_add(1, Ordering::Relaxed));
+    let mut addressing = mpdu_writer.addressing_fields_mut();
     addressing.src_address_mut().set(&ADDR1);
     addressing.dst_address_mut().set(&ADDR2);
     addressing.dst_pan_id_mut().set(&PAN_ID);
-    mpdu.frame_payload_mut().copy_from_slice(&PAYLOAD);
-    let radio_frame = mpdu.into_radio_frame::<Config>();
+    mpdu_writer.frame_payload_mut().copy_from_slice(&PAYLOAD);
+    let radio_frame = mpdu_writer.into_radio_frame::<Config>();
 
     TaskTx { radio_frame, cca }
 }
@@ -120,10 +127,10 @@ pub async fn allocate_test_slot<Timer: RadioTimerApi>(
             .start_high_precision_timer(Some(test_slot_marker_time - Timer::GUARD_TIME))
             .unwrap();
 
-        const MANCHESTER_HALF_PERIOD_NS: u64 = LocalClockDuration::micros(20).ticks();
+        const MANCHESTER_HALF_PERIOD_NS: u64 = LocalClockDuration::micros(30).ticks();
 
         let test_slot_marker_time_ns = test_slot_marker_time.ticks();
-        for (index, &toggle_at_tick) in test_suite.manchester_encode().iter().enumerate() {
+        for (index, &toggle_at_tick) in test_suite.encoded_test_id().iter().enumerate() {
             if index > 0 && toggle_at_tick == 0 {
                 break;
             }
@@ -151,31 +158,54 @@ pub async fn allocate_test_slot<Timer: RadioTimerApi>(
 }
 
 impl TestSuite {
-    pub fn manchester_encode(&self) -> &[u8] {
-        const MANCHESTER0: [u8; 10] = TestSuite::manchester_encode_internal(0);
-        const MANCHESTER1: [u8; 10] = TestSuite::manchester_encode_internal(1);
-        const MANCHESTER2: [u8; 10] = TestSuite::manchester_encode_internal(2);
-        const MANCHESTER3: [u8; 10] = TestSuite::manchester_encode_internal(3);
-        const MANCHESTER4: [u8; 10] = TestSuite::manchester_encode_internal(4);
-        const MANCHESTER5: [u8; 10] = TestSuite::manchester_encode_internal(5);
-        const MANCHESTER6: [u8; 10] = TestSuite::manchester_encode_internal(6);
-        const MANCHESTER7: [u8; 10] = TestSuite::manchester_encode_internal(7);
+    pub fn encoded_test_id(&self) -> &[u8] {
+        use TestSuite::*;
+
+        #[cfg(feature = "device-sync")]
+        const TEST_ID_0: [u8; 10] = TestSuite::manchester_encode(MultiTimedRx);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_1: [u8; 10] = TestSuite::manchester_encode(SingleTimedRxOff);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_2: [u8; 10] = TestSuite::manchester_encode(SingleTimedTxRx);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_3: [u8; 10] = TestSuite::manchester_encode(SingleTimedTxTxWithoutCca);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_4: [u8; 10] = TestSuite::manchester_encode(SingleTimedTxTxWithCca);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_5: [u8; 10] = TestSuite::manchester_encode(SingleBestEffortRxOff);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_6: [u8; 10] = TestSuite::manchester_encode(SingleBestEffortTxRx);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_7: [u8; 10] = TestSuite::manchester_encode(SingleBestEffortTxTxWithoutCca);
+        #[cfg(not(feature = "device-sync-client"))]
+        const TEST_ID_8: [u8; 10] = TestSuite::manchester_encode(SingleBestEffortTxTxWithCca);
 
         match self {
-            TestSuite::SingleTimedRxOff => &MANCHESTER0,
-            TestSuite::SingleTimedTxRx => &MANCHESTER1,
-            TestSuite::SingleTimedTxTxWithoutCca => &MANCHESTER2,
-            TestSuite::SingleTimedTxTxWithCca => &MANCHESTER3,
-            TestSuite::SingleBestEffortRxOff => &MANCHESTER4,
-            TestSuite::SingleBestEffortTxRx => &MANCHESTER5,
-            TestSuite::SingleBestEffortTxTxWithoutCca => &MANCHESTER6,
-            TestSuite::SingleBestEffortTxTxWithCca => &MANCHESTER7,
+            #[cfg(feature = "device-sync")]
+            MultiTimedRx => &TEST_ID_0,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleTimedRxOff => &TEST_ID_1,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleTimedTxRx => &TEST_ID_2,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleTimedTxTxWithoutCca => &TEST_ID_3,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleTimedTxTxWithCca => &TEST_ID_4,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleBestEffortRxOff => &TEST_ID_5,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleBestEffortTxRx => &TEST_ID_6,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleBestEffortTxTxWithoutCca => &TEST_ID_7,
+            #[cfg(not(feature = "device-sync-client"))]
+            SingleBestEffortTxTxWithCca => &TEST_ID_8,
         }
     }
 
-    const fn manchester_encode_internal<const NUM_TICKS: usize>(n: u8) -> [u8; NUM_TICKS] {
+    const fn manchester_encode<const NUM_TICKS: usize>(test_suite: TestSuite) -> [u8; NUM_TICKS] {
+        let test_id = test_suite as u8;
         let num_bits = NUM_TICKS / 2;
-        debug_assert!(n < (1 << (num_bits - 1)));
+        debug_assert!(test_id < (1 << (num_bits - 1)));
 
         let mut toggles = [0; NUM_TICKS];
 
@@ -184,12 +214,12 @@ impl TestSuite {
         let mut num_toggles = 0;
 
         // Add a 1-bit preamble.
-        let n = (n << 1) | 1;
+        let test_id = (test_id << 1) | 1;
 
         // Process each bit, LSB first.
         let mut bit_pos: usize = 0;
         while bit_pos < num_bits {
-            let bit_value = ((n >> bit_pos) & 1) == 1;
+            let bit_value = ((test_id >> bit_pos) & 1) == 1;
 
             // Manchester encoding:
             // 0: Low->High
@@ -220,33 +250,95 @@ impl TestSuite {
     }
 }
 
-pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>(
-    _label: &str,
-    _anchor_time: LocalClockInstant,
-    _test_suite: TestSuite,
-    _test_slot: usize,
-    _entry: usize,
-    _radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
-    _cca: bool,
+#[allow(dead_code)]
+pub struct TestResult {
+    pub label: &'static str,
+    pub test_suite: TestSuite,
+    pub test_slot: usize,
+    pub test_step: usize,
+    pub anchor_time: LocalClockInstant,
+    pub expected_timestamp: Option<LocalClockInstant>,
+    pub measured_timestamp: LocalClockInstant,
+    pub cca: bool,
+}
+
+impl TestResult {
+    pub fn from_radio_transition_result<
+        Config: DriverConfig,
+        PrevTask: RadioTask,
+        ThisTask: RadioTask,
+    >(
+        label: &'static str,
+        test_suite: TestSuite,
+        test_slot: usize,
+        test_step: usize,
+        anchor_time: LocalClockInstant,
+        radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
+        cca: bool,
+    ) -> Self {
+        let RadioTransitionResult {
+            scheduled_entry: expected_timestamp,
+            measured_entry: measured_timestamp,
+            ..
+        } = *radio_transition_result;
+        Self {
+            label,
+            test_suite,
+            test_slot,
+            test_step,
+            anchor_time,
+            expected_timestamp,
+            measured_timestamp,
+            cca,
+        }
+    }
+}
+
+pub fn log_transition_result<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>(
+    label: &'static str,
+    test_suite: TestSuite,
+    test_slot: usize,
+    test_step: usize,
+    anchor_time: LocalClockInstant,
+    radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
+    cca: bool,
 ) {
+    log_test_result::<Config>(TestResult::from_radio_transition_result(
+        label,
+        test_suite,
+        test_slot,
+        test_step,
+        anchor_time,
+        radio_transition_result,
+        cca,
+    ));
+}
+
+pub fn log_test_result<Config: DriverConfig>(_test_result: TestResult) {
     #[cfg(any(feature = "defmt", feature = "log"))]
     {
         use crate::TEST_SLOT_DURATION_MS;
 
-        let cca_hint = if _cca { " - with CCA" } else { "" };
-        let anchor_time_ns = _anchor_time.ticks();
-        let ts_ms = (_test_suite.slot() + _test_slot) * TEST_SLOT_DURATION_MS;
+        let TestResult {
+            label,
+            test_suite,
+            test_slot,
+            test_step,
+            anchor_time,
+            expected_timestamp,
+            measured_timestamp,
+            cca,
+        } = _test_result;
 
-        let RadioTransitionResult {
-            scheduled_entry,
-            measured_entry,
-            ..
-        } = _radio_transition_result;
+        let cca_hint = if cca { " - with CCA" } else { "" };
+        let anchor_time_ns = anchor_time.ticks();
+        let ts_ms = (test_suite.slot() + test_slot) * TEST_SLOT_DURATION_MS;
+
         let (scheduled_ns, measured_ns) = (
-            scheduled_entry
+            expected_timestamp
                 .map(|ts| ts.ticks() - anchor_time_ns)
                 .unwrap_or(0),
-            measured_entry.ticks() - anchor_time_ns,
+            measured_timestamp.ticks() - anchor_time_ns,
         );
         let difference_ns = if scheduled_ns > 0 {
             measured_ns as i64 - scheduled_ns as i64
@@ -254,9 +346,9 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
             0
         };
 
-        if _entry == 1 {
-            if _test_slot == 0 {
-                dot15d4::util::log::info!("Test Suite {}", _test_suite as usize);
+        if test_step == 1 {
+            if test_slot == 0 {
+                dot15d4::util::log::info!("Test Suite {}", test_suite as usize);
             }
 
             dot15d4::util::log::info!(" @ {} ms:", ts_ms);
@@ -270,7 +362,7 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
             if difference_ns.unsigned_abs() <= tolerance_ns {
                 dot15d4::util::log::info!(
                     "  {}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns){}\0",
-                    _label,
+                    label,
                     scheduled_ns,
                     measured_ns,
                     difference_ns,
@@ -279,7 +371,7 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
             } else {
                 dot15d4::util::log::error!(
                     "  {}: Scheduled: {} ns, Actual: {} ns, (Error: {} ns){}\0",
-                    _label,
+                    label,
                     scheduled_ns,
                     measured_ns,
                     difference_ns,
@@ -287,7 +379,7 @@ pub fn log_timing<Config: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask
                 );
             }
         } else {
-            dot15d4::util::log::info!("  {}: Actual: {} ns{}\0", _label, measured_ns, cca_hint,);
+            dot15d4::util::log::info!("  {}: Actual: {} ns{}\0", label, measured_ns, cca_hint,);
         }
     }
 }

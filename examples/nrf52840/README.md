@@ -40,10 +40,11 @@ In a multi-device setup a single external lf clock on pin X1 (P0.00) drives
 several devices synchronously. At the start of the program, clocks are
 synchronized with a shared GPIO signal.
 
-A special hardware setup is required to synchronize devices. Once you have
-modified your hardware (and only then), enable the "device-sync" feature to
-execute multi-device examples. The "device-sync" must be enabled whenever the LF
-clock is driven by an external signal, otherwise you may damage your hardware.
+A [special hardware setup](../../docs/testbed/README.md) is required to
+synchronize devices. Once you have modified your hardware (and only then),
+enable the "device-sync" or "device-sync-client" feature to execute multi-device
+examples. "device-sync[-client]" must be enabled whenever the LF clock is driven
+by an external signal, otherwise you may damage your hardware.
 
 ## Single-Device Radio Driver Test
 
@@ -110,21 +111,31 @@ with the timer.
 
 ## Multi-Device Radio Driver Test
 
+Note: This only works with a [special hardware setup](../../docs/testbed/README.md)
+and may damage your device if not properly configured.
+
 To run the radio driver test in multi-device mode, enable the "device-sync"
 feature (which automatically implies the "timer-trace" feature):
 
 ```sh
-cargo embed [--release] --bin radio --features defmt,device-sync[,radio-trace] flash
-cargo embed [--release] --bin radio --features defmt,device-sync[,radio-trace] rtt
+cargo embed [--release] --bin radio --features device-sync[-client],defmt[,radio-trace] flash
+cargo embed [--release] --bin radio --features device-sync[-client],defmt[,radio-trace] rtt
 ```
 
+Currently multi-device mode assumes that two devices are run concurrently: Use
+the "device-sync" feature to flash one device and the "device-sync-client"
+feature to flash the other device.
+
 If the radio test application was properly installed, then you'll see a message
-"Waiting for timer synchronization".
+"Waiting for timer synchronization" on both devices.
 
-![radio sync screenshot](doc/radio-example-sync.png)
+On the device running the "device-sync" feature:
 
-Note: This only works with a special hardware setup and may damage your device
-if not properly configured.
+![radio sync screenshot](doc/radio-example-sync-server.png)
+
+On the device running the "device-sync-client" feature:
+
+![radio sync screenshot](doc/radio-example-sync-client.png)
 
 Next connect to the debug terminal of the YAPicoProbe prepared with dot15d4
 specific timer synchronization firmware and press the enter key once to unlock
@@ -139,7 +150,28 @@ Now enter "sync" into the YAPicoProbe's debug terminal and hit enter:
 
 ![radio sync screenshot](doc/yapicoprobe-sync.png)
 
-Then observe test output in the terminal windows connected to you devices.
+Then observe test output in the terminal windows connected to your devices.
+
+### Measuring GPIO trace output in multi-device mode
+
+Like in single-device mode you can connect a logic analyzer to analyze timing
+via timer and radio trace signals, see the documentation of this mode for
+single-device mode above. The "timer-trace" feature is enabled automatically in
+multi-device mode as it is required for synchronization. The "radio-trace"
+feature needs to be enabled manually.
+
+The following screenshot shows the synchronized output of a multi-device test,
+triggering off the Manchester-encoded marker for the test suite:
+
+![multi-device radio trace](doc/radio-example-logic-analyzer-multi-device.png)
+
+In this example, the sender is the client and the receiver is the server. The
+red lines show the expected timing of preamble, SFD and PHR in relation to the
+measured ready and framestart events. This screenshot proves, that nRF52840
+radio events are triggered with considerable latency. It also proves that events
+do not precisely correspond to symbols. We use these measurements to adjust our
+timing so that it matches our specification of +/- 62.5 ns relative timing
+error.
 
 ## High-Precision Timer Driver Test
 
@@ -167,7 +199,7 @@ quantify skew.
 
 If you enable the "device-sync" feature, then the `timer-sig` example can be
 used to verify proper device clock synchronization when run in a properly
-configured hardware testbed:
+configured [hardware testbed](../../docs/testbed/README.md):
 
 ![timer-sig screenshot](doc/timer-sig-example-multi-device.png)
 

@@ -78,16 +78,24 @@ rtos-trace = [
 ]
 _gpio-trace = []
 
-# Synchronize the clock of multiple test devices with an external sleep timer
+# Enables multi-device tests.
+#
+# Synchronizes the clock of multiple test devices with an external sleep timer
 # clock source and GPIO synchronization signals.
 #
 # If enabled, a common anchor time point will by established across devices.
 # Examples will block until the external clock signal is observed and the
 # 'PIN_TIMER_EVENT' pin is toggled up and back down.
 #
+# Requires a two-device dot15d4 synchronized testbed.
+#
 # Note: MUST be enabled while the LF clock pin (X1) is actively driven by an
 #       external signal otherwise your hardware may be damaged.
 device-sync = ["dot15d4/ext-lf-clk", "timer-trace"]
+
+# In multi-device tests, this feature must be enabled on the client while the
+# server is marked with "device-sync" only.
+device-sync-client = ["device-sync"]
 
 # An internal helper attribute that allows us to apply clippy in std mode.
 nrf52840 = [
