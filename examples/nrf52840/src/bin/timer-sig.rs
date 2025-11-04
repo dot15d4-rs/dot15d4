@@ -2,6 +2,7 @@
 
 #![no_std]
 #![no_main]
+#![cfg(feature = "timer-trace")]
 
 #[cfg(feature = "device-sync")]
 use dot15d4::driver::nrf_interrupt_executor;

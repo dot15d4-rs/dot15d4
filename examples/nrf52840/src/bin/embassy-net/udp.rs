@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![cfg(feature = "embassy-net")]
 
 use dot15d4::driver::{
     radio::RadioDriver,

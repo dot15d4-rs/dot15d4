@@ -5,7 +5,6 @@
 
 #![no_std]
 #![no_main]
-#![cfg(feature = "nrf52840")]
 #![allow(clippy::uninlined_format_args)]
 
 #[cfg(feature = "device-sync")]

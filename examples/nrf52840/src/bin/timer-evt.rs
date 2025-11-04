@@ -2,7 +2,7 @@
 
 #![no_std]
 #![no_main]
-#![cfg(feature = "nrf52840")]
+#![cfg(feature = "timer-trace")]
 #![allow(clippy::uninlined_format_args)]
 
 use dot15d4::{
