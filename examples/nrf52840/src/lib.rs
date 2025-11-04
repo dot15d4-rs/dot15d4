@@ -333,13 +333,25 @@ pub fn radio_tracing_config() -> NrfRadioTracingConfig {
     }
 }
 
-nrf_interrupt_executor!(executor, SWI0_EGU0);
+nrf_interrupt_executor!(swi_executor_internal, SWI0_EGU0);
 
 pub fn swi_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
-    executor(
+    swi_executor_internal(
         NrfInterruptPriority::LOWEST_PRIORITY,
+        #[cfg(feature = "executor-trace")]
+        gpiote_trace_channel,
+    )
+}
+
+nrf_interrupt_executor!(gpiote_executor_internal, GPIOTE);
+
+pub fn gpiote_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
+    #[cfg(feature = "executor-trace")]
+    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    gpiote_executor_internal(
+        NrfInterruptPriority::LOWEST_PRIORITY.one_higher().unwrap(),
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     )
