@@ -18,7 +18,7 @@ log = { version = "0.4", optional = true }
 cty = { version = "0.2", optional = true }
 rtos-trace = { version = "0.2", optional = true }
 rtt-target = { version = "0.6.2", optional = true }
-systemview-target = { version = "0.2.1", features = [
+systemview-target = { version = "0.3", features = [
     "callbacks-app",
     "callbacks-os",       # required for embassy integration
     "log",
