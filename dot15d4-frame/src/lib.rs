@@ -130,6 +130,10 @@ mod test {
         fn poll_event(&self, _event: HardwareEvent) -> Option<LocalClockInstant> {
             todo!()
         }
+
+        fn reset(&self) {
+            todo!()
+        }
     }
 
     struct FakeDriverConfig;

@@ -2,7 +2,7 @@
 
 use core::fmt::Debug;
 
-use crate::timer::{LocalClockInstant, RadioTimerApi, RadioTimerError};
+use crate::timer::{HighPrecisionTimer, LocalClockInstant, RadioTimerApi, RadioTimerError};
 
 use self::{
     phy::PhyConfig,
@@ -198,7 +198,7 @@ pub struct RadioDriver<RadioDriverImpl: DriverConfig, Task> {
     // An instance of the radio sleep timer.
     pub sleep_timer: RadioDriverImpl::Timer,
     /// An instance of the high precision timer while it is running.
-    high_precision_timer: Option<HighPrecisionTimerOf<RadioDriverImpl>>,
+    pub(crate) high_precision_timer: Option<HighPrecisionTimerOf<RadioDriverImpl>>,
     /// The scheduled entry time. Kept for debugging and error handling
     /// purposes. Shall be set while the task is being scheduled. See
     /// [`tasks::RadioState::transition`] for a definition of the semantics of
@@ -226,11 +226,12 @@ where
     pub(crate) fn initial_state(
         inner: RadioDriverImpl,
         sleep_timer: RadioDriverImpl::Timer,
+        high_precision_timer: Option<<RadioDriverImpl::Timer as RadioTimerApi>::HighPrecisionTimer>,
     ) -> Self {
         Self {
             inner,
             sleep_timer,
-            high_precision_timer: None,
+            high_precision_timer,
             scheduled_entry: Some(LocalClockInstant::from_ticks(0)),
             measured_entry: Some(LocalClockInstant::from_ticks(0)),
             rx_frame_started: None,
@@ -291,6 +292,10 @@ impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl
 
     pub(crate) fn stop_timer(&mut self) {
         drop(self.high_precision_timer.take());
+    }
+
+    pub(crate) fn reset_timer(&self) {
+        self.high_precision_timer.as_ref().unwrap().reset();
     }
 
     pub(crate) fn set_rx_frame_started(&mut self, rx_frame_started: LocalClockInstant) {

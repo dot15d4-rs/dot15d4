@@ -235,6 +235,10 @@ pub trait HighPrecisionTimer {
     /// for this event or if the event had already been collected by a prior
     /// call to this method.
     fn poll_event(&self, event: HardwareEvent) -> Option<LocalClockInstant>;
+
+    /// Removes all scheduled signals and observed events but leaves the
+    /// high-precision timer running.
+    fn reset(&self);
 }
 
 #[cfg(feature = "rtos-trace")]

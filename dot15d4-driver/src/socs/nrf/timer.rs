@@ -601,9 +601,6 @@ impl State {
         match channel {
             AlarmChannel::HighPrecisionTimer => {
                 rtc.evtenclr.write(|w| w.compare0().set_bit());
-                Self::ppi()
-                    .chenclr
-                    .write(|w| unsafe { w.bits(self.ppi_channel_mask.load(Ordering::Relaxed)) });
             }
             AlarmChannel::SleepTimer1 => rtc.intenclr.write(|w| w.compare1().set_bit()),
             AlarmChannel::SleepTimer2 => rtc.intenclr.write(|w| w.compare2().set_bit()),
@@ -2241,26 +2238,15 @@ impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
             None
         }
     }
-}
 
-impl Drop for NrfRadioHighPrecisionTimer {
-    fn drop(&mut self) {
+    fn reset(&self) {
         let timer = State::timer();
+        let ppi = State::ppi();
 
-        // First of all stop the timer to ensure that further signals won't be
-        // generated. This is atomic and doesn't have to be synchronized.
-        timer.tasks_stop.write(|w| w.tasks_stop().set_bit());
-
-        // Atomically cancel ongoing timer synchronization and re-acquire alarm
-        // memory to scheduling context in which the drop handler runs. This
-        // also disables all PPI channels.
-        STATE.rtc_fire_and_inactivate_alarm(AlarmChannel::HighPrecisionTimer);
-
-        // In case synchronization was interrupted: Clean up registers that were
-        // used for synchronization.
-        #[cfg(not(feature = "timer-trace"))]
-        State::rtc().evtenclr.write(|w| w.tick().set_bit());
-        timer.intenclr.write(|w| w.compare1().set_bit());
+        // First disable all PPI channels so that no further signals and events
+        // can be generated.
+        ppi.chenclr
+            .write(|w| unsafe { w.bits(STATE.ppi_channel_mask.load(Ordering::Relaxed)) });
 
         // Clean up timer resources.
         for timer_channel in 0..2 {
@@ -2278,6 +2264,29 @@ impl Drop for NrfRadioHighPrecisionTimer {
         // Release the PPI channel group.
         let ppi_channel_group = STATE.ppi_channel_group.load(Ordering::Relaxed);
         State::ppi().chg[ppi_channel_group].reset();
+    }
+}
+
+impl Drop for NrfRadioHighPrecisionTimer {
+    fn drop(&mut self) {
+        let timer = State::timer();
+
+        // First of all stop the timer to ensure that further signals won't be
+        // generated. This is atomic and doesn't have to be synchronized.
+        timer.tasks_stop.write(|w| w.tasks_stop().set_bit());
+
+        // Atomically cancel ongoing timer synchronization and re-acquire alarm
+        // memory to scheduling context in which the drop handler runs.
+        STATE.rtc_fire_and_inactivate_alarm(AlarmChannel::HighPrecisionTimer);
+
+        // In case synchronization was interrupted: Clean up registers that were
+        // used for synchronization.
+        #[cfg(not(feature = "timer-trace"))]
+        State::rtc().evtenclr.write(|w| w.tick().set_bit());
+        timer.intenclr.write(|w| w.compare1().set_bit());
+
+        // Clean up timer state.
+        self.reset();
 
         // Atomically de-allocate the high precision timer.
         STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer)
