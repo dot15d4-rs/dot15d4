@@ -365,7 +365,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             ),
         };
 
-        let mut driver = Self::initial_state(inner, timer);
+        let mut driver = Self::initial_state(inner, timer, None);
 
         driver.set_sfd(OQpsk250KBit::DEFAULT_SFD);
         driver.set_tx_power(0);
@@ -463,6 +463,7 @@ impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDri
         match r.state.read().state().variant().unwrap() {
             STATE_A::TX_DISABLE | STATE_A::RX_DISABLE | STATE_A::DISABLED => {}
             _ => {
+                self.reset_timer();
                 self.timer()
                     .observe_event(HardwareEvent::RadioDisabled)
                     .unwrap();
@@ -471,10 +472,13 @@ impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDri
         }
 
         let RadioDriver {
-            inner, sleep_timer, ..
+            inner,
+            sleep_timer,
+            high_precision_timer,
+            ..
         } = self;
 
-        RadioDriver::initial_state(inner, sleep_timer)
+        RadioDriver::initial_state(inner, sleep_timer, high_precision_timer)
             .wait_until_off()
             .await
     }
