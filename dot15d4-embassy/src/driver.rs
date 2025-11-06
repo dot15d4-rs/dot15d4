@@ -86,6 +86,8 @@ impl<'driver, RadioDriverImpl: DriverConfig> Ieee802154Driver<'driver, RadioDriv
     fn tx_token(&self, cx: &mut Context) -> Option<TxToken<'_>> {
         // Safety: Always allocate the buffer before trying to allocate a
         //         request token to avoid deadlock (or livelock in this case).
+        // TODO: Currently we always need one extra buffer so that the following
+        //       statement won't fail while the queue is blocking.
         let buffer = self
             .buffer_allocator
             .try_allocate_buffer(Self::BUFFER_LENGTH)
