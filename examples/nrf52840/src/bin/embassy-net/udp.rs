@@ -59,7 +59,13 @@ async fn main(spawner: Spawner) {
     ieee802154_task.metadata().set_name("dot15d4\0");
     spawner.spawn(ieee802154_task);
 
-    let addr = option_env!("ADDRESS").unwrap_or("1").parse().unwrap();
+    let addr = option_env!("ADDRESS");
+    #[cfg(not(feature = "device-sync-client"))]
+    let addr = addr.unwrap_or("1");
+    #[cfg(feature = "device-sync-client")]
+    let addr = addr.unwrap_or("2");
+    let addr = addr.parse().unwrap();
+
     let config = embassy_net::Config::ipv6_static(embassy_net::StaticConfigV6 {
         address: Ipv6Cidr::new(Ipv6Address::new(0xfd0e, 0, 0, 0, 0, 0, 0, addr), 64),
         dns_servers: Vec::new(),
