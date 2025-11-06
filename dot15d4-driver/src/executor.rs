@@ -186,13 +186,13 @@ pub trait InterruptExecutor {
 
 #[macro_export]
 macro_rules! interrupt_executor {
-    ($interrupt_executor:ty) => {{
+    ($interrupt_executor:ty, $vtable:ident) => {{
         use core::task::{RawWaker, RawWakerVTable};
 
         unsafe fn clone_waker(data: *const ()) -> RawWaker {
             // Safety: We always return the same (static) vtable reference to ensure
             //         that `Waker::will_wake()` recognizes the clone.
-            RawWaker::new(data, &VTABLE)
+            RawWaker::new(data, &$vtable)
         }
 
         unsafe fn wake(_: *const ()) {
@@ -210,6 +210,8 @@ macro_rules! interrupt_executor {
         RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker)
     }};
 }
+
+pub use interrupt_executor;
 
 #[cfg(feature = "rtos-trace")]
 pub(crate) mod trace {

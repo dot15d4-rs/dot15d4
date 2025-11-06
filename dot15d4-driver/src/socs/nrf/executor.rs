@@ -376,15 +376,14 @@ macro_rules! nrf_interrupt_executor {
             };
 
             use $crate::{
-                executor::{InterruptExecutor, InterruptPriority},
-                interrupt_executor,
+                executor::{interrupt_executor, InterruptExecutor, InterruptPriority},
                 socs::nrf::executor::{
                     export::{interrupt, Interrupt, StaticCell},
                     NrfInterruptPriority, NrfPriorityBits, State,
                 },
             };
 
-            static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor);
+            static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor, VTABLE);
             static STATE: State =
                 State::new(Interrupt::$interrupt, RawWaker::new(ptr::null(), &VTABLE));
 
