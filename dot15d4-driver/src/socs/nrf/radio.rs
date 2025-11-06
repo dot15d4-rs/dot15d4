@@ -707,15 +707,9 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
                                 Poll::Ready(())
                             } else {
-                                // Double check state in case the radio was already in
-                                // RX (CCA).
-                                match r.state.read().state().variant() {
-                                    Some(STATE_A::RX | STATE_A::RX_IDLE) => Poll::Ready(()),
-                                    _ => {
-                                        r.intenset.write(|w| w.rxready().set_bit());
-                                        Poll::Pending
-                                    }
-                                }
+                                r.intenset.write(|w| w.rxready().set_bit());
+
+                                Poll::Pending
                             }
                         })
                         .await;
