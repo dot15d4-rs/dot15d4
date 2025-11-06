@@ -10,7 +10,7 @@
 # to voltages above the absolute maximum rating (VDD+0.3).
 
 [default.probe]
-speed = 6000 # Configure lower speeds in case of connection issues.
+speed = 10000 # Configure lower speeds in case of connection issues.
 
 [default.general]
 chip = "nRF52840_xxAA"
