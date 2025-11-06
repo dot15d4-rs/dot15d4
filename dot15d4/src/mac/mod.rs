@@ -97,7 +97,7 @@ const _: () = {
 /// - one pre-allocated buffer for outgoing ACKs
 /// - one pre-allocated buffer for incoming ACKs
 pub const MAC_NUM_REQUIRED_BUFFERS: usize =
-    UL_MAX_TX_TOKENS + MAC_NUM_PARALLEL_INDICATION_TASKS + 2;
+    UL_MAX_TX_TOKENS + MAC_NUM_PARALLEL_INDICATION_TASKS + 3;
 // TODO: Make this generic over the radio driver configuration.
 pub const MAC_BUFFER_SIZE: usize =
     <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize + MAX_DRIVER_OVERHEAD;
