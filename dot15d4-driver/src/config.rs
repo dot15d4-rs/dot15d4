@@ -1,6 +1,6 @@
 /// IEEE 802.15.4 channels
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Channel {
     /// 2_405 MHz
     _11,
@@ -33,6 +33,7 @@ pub enum Channel {
     /// 2_475 MHz
     _25,
     /// 2_480 MHz
+    #[default]
     _26,
 }
 
@@ -108,12 +109,6 @@ impl From<Channel> for u8 {
             Channel::_25 => 25,
             Channel::_26 => 26,
         }
-    }
-}
-
-impl Default for Channel {
-    fn default() -> Self {
-        Self::_26
     }
 }
 
