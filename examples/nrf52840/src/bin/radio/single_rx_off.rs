@@ -3,7 +3,7 @@ use dot15d4::{
         radio::{
             tasks::{
                 CompletedRadioTransition::*, ExternalRadioTransition, ListeningRxState, OffState,
-                RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxState,
+                RadioDriverApi, RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxState,
             },
             DriverConfig, RadioDriver,
         },
@@ -25,7 +25,7 @@ pub async fn best_effort<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
+    RadioDriver<Config, TaskRx>: ListeningRxState<Config> + RadioDriverApi<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     let _ = allocate_test_slot(
@@ -98,7 +98,7 @@ pub async fn timed<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
+    RadioDriver<Config, TaskRx>: ListeningRxState<Config> + RadioDriverApi<Config>,
     RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     // off -> rx
