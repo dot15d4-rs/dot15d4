@@ -13,13 +13,14 @@ use paste::paste;
 ///
 /// Values between two and eight are allowed, see
 /// <https://developer.arm.com/documentation/107706/0100/Exceptions-and-interrupts-overview/Exception-priority-level-definitions>.
-pub trait PriorityBits {
+pub trait PriorityBits: Copy {
     const PRIORITY_BITS: usize;
 }
 
 macro_rules! impl_priority_bits {
     ($num_priority_bits:literal) => {
         paste! {
+            #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
             pub struct [<PB$num_priority_bits>];
             impl PriorityBits for [<PB$num_priority_bits>] {
                 const PRIORITY_BITS: usize = $num_priority_bits;
@@ -69,11 +70,11 @@ impl<PB: PriorityBits> InterruptPriority<PB> {
         assert!(PB::PRIORITY_BITS <= 8);
     };
 
-    const HIGHEST_PRIORITY_U8: u8 = 0;
-    pub const HIGHEST_PRIORITY: Self = Self(Self::HIGHEST_PRIORITY_U8, PhantomData);
+    const HIGHEST_U8: u8 = 0;
+    pub const HIGHEST: Self = Self(Self::HIGHEST_U8, PhantomData);
 
-    const LOWEST_PRIORITY_U8: u8 = (2u16.pow(PB::PRIORITY_BITS as u32) - 1u16) as u8;
-    pub const LOWEST_PRIORITY: Self = Self(Self::LOWEST_PRIORITY_U8, PhantomData);
+    const LOWEST_U8: u8 = (2u16.pow(PB::PRIORITY_BITS as u32) - 1u16) as u8;
+    pub const LOWEST: Self = Self(Self::LOWEST_U8, PhantomData);
 
     /// Convert the internal representation to the left-aligned ARM NVIC
     /// interrupt priority representation.
@@ -112,7 +113,7 @@ impl<PB: PriorityBits> TryFrom<u8> for InterruptPriority<PB> {
     type Error = ();
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value > Self::LOWEST_PRIORITY_U8 {
+        if value > Self::LOWEST_U8 {
             Err(())
         } else {
             Ok(Self(value, PhantomData))

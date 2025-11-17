@@ -106,7 +106,7 @@ fn main() -> ! {
     timer.prescaler.write(|w| w.prescaler().variant(0)); // 16 MHz
 
     let rtc_executor = rtc_executor(
-        NrfInterruptPriority::LOWEST_PRIORITY,
+        NrfInterruptPriority::LOWEST,
         #[cfg(feature = "executor-trace")]
         0,
     );

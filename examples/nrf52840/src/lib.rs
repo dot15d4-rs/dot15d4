@@ -339,7 +339,7 @@ pub fn swi_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     swi_executor_internal(
-        NrfInterruptPriority::LOWEST_PRIORITY,
+        NrfInterruptPriority::LOWEST,
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     )
@@ -351,7 +351,7 @@ pub fn gpiote_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
     gpiote_executor_internal(
-        NrfInterruptPriority::LOWEST_PRIORITY.one_higher().unwrap(),
+        NrfInterruptPriority::LOWEST.one_higher().unwrap(),
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     )

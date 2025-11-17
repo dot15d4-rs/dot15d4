@@ -359,7 +359,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 
         let inner = NrfRadioDriver {
             executor: *self::executor(
-                NrfInterruptPriority::HIGHEST_PRIORITY,
+                NrfInterruptPriority::HIGHEST,
                 #[cfg(feature = "executor-trace")]
                 executor_trace_channel,
             ),

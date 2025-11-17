@@ -436,7 +436,7 @@ impl State {
 
         let mut nvic = Self::nvic();
 
-        let timer_interrupt_priority = NrfInterruptPriority::HIGHEST_PRIORITY.one_lower().unwrap();
+        let timer_interrupt_priority = NrfInterruptPriority::HIGHEST.one_lower().unwrap();
         // Safety: See the documented synchronization approach.
         unsafe {
             nvic.set_priority(
