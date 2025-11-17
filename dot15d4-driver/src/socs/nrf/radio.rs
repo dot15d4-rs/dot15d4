@@ -132,84 +132,86 @@ impl DriverConfig for NrfRadioDriver {
 
 type Ifs = PhyIfs<Phy<OQpsk250KBit>>;
 
-impl<Task> RadioDriver<NrfRadioDriver, Task> {
-    /// Convenience shortcut to access the radio registers.
-    fn radio() -> pac::RADIO {
-        // Safety: We let clients prove unique ownership of the peripheral by
-        //         requiring an instance when instantiating the driver.
-        unsafe { pac::Peripherals::steal() }.RADIO
-    }
+/// Convenience shortcut to access the radio registers.
+fn radio() -> pac::RADIO {
+    // Safety: We let clients prove unique ownership of the peripheral by
+    //         requiring an instance when instantiating the driver.
+    unsafe { pac::Peripherals::steal() }.RADIO
+}
 
-    fn set_ifs(ifs: Option<Ifs>, with_guard_time: bool) {
-        const AIFS_US: u16 = Ifs::ack().into_local_clock_duration().to_micros() as u16;
-        const SIFS_US: u16 = Ifs::short().into_local_clock_duration().to_micros() as u16;
-        const LIFS_US: u16 = Ifs::long().into_local_clock_duration().to_micros() as u16;
+fn set_ifs(ifs: Option<Ifs>, with_guard_time: bool) {
+    const AIFS_US: u16 = Ifs::ack().into_local_clock_duration().to_micros() as u16;
+    const SIFS_US: u16 = Ifs::short().into_local_clock_duration().to_micros() as u16;
+    const LIFS_US: u16 = Ifs::long().into_local_clock_duration().to_micros() as u16;
 
-        use PhyIfs::*;
+    use PhyIfs::*;
 
-        let tifs_us = match ifs {
-            Some(ifs) => {
-                let mut tifs_us = match ifs {
-                    Aifs(_) => AIFS_US,
-                    Sifs(_) => SIFS_US,
-                    Lifs(_) => LIFS_US,
-                };
+    let tifs_us = match ifs {
+        Some(ifs) => {
+            let mut tifs_us = match ifs {
+                Aifs(_) => AIFS_US,
+                Sifs(_) => SIFS_US,
+                Lifs(_) => LIFS_US,
+            };
 
-                if with_guard_time {
-                    // Worst case clock drift counted from the end of a frame to the
-                    // beginning of the next frame (IFS):
-                    //
-                    //         IFS * (clock_drift_ppm / 1_000_000).
-                    //
-                    // This will always be less than a single microsecond even assuming
-                    // a clock drift of up to 1500 ppm applied to a LIFS duration.
-                    tifs_us -= 1;
-                }
-
-                tifs_us
+            if with_guard_time {
+                // Worst case clock drift counted from the end of a frame to the
+                // beginning of the next frame (IFS):
+                //
+                //         IFS * (clock_drift_ppm / 1_000_000).
+                //
+                // This will always be less than a single microsecond even assuming
+                // a clock drift of up to 1500 ppm applied to a LIFS duration.
+                tifs_us -= 1;
             }
-            None => 0,
-        };
 
-        Self::radio().tifs.write(|w| w.tifs().variant(tifs_us));
-    }
-
-    const fn timed_rx_enable(start: NsInstant) -> TimedSignal {
-        // RMARKER offset: disabled -> rx -> SHR
-        const OFFSET: NsDuration = T_RXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
-        TimedSignal::new(
-            start.checked_sub_duration(OFFSET).unwrap(),
-            HardwareSignal::RadioRxEnable,
-        )
-    }
-
-    const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
-        if cca {
-            // RMARKER offset with CCA: disabled -> rx -> CCA -> turnaround -> SHR
-            const OFFSET_DIS_TO_TX_W_CCA: NsDuration = T_RXEN
-                .checked_add(T_BACKOFF_PERIOD)
-                .unwrap()
-                .checked_add(OQpsk250KBit::T_SHR)
-                .unwrap();
-            TimedSignal::new(
-                at.checked_sub_duration(OFFSET_DIS_TO_TX_W_CCA).unwrap(),
-                HardwareSignal::RadioRxEnable,
-            )
-        } else {
-            // RMARKER offset without CCA: disabled -> tx -> SHR
-            const OFFSET_DIS_TO_TX_NO_CCA: NsDuration =
-                T_TXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
-            TimedSignal::new(
-                at.checked_sub_duration(OFFSET_DIS_TO_TX_NO_CCA).unwrap(),
-                HardwareSignal::RadioTxEnable,
-            )
+            tifs_us
         }
-    }
+        None => 0,
+    };
+
+    radio().tifs.write(|w| w.tifs().variant(tifs_us));
 }
 
 /// Rx bit counter event triggered after the frame control field (2 bytes) has
 /// been received.
 const BCC_FC_BITS: u32 = 2 * 8;
+
+const fn timed_rx_enable(start: NsInstant) -> TimedSignal {
+    // RMARKER offset: disabled -> rx -> SHR
+    const OFFSET: NsDuration = T_RXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
+    TimedSignal::new(
+        start.checked_sub_duration(OFFSET).unwrap(),
+        HardwareSignal::RadioRxEnable,
+    )
+}
+
+const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
+    if cca {
+        // RMARKER offset with CCA: disabled -> rx -> CCA -> turnaround -> SHR
+        const OFFSET_DIS_TO_TX_W_CCA: NsDuration = T_RXEN
+            .checked_add(T_BACKOFF_PERIOD)
+            .unwrap()
+            .checked_add(OQpsk250KBit::T_SHR)
+            .unwrap();
+        TimedSignal::new(
+            at.checked_sub_duration(OFFSET_DIS_TO_TX_W_CCA).unwrap(),
+            HardwareSignal::RadioRxEnable,
+        )
+    } else {
+        // RMARKER offset without CCA: disabled -> tx -> SHR
+        const OFFSET_DIS_TO_TX_NO_CCA: NsDuration =
+            T_TXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
+        TimedSignal::new(
+            at.checked_sub_duration(OFFSET_DIS_TO_TX_NO_CCA).unwrap(),
+            HardwareSignal::RadioTxEnable,
+        )
+    }
+}
+
+const fn timed_off(at: NsInstant) -> TimedSignal {
+    TimedSignal::new(at, HardwareSignal::RadioDisable)
+}
 
 #[cfg(feature = "radio-trace")]
 pub struct NrfRadioTracingConfig {
@@ -369,7 +371,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 
     /// Changes the Clear Channel Assessment method
     pub fn set_cca(&mut self, cca: CcaMode) {
-        let r = Self::radio();
+        let r = radio();
         match cca {
             CcaMode::CarrierSense => r.ccactrl.write(|w| w.ccamode().carrier_mode()),
             CcaMode::EnergyDetection { ed_threshold } => {
@@ -385,12 +387,12 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 
     /// Changes the Start of Frame Delimiter (SFD)
     pub fn set_sfd(&mut self, sfd: u8) {
-        Self::radio().sfd.write(|w| w.sfd().variant(sfd));
+        radio().sfd.write(|w| w.sfd().variant(sfd));
     }
 
     /// Changes the radio transmission power
     pub fn set_tx_power(&mut self, power: i8) {
-        Self::radio().txpower.write(|w| match power {
+        radio().txpower.write(|w| match power {
             #[cfg(not(any(feature = "nrf52811", feature = "nrf5340-net")))]
             8 => w.txpower().pos8d_bm(),
             #[cfg(not(any(feature = "nrf52811", feature = "nrf5340-net")))]
@@ -451,7 +453,7 @@ impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDri
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_FALL_BACK);
 
-        let r = Self::radio();
+        let r = radio();
         match r.state.read().state().variant().unwrap() {
             STATE_A::TX_DISABLE | STATE_A::RX_DISABLE | STATE_A::DISABLED => {}
             _ => {
@@ -483,7 +485,7 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
             self.inner
                 .executor
                 .spawn(poll_fn(|_| {
-                    let r = Self::radio();
+                    let r = radio();
                     if r.events_disabled.read().events_disabled().bit_is_set() {
                         r.intenclr.write(|w| w.disabled().set_bit());
                         r.events_disabled.reset();
@@ -528,7 +530,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
     fn set_channel(&mut self, channel: Channel) {
         let channel: u8 = channel.into();
         let frequency_offset = (channel - 10) * 5;
-        Self::radio()
+        radio()
             .frequency
             .write(|w| w.frequency().variant(frequency_offset).map().default());
     }
@@ -541,14 +543,22 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_SCHEDULE);
 
-        let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskOff>,
+            rx_task: TaskRx,
+            start: OptionalNsInstant,
+        }
 
-        RadioTransition::new(
-            self,
-            rx_task,
-            move |this| {
-                let timed_rx_enable = start.map(Self::timed_rx_enable);
-                let timer = this.start_timer(timed_rx_enable.map(|ts| ts.instant).into())?;
+        impl RadioTransition<NrfRadioDriver, TaskOff, TaskRx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskOff> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                let timed_rx_enable = self.start.map(timed_rx_enable);
+                let timer = self
+                    .driver
+                    .start_timer(timed_rx_enable.map(|ts| ts.instant).into())?;
                 if let Some(timed_rx_enable) = timed_rx_enable {
                     timer.schedule_timed_signal(timed_rx_enable)?;
                 }
@@ -556,9 +566,10 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     .observe_event(HardwareEvent::RadioRxEnabled)?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = Self::radio();
+                let r = radio();
 
                 // Ramp up the receiver and start frame reception immediately.
+                let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
                 dma_start_fence();
@@ -567,50 +578,74 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     w.framestart_bcstart().enabled()
                 });
 
-                if start.is_none() {
+                if self.start.is_none() {
                     r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
                 }
 
-                Ok(start)
-            },
-            || Ok(()),
-            || {
-                Self::radio()
-                    .shorts
-                    .modify(|_, w| w.rxready_start().disabled());
+                Ok(self.start)
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 Ok(())
-            },
-            false,
-        )
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskRx>> {
+                radio().shorts.modify(|_, w| w.rxready_start().disabled());
+                Ok(())
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                false
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskOff>, TaskRx) {
+                (self.driver, self.rx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            rx_task,
+            start,
+        }
     }
 
     fn schedule_tx(
         self,
-        mut tx_task: TaskTx,
+        tx_task: TaskTx,
         at: OptionalNsInstant,
     ) -> impl ExternalRadioTransition<NrfRadioDriver, TaskOff, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_SCHEDULE);
 
-        let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskOff>,
+            tx_task: TaskTx,
+            at: OptionalNsInstant,
+        }
 
-        let cca = tx_task.cca;
-        RadioTransition::new(
-            self,
-            tx_task,
-            move |this| {
-                let timed_tx_enable = at.map(|instant| Self::timed_tx_enable(instant, cca));
-                let timer = this.start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
+        impl RadioTransition<NrfRadioDriver, TaskOff, TaskTx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskOff> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                let cca = self.tx_task.cca;
+                let timed_tx_enable = self.at.map(|instant| timed_tx_enable(instant, cca));
+                let timer = self
+                    .driver
+                    .start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
                 if let Some(timed_tx_enable) = timed_tx_enable {
                     timer.schedule_timed_signal(timed_tx_enable)?;
                 }
                 timer.observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = Self::radio();
+                let r = radio();
 
+                let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
-                let is_best_effort = at.is_none();
+                let is_best_effort = self.at.is_none();
                 dma_start_fence();
                 if cca {
                     r.shorts.write(|w| {
@@ -634,16 +669,33 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     }
                 }
 
-                Ok(at)
-            },
-            || Ok(()),
-            || {
-                // Cleanup shorts.
-                Self::radio().shorts.reset();
+                Ok(self.at)
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 Ok(())
-            },
-            false,
-        )
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskTx>> {
+                // Cleanup shorts.
+                radio().shorts.reset();
+                Ok(())
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                false
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskOff>, TaskTx) {
+                (self.driver, self.tx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            tx_task,
+            at,
+        }
     }
 }
 
@@ -651,13 +703,9 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
 ///
 /// See sub-state specific information below.
 impl RadioDriver<NrfRadioDriver, TaskRx> {
-    const fn timed_off(at: NsInstant) -> TimedSignal {
-        TimedSignal::new(at, HardwareSignal::RadioDisable)
-    }
-
     #[inline(always)]
     fn is_back_to_back_rx() -> bool {
-        Self::radio().shorts.read().end_start().is_enabled()
+        radio().shorts.read().end_start().is_enabled()
     }
 }
 
@@ -670,7 +718,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
             self.inner
                 .executor
                 .spawn(async {
-                    let r = Self::radio();
+                    let r = radio();
                     if is_back_to_back_rx {
                         poll_fn(|_| {
                             if r.events_framestart.read().events_framestart().bit_is_set() {
@@ -747,7 +795,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         &mut self,
         rollback_on_crcerror: bool,
     ) -> Result<RxResult, RadioTaskError<TaskRx>> {
-        let r = Self::radio();
+        let r = radio();
 
         debug_assert!(self.rx_frame_started().is_some());
 
@@ -820,7 +868,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
     }
 
     fn exit(&mut self) -> Result<(), SchedulingError> {
-        Self::radio()
+        radio()
             .shorts
             .modify(|_, w| w.framestart_bcstart().disabled());
         Ok(())
@@ -888,7 +936,7 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             self.inner
                 .executor
                 .spawn(async {
-                    let r = Self::radio();
+                    let r = radio();
 
                     let cleanup_on_drop = CancellationGuard::new(|| {
                         r.intenclr.write(|w| w.framestart().set_bit());
@@ -941,7 +989,7 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             return Err((err.into(), self));
         }
 
-        let r = Self::radio();
+        let r = radio();
 
         let disable_at = latest_frame_start.map(|ts| ts + OQpsk250KBit::T_PHR);
         let mut disabled = false;
@@ -952,7 +1000,7 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             // the local radio clock. The nRF driver's framestart event fires
             // after the PHY header, i.e. one byte later.
             match timer.schedule_timed_signal_unless(
-                Self::timed_off(disable_at),
+                timed_off(disable_at),
                 HardwareEvent::RadioFrameStarted,
             ) {
                 Err(RadioTimerError::Already) => {
@@ -1068,7 +1116,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         let mut preliminary_frame_info: Option<PreliminaryFrameInfo> = None;
 
         let capture_preliminary_frame_info = async {
-            let r = Self::radio();
+            let r = radio();
 
             let cleanup_on_drop = CancellationGuard::new(|| {
                 r.intenclr.write(|w| {
@@ -1246,21 +1294,27 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_SCHEDULE);
 
-        let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskRx>,
+            rx_task: TaskRx,
+            ifs: Option<Ifs>,
+            rollback_on_crcerror: bool,
+        }
 
-        let is_back_to_back_rx = ifs.is_none();
+        impl RadioTransition<NrfRadioDriver, TaskRx, TaskRx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskRx> {
+                &mut self.driver
+            }
 
-        RadioTransition::new(
-            self,
-            rx_task,
-            move |this| {
-                let timer = this.start_timer(None.into())?;
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                let timer = self.driver.start_timer(None.into())?;
 
+                let is_back_to_back_rx = self.ifs.is_none();
                 if is_back_to_back_rx {
                     // Back-to-back is only allowed if the rx window has ended
                     // with frame reception, i.e. the radio is still enabled.
                     debug_assert!(
-                        (Self::radio().state.read().state().bits()
+                        (radio().state.read().state().bits()
                             & (STATE_A::RX as u8 | STATE_A::RX_IDLE as u8))
                             != 0
                     );
@@ -1269,8 +1323,9 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 }
                 timer.observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = Self::radio();
+                let r = radio();
 
+                let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
                 // Enable back-to-back frame reception.
@@ -1279,8 +1334,8 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 //       avoid race conditions, see RX_IDLE case below.
                 dma_start_fence();
                 r.shorts.write(|w| {
-                    if let Some(ifs) = ifs {
-                        Self::set_ifs(Some(ifs), true);
+                    if let Some(ifs) = self.ifs {
+                        set_ifs(Some(ifs), true);
                         w.end_disable().enabled();
                         w.disabled_rxen().enabled();
                         w.rxready_start().enabled();
@@ -1292,13 +1347,14 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 });
 
                 Ok(None.into())
-            },
-            move || {
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 // Check whether the task completed before we were able to
                 // automate the transition.
                 //
                 // Note: Read the state _after_ having set the short.
-                let r = Self::radio();
+                let r = radio();
                 if r.state.read().state().is_rx_idle()
                     && r.events_framestart
                         .read()
@@ -1314,6 +1370,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     //
                     // TODO: We currently have no way to enforce IFS in this
                     //       case.
+                    let is_back_to_back_rx = self.ifs.is_none();
                     if is_back_to_back_rx {
                         r.tasks_start.write(|w| w.tasks_start().set_bit());
                     } else {
@@ -1327,23 +1384,36 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 };
 
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskRx>> {
                 // Clean up shorts: The framestart-bcstart short must
                 // remain enabled.
-                Self::radio()
-                    .shorts
-                    .write(|w| w.framestart_bcstart().enabled());
-                Self::set_ifs(None, false);
+                radio().shorts.write(|w| w.framestart_bcstart().enabled());
+                set_ifs(None, false);
                 Ok(())
-            },
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                self.rollback_on_crcerror
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskRx>, TaskRx) {
+                (self.driver, self.rx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            rx_task,
+            ifs,
             rollback_on_crcerror,
-        )
+        }
     }
 
     fn schedule_tx(
         self,
-        mut tx_task: TaskTx,
+        tx_task: TaskTx,
         at: OptionalNsInstant,
         ifs: Option<Ifs>,
         rollback_on_crcerror: bool,
@@ -1351,29 +1421,38 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_SCHEDULE);
 
-        // PACKETPTR is double buffered so we don't cause a race by setting it
-        // while reception might still be ongoing.
-        let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskRx>,
+            tx_task: TaskTx,
+            at: OptionalNsInstant,
+            ifs: Option<Ifs>,
+            rollback_on_crcerror: bool,
+        }
 
-        let cca = tx_task.cca;
-        let is_best_effort = at.is_none();
-        RadioTransition::new(
-            self,
-            tx_task,
-            move |this| {
-                let timed_signals = at.map(|at| {
-                    let tx_enable = Self::timed_tx_enable(at, cca);
+        impl RadioTransition<NrfRadioDriver, TaskRx, TaskTx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskRx> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                let cca = self.tx_task.cca;
+                let is_best_effort = self.at.is_none();
+
+                let timed_signals = self.at.map(|at| {
+                    let tx_enable = timed_tx_enable(at, cca);
                     // No need for window-widening as it is the client's
                     // responsibility to cater for clock drift.
-                    let rx_off_at = if let Some(ifs) = ifs {
+                    let rx_off_at = if let Some(ifs) = self.ifs {
                         tx_enable.instant + if cca { T_RXEN } else { T_TXEN }
                             - NsDuration::from(ifs)
                     } else {
                         tx_enable.instant - T_RXDIS
                     };
-                    (Self::timed_off(rx_off_at), tx_enable)
+                    (timed_off(rx_off_at), tx_enable)
                 });
-                let timer = this.start_timer(timed_signals.map(|ts| ts.0.instant).into())?;
+                let timer = self
+                    .driver
+                    .start_timer(timed_signals.map(|ts| ts.0.instant).into())?;
                 if let Some((rx_off, tx_enable)) = timed_signals {
                     debug_assert!(rx_off.instant < tx_enable.instant);
 
@@ -1383,11 +1462,14 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 }
                 timer.observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = Self::radio();
+                let r = radio();
 
+                // PACKETPTR is double buffered so we don't cause a race by setting it
+                // while reception might still be ongoing.
+                let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
-                Self::set_ifs(ifs, false);
+                set_ifs(self.ifs, false);
 
                 // Note: We need to set up shorts before completing the task to
                 //       avoid race conditions, see RX_IDLE case below.
@@ -1423,10 +1505,11 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     });
                 }
 
-                Ok(at)
-            },
-            move || {
-                let r = Self::radio();
+                Ok(self.at)
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
+                let r = radio();
 
                 // Check whether the task completed before we were able to
                 // automate the transition.
@@ -1446,15 +1529,31 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 }
 
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskTx>> {
                 // Clean up shorts.
-                Self::radio().shorts.reset();
-                Self::set_ifs(None, false);
+                radio().shorts.reset();
+                set_ifs(None, false);
                 Ok(())
-            },
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                self.rollback_on_crcerror
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskRx>, TaskTx) {
+                (self.driver, self.tx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            tx_task,
+            at,
+            ifs,
             rollback_on_crcerror,
-        )
+        }
     }
 
     fn schedule_off(
@@ -1465,15 +1564,23 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_OFF_SCHEDULE);
 
-        RadioTransition::new(
-            self,
-            TaskOff,
-            move |this| {
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskRx>,
+            at: OptionalNsInstant,
+            rollback_on_crcerror: bool,
+        }
+
+        impl RadioTransition<NrfRadioDriver, TaskRx, TaskOff> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskRx> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
                 // We're in RX or RXIDLE state and need to ramp down the
                 // receiver.
-                let timer = this.start_timer(at)?;
-                if let Some(at) = at.into() {
-                    timer.schedule_timed_signal(Self::timed_off(at))?;
+                let timer = self.driver.start_timer(self.at)?;
+                if let Some(at) = self.at.into() {
+                    timer.schedule_timed_signal(timed_off(at))?;
                 }
                 timer.observe_event(HardwareEvent::RadioDisabled)?;
 
@@ -1485,15 +1592,16 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 // Note: It's ok to leave the short on even in the timed case,
                 //       as we don't have to schedule anything after the disable
                 //       task.
-                Self::radio().shorts.write(|w| w.end_disable().enabled());
-                Ok(at)
-            },
-            || {
+                radio().shorts.write(|w| w.end_disable().enabled());
+                Ok(self.at)
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 // Check whether the task completed before we were able to
                 // automate the transition.
                 //
                 // Note: Read the state _after_ having set the short.
-                let r = Self::radio();
+                let r = radio();
                 match r.state.read().state().variant() {
                     Some(STATE_A::RX_IDLE) => {
                         // We're idle, although we have a short in place: This
@@ -1506,14 +1614,28 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 };
 
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskOff>> {
                 // Cleanup shorts.
-                Self::radio().shorts.reset();
+                radio().shorts.reset();
                 Ok(())
-            },
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                self.rollback_on_crcerror
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskRx>, TaskOff) {
+                (self.driver, TaskOff)
+            }
+        }
+
+        Transition {
+            driver: self,
+            at,
             rollback_on_crcerror,
-        )
+        }
     }
 }
 
@@ -1533,7 +1655,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 ///       which needs to observe that event.
 impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     async fn transition(&mut self) -> Result<NsInstant, RadioTaskError<TaskTx>> {
-        let r = Self::radio();
+        let r = radio();
 
         let tx_task = self.ref_task();
         if tx_task.cca {
@@ -1611,7 +1733,7 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     }
 
     async fn completion(&mut self, _: bool) -> Result<TxResult, RadioTaskError<TaskTx>> {
-        let r = Self::radio();
+        let r = radio();
 
         unsafe {
             self.inner
@@ -1653,21 +1775,29 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_SCHEDULE);
 
-        let packetptr = rx_task.radio_frame.as_ptr() as u32;
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskTx>,
+            rx_task: TaskRx,
+            ifs: Ifs,
+        }
 
-        RadioTransition::new(
-            self,
-            rx_task,
-            move |this| {
-                this.start_timer(None.into())?
+        impl RadioTransition<NrfRadioDriver, TaskTx, TaskRx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskTx> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                self.driver
+                    .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioRxEnabled)?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = Self::radio();
+                let r = radio();
 
+                let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
-                Self::set_ifs(Some(ifs), true);
+                set_ifs(Some(self.ifs), true);
 
                 // Note: To cater for errata 204 (see rev1 v1.4) a tx-to-rx
                 //       switch must pass through the disabled state, which is
@@ -1685,9 +1815,10 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 });
 
                 Ok(None.into())
-            },
-            || {
-                let r = Self::radio();
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
+                let r = radio();
 
                 // We need to schedule the BCSTART short _after_ the FRAMESTART
                 // event of the tx frame, otherwise the tx frame will trigger
@@ -1711,48 +1842,67 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                     debug!("late scheduling");
                 };
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskRx>> {
                 // Clean up shorts: The framestart-bcstart short must
                 // remain enabled.
-                Self::radio()
-                    .shorts
-                    .write(|w| w.framestart_bcstart().enabled());
-                Self::set_ifs(None, false);
+                radio().shorts.write(|w| w.framestart_bcstart().enabled());
+                set_ifs(None, false);
                 Ok(())
-            },
-            false,
-        )
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                false
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskTx>, TaskRx) {
+                (self.driver, self.rx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            rx_task,
+            ifs,
+        }
     }
 
     fn schedule_tx(
         self,
-        mut tx_task: TaskTx,
+        tx_task: TaskTx,
         ifs: Ifs,
     ) -> impl SelfRadioTransition<NrfRadioDriver, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_SCHEDULE);
 
-        let packetptr = prepare_tx_frame(&mut tx_task.radio_frame);
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskTx>,
+            tx_task: TaskTx,
+            ifs: Ifs,
+        }
 
-        let cca = tx_task.cca;
-        RadioTransition::new(
-            self,
-            tx_task,
-            move |this| {
-                this.start_timer(None.into())?
+        impl RadioTransition<NrfRadioDriver, TaskTx, TaskTx> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskTx> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                self.driver
+                    .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
                 // Note: We need to set up the shorts before checking radio state to
                 //       avoid race conditions, see the TX_IDLE case below.
-                let r = Self::radio();
+                let r = radio();
 
+                let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
-                Self::set_ifs(Some(ifs), false);
+                set_ifs(Some(self.ifs), false);
 
                 dma_start_fence();
-                if cca {
+                if self.tx_task.cca {
                     r.shorts.write(|w| {
                         // Ramp down the transceiver, ramp it up again in RX state and
                         // then start CCA immediately.
@@ -1777,13 +1927,14 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 }
 
                 Ok(None.into())
-            },
-            move || {
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 // Check whether the task completed before we were able to
                 // automate the transition.
                 //
                 // Note: Read the state _after_ having set the short.
-                let r = Self::radio();
+                let r = radio();
                 if r.state.read().state().is_tx_idle() {
                     // We check whether a second frame was already sent
                     // just in the unlikely case that we got here so late
@@ -1813,26 +1964,47 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 }
 
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskTx>> {
                 // Clean up shorts.
-                Self::radio().shorts.reset();
-                Self::set_ifs(None, false);
+                radio().shorts.reset();
+                set_ifs(None, false);
                 Ok(())
-            },
-            false,
-        )
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                false
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskTx>, TaskTx) {
+                (self.driver, self.tx_task)
+            }
+        }
+
+        Transition {
+            driver: self,
+            tx_task,
+            ifs,
+        }
     }
 
     fn schedule_off(self) -> impl ExternalRadioTransition<NrfRadioDriver, TaskTx, TaskOff> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_OFF_SCHEDULE);
 
-        RadioTransition::new(
-            self,
-            TaskOff,
-            move |this| {
-                this.start_timer(None.into())?
+        struct Transition {
+            driver: RadioDriver<NrfRadioDriver, TaskTx>,
+        }
+
+        impl RadioTransition<NrfRadioDriver, TaskTx, TaskOff> for Transition {
+            fn driver(&mut self) -> &mut RadioDriver<NrfRadioDriver, TaskTx> {
+                &mut self.driver
+            }
+
+            fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
+                self.driver
+                    .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioDisabled)?;
 
                 // Ramp down the receiver.
@@ -1843,16 +2015,17 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 // Note: It's ok to leave the short on even in the timed case,
                 //       as we don't have to schedule anything after the disable
                 //       task.
-                Self::radio().shorts.write(|w| w.end_disable().enabled());
+                radio().shorts.write(|w| w.end_disable().enabled());
 
                 Ok(None.into())
-            },
-            move || {
+            }
+
+            fn on_completed(&mut self) -> Result<(), SchedulingError> {
                 // Check whether the transition has already triggered. If not then wait
                 // until it triggers.
                 //
                 // Note: Read the state _after_ having set the short.
-                let r = Self::radio();
+                let r = radio();
                 if r.state.read().state().is_tx_idle() {
                     // We're idle, although we have a short in place: This means
                     // that the previous frame was sent before we were able to
@@ -1863,14 +2036,24 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 };
 
                 Ok(())
-            },
-            || {
+            }
+
+            fn cleanup() -> Result<(), RadioTaskError<TaskOff>> {
                 // Clean up shorts.
-                Self::radio().shorts.reset();
+                radio().shorts.reset();
                 Ok(())
-            },
-            false,
-        )
+            }
+
+            fn alt_outcome_is_error(&self) -> bool {
+                false
+            }
+
+            fn consume(self) -> (RadioDriver<NrfRadioDriver, TaskTx>, TaskOff) {
+                (self.driver, TaskOff)
+            }
+        }
+
+        Transition { driver: self }
     }
 }
 

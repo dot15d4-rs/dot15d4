@@ -4,7 +4,8 @@ use dot15d4::{
             phy::Ifs,
             tasks::{
                 CompletedRadioTransition::*, ExternalRadioTransition, ListeningRxState, OffState,
-                RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxResult, TxState,
+                RadioDriverApi, RxResult, StopListeningResult, TaskOff, TaskRx, TaskTx, TxResult,
+                TxState,
             },
             DriverConfig, RadioDriver,
         },
@@ -26,8 +27,8 @@ pub async fn best_effort<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
-    RadioDriver<Config, TaskTx>: TxState<Config>,
+    RadioDriver<Config, TaskRx>: ListeningRxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskTx>: TxState<Config> + RadioDriverApi<Config>,
 {
     let _ = allocate_test_slot(timer, anchor_time, TestSuite::SingleBestEffortTxRx, 0, true).await;
 
@@ -118,8 +119,8 @@ pub async fn timed<Config: DriverConfig>(
 ) -> RadioDriver<Config, TaskOff>
 where
     RadioDriver<Config, TaskOff>: OffState<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
-    RadioDriver<Config, TaskTx>: TxState<Config>,
+    RadioDriver<Config, TaskRx>: ListeningRxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskTx>: TxState<Config> + RadioDriverApi<Config>,
 {
     // off -> tx
     let tx_at = allocate_test_slot(
