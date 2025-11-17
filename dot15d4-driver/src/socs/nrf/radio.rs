@@ -130,22 +130,14 @@ impl DriverConfig for NrfRadioDriver {
     type Timer = NrfRadioSleepTimer;
 }
 
-impl NrfRadioDriver {
-    fn radio() -> pac::RADIO {
-        // Safety: We let clients prove unique ownership of the peripheral by
-        //         requiring an instance when instantiating the driver.
-        unsafe { pac::Peripherals::steal() }.RADIO
-    }
-}
-
 type Ifs = PhyIfs<Phy<OQpsk250KBit>>;
 
 impl<Task> RadioDriver<NrfRadioDriver, Task> {
     /// Convenience shortcut to access the radio registers.
-    ///
-    /// Safety: see [`NrfRadioDriver::radio()`]
     fn radio() -> pac::RADIO {
-        NrfRadioDriver::radio()
+        // Safety: We let clients prove unique ownership of the peripheral by
+        //         requiring an instance when instantiating the driver.
+        unsafe { pac::Peripherals::steal() }.RADIO
     }
 
     fn set_ifs(ifs: Option<Ifs>, with_guard_time: bool) {
