@@ -1246,7 +1246,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         rx_task: TaskRx,
         ifs: Option<Ifs>,
         rollback_on_crcerror: bool,
-    ) -> impl SelfRadioTransition<NrfRadioDriver, TaskRx, TaskRx> {
+    ) -> impl SelfRadioTransition<NrfRadioDriver, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_SCHEDULE);
 
@@ -1733,7 +1733,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
         self,
         mut tx_task: TaskTx,
         ifs: Ifs,
-    ) -> impl SelfRadioTransition<NrfRadioDriver, TaskTx, TaskTx> {
+    ) -> impl SelfRadioTransition<NrfRadioDriver, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_SCHEDULE);
 
