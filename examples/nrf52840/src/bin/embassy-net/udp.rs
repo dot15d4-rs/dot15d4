@@ -5,7 +5,7 @@
 use dot15d4::driver::{
     radio::RadioDriver,
     socs::nrf::NrfRadioDriver,
-    timer::{LocalClockDuration, RadioTimerApi},
+    timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_embassy::{
     driver::Ieee802154Driver, export::*, mac_buffer_allocator, stack::Ieee802154Stack,
@@ -23,7 +23,7 @@ use embassy_net::{
 use heapless::Vec;
 use static_cell::StaticCell;
 
-const FRAME_PERIOD: LocalClockDuration = LocalClockDuration::millis(10);
+const FRAME_PERIOD: NsDuration = NsDuration::millis(10);
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {

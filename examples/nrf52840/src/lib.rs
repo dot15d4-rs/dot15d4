@@ -19,7 +19,7 @@ use dot15d4::driver::{
 #[cfg(feature = "timer-trace")]
 use dot15d4::driver::{
     socs::nrf::NrfRadioTimerTracingConfig,
-    timer::{HardwareEvent, HighPrecisionTimer, LocalClockInstant, RadioTimerApi},
+    timer::{HardwareEvent, HighPrecisionTimer, NsInstant, RadioTimerApi},
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
@@ -307,8 +307,8 @@ pub async fn observe_gpio_event<Timer: RadioTimerApi, Executor: InterruptExecuto
     executor: &mut Executor,
     timer: &Timer,
     gpiote: &GPIOTE,
-) -> LocalClockInstant {
-    let high_precision_timer = timer.start_high_precision_timer(None).unwrap();
+) -> NsInstant {
+    let high_precision_timer = timer.start_high_precision_timer(None.into()).unwrap();
 
     high_precision_timer
         .observe_event(HardwareEvent::GpioToggled)

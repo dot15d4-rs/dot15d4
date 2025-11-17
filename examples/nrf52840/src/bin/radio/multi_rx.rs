@@ -15,7 +15,7 @@ use dot15d4::{
             tasks::{CompletedRadioTransition::*, ExternalRadioTransition, OffState, TaskOff},
             DriverConfig, RadioDriver,
         },
-        timer::{LocalClockDuration, LocalClockInstant},
+        timer::{NsDuration, NsInstant},
     },
     util::allocator::{BufferAllocator, IntoBuffer},
 };
@@ -29,13 +29,13 @@ use crate::{
     TestSuite,
 };
 
-const RX_WINDOW_DURATION: LocalClockDuration = LocalClockDuration::micros(10);
+const RX_WINDOW_DURATION: NsDuration = NsDuration::micros(10);
 
 #[cfg(not(feature = "device-sync-client"))]
 pub async fn server<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     cca: bool,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
@@ -52,7 +52,7 @@ where
     let listening_rx_radio = match off_radio
         .schedule_rx(
             rx_task::<Config>(buffer_allocator),
-            Some(earliest_frame_start),
+            earliest_frame_start.into(),
         )
         .complete_and_transition()
         .await
@@ -76,7 +76,7 @@ where
 
     let latest_frame_start = earliest_frame_start + RX_WINDOW_DURATION;
     let receiving_rx_radio = match listening_rx_radio
-        .stop_listening(Some(latest_frame_start))
+        .stop_listening(latest_frame_start.into())
         .await
     {
         Ok(StopListeningResult::FrameStarted(measured_rx_start, receiving_rx_radio)) => {
@@ -86,7 +86,7 @@ where
                 test_slot: 0,
                 test_step: 2,
                 anchor_time,
-                expected_timestamp: Some(latest_frame_start),
+                expected_timestamp: latest_frame_start.into(),
                 measured_timestamp: measured_rx_start,
                 cca,
             };
@@ -98,7 +98,7 @@ where
     };
 
     match receiving_rx_radio
-        .schedule_off(None, false)
+        .schedule_off(None.into(), false)
         .complete_and_transition()
         .await
     {
@@ -143,7 +143,7 @@ where
 pub async fn client<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     cca: bool,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
@@ -155,7 +155,7 @@ where
     let mut tx_at = allocate_test_slot(timer, anchor_time, TestSuite::MultiTimedRx, 0, false).await;
     tx_at += RX_WINDOW_DURATION / 2;
     let tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Some(tx_at))
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), tx_at.into())
         .complete_and_transition()
         .await
     {
