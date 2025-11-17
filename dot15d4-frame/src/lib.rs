@@ -51,8 +51,8 @@ mod test {
             DriverConfig, FcsTwoBytes,
         },
         timer::{
-            HardwareEvent, HardwareSignal, HighPrecisionTimer, LocalClockDuration,
-            LocalClockInstant, RadioTimerApi, RadioTimerError, TimedSignal,
+            HardwareEvent, HardwareSignal, HighPrecisionTimer, NsDuration, NsInstant,
+            OptionalNsInstant, RadioTimerApi, RadioTimerError, TimedSignal,
         },
     };
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
@@ -77,32 +77,29 @@ mod test {
     struct Running;
 
     impl RadioTimerApi for FakeRadioTimer<Sleeping> {
-        const TICK_PERIOD: LocalClockDuration = LocalClockDuration::from_ticks(0);
-        const GUARD_TIME: LocalClockDuration = LocalClockDuration::from_ticks(0);
+        const TICK_PERIOD: NsDuration = NsDuration::from_ticks(0);
+        const GUARD_TIME: NsDuration = NsDuration::from_ticks(0);
 
         type HighPrecisionTimer = FakeRadioTimer<Running>;
 
-        fn now(&self) -> LocalClockInstant {
+        fn now(&self) -> NsInstant {
             todo!()
         }
 
-        async unsafe fn wait_until(
-            &mut self,
-            _instant: LocalClockInstant,
-        ) -> Result<(), RadioTimerError> {
+        async unsafe fn wait_until(&mut self, _instant: NsInstant) -> Result<(), RadioTimerError> {
             todo!()
         }
 
         fn start_high_precision_timer(
             &self,
-            _start_at: Option<LocalClockInstant>,
+            _start_at: OptionalNsInstant,
         ) -> Result<Self::HighPrecisionTimer, RadioTimerError> {
             todo!()
         }
     }
 
     impl HighPrecisionTimer for FakeRadioTimer<Running> {
-        const TICK_PERIOD: LocalClockDuration = LocalClockDuration::from_ticks(0);
+        const TICK_PERIOD: NsDuration = NsDuration::from_ticks(0);
 
         fn schedule_timed_signal(
             &self,
@@ -127,7 +124,7 @@ mod test {
             todo!()
         }
 
-        fn poll_event(&self, _event: HardwareEvent) -> Option<LocalClockInstant> {
+        fn poll_event(&self, _event: HardwareEvent) -> OptionalNsInstant {
             todo!()
         }
 

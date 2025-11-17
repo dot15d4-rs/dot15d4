@@ -2,7 +2,7 @@ use core::{convert::Infallible, future::Future, marker::PhantomData};
 
 use crate::{
     radio::phy::PhyConfig,
-    timer::{LocalClockDuration, LocalClockInstant, RadioTimerError},
+    timer::{NsDuration, NsInstant, OptionalNsInstant, RadioTimerError},
 };
 
 use super::{
@@ -122,7 +122,7 @@ pub enum RxResult {
         /// received radio frame
         RadioFrame<RadioFrameSized>,
         /// the frame's RMARKER timestamp
-        LocalClockInstant,
+        NsInstant,
     ),
     /// A new task was scheduled before a frame was received.
     RxWindowEnded(
@@ -138,7 +138,7 @@ pub enum RxResult {
         /// recovered radio frame
         RadioFrame<RadioFrameUnsized>,
         /// the frame's RMARKER timestamp
-        LocalClockInstant,
+        NsInstant,
     ),
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -201,7 +201,7 @@ pub enum TxResult {
         /// The transmitted frame.
         RadioFrame<RadioFrameSized>,
         /// the frame's RMARKER timestamp
-        LocalClockInstant,
+        NsInstant,
     ),
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -225,16 +225,18 @@ impl RadioTask for TaskTx {
 /// occurs and will be documented there.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct SchedulingError {
-    pub instant: Option<LocalClockInstant>,
+    pub instant: OptionalNsInstant,
 }
 
 impl From<RadioTimerError> for SchedulingError {
     fn from(value: RadioTimerError) -> Self {
         match value {
             RadioTimerError::Overdue(instant) => SchedulingError {
-                instant: Some(instant),
+                instant: instant.into(),
             },
-            RadioTimerError::Already | RadioTimerError::Busy => SchedulingError { instant: None },
+            RadioTimerError::Already | RadioTimerError::Busy => SchedulingError {
+                instant: None.into(),
+            },
         }
     }
 }
@@ -267,9 +269,8 @@ pub trait RadioDriverApi<RadioDriverImpl: DriverConfig> {
     ///
     /// If the radio cannot fall back to off state at any time, this is
     /// considered a fatal error.
-    fn switch_off(
-        self,
-    ) -> impl Future<Output = (RadioDriver<RadioDriverImpl, TaskOff>, LocalClockInstant)>;
+    fn switch_off(self)
+        -> impl Future<Output = (RadioDriver<RadioDriverImpl, TaskOff>, NsInstant)>;
 }
 
 /// Methods to be implemented by all an IEEE 802.15.4 radio driver state machine
@@ -324,9 +325,7 @@ pub trait RadioState<Task: RadioTask> {
     ///       internally.
     ///
     /// The returned future SHALL NOT be cancelled.
-    fn transition(
-        &mut self,
-    ) -> impl Future<Output = Result<LocalClockInstant, RadioTaskError<Task>>>;
+    fn transition(&mut self) -> impl Future<Output = Result<NsInstant, RadioTaskError<Task>>>;
 
     /// SHALL implement state specific entry behavior (UML 2.5.1, section
     /// 14.2.3.4.3).
@@ -409,7 +408,7 @@ pub trait OffState<RadioDriverImpl: DriverConfig>: RadioState<TaskOff> + Sized {
     fn schedule_rx(
         self,
         rx_task: TaskRx,
-        start: Option<LocalClockInstant>,
+        start: OptionalNsInstant,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskOff, TaskRx>;
 
     /// Schedules a transition to the tx state.
@@ -419,7 +418,7 @@ pub trait OffState<RadioDriverImpl: DriverConfig>: RadioState<TaskOff> + Sized {
     fn schedule_tx(
         self,
         tx_task: TaskTx,
-        at: Option<LocalClockInstant>,
+        at: OptionalNsInstant,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskOff, TaskTx>;
 }
 
@@ -434,7 +433,7 @@ pub enum StopListeningResult<
     RadioDriverImpl: DriverConfig,
     RxState: ReceivingRxState<RadioDriverImpl>,
 > {
-    FrameStarted(LocalClockInstant, RxState),
+    FrameStarted(NsInstant, RxState),
     RxWindowEnded(RadioTransitionResult<RadioDriverImpl, TaskRx, TaskOff>),
 }
 
@@ -454,7 +453,7 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// given PSDU (=MPDU) size occupies the physical channel.
     ///
     /// See [`ListeningRxState::stop_listening`] for an application.
-    fn ppdu_rx_duration(&self, psdu_size: u16) -> LocalClockDuration;
+    fn ppdu_rx_duration(&self, psdu_size: u16) -> NsDuration;
 
     /// Utility method to calculate the latest possible frame start of an
     /// inbound frame (in terms of its RMARKER and of the given expected max
@@ -470,10 +469,10 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// this is calculated.
     fn latest_rx_frame_start_before_tx(
         &self,
-        tx_at: LocalClockInstant,
+        tx_at: NsInstant,
         cca: bool,
         expected_max_psdu_size: Option<u16>,
-    ) -> LocalClockInstant {
+    ) -> NsInstant {
         // rx_task_end
         //   = tx_at - (cca ? macUnitBackoffPeriod : 0) - LIFS
         //     - rmarker_offset
@@ -513,9 +512,9 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// this is calculated.
     fn latest_rx_frame_start_before_off(
         &self,
-        off_at: LocalClockInstant,
+        off_at: NsInstant,
         expected_max_psdu_size: Option<u16>,
-    ) -> LocalClockInstant {
+    ) -> NsInstant {
         // latest_frame_start
         //   = rx_task_end - ppdu_rx_time(phyMaxPacketSize)
         //     + rmarker_offset
@@ -539,7 +538,7 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// Note: This cannot be unified with [`ListeningRxState::stop_listening`]
     ///       as the latter must be non-cancellable to consume the listening
     ///       state while this method may only reference self.
-    fn wait_for_frame_start(&mut self) -> impl Future<Output = LocalClockInstant>;
+    fn wait_for_frame_start(&mut self) -> impl Future<Output = NsInstant>;
 
     /// Calling this method irreversibly ends (and consumes) the listening state
     /// and transitions into a state that allows deterministic scheduling of
@@ -606,7 +605,7 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> + 
     /// ```
     fn stop_listening(
         self,
-        latest_frame_start: Option<LocalClockInstant>,
+        latest_frame_start: OptionalNsInstant,
     ) -> impl Future<
         Output = Result<
             StopListeningResult<RadioDriverImpl, impl ReceivingRxState<RadioDriverImpl>>,
@@ -741,7 +740,7 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
     fn schedule_tx(
         self,
         tx_task: TaskTx,
-        at: Option<LocalClockInstant>,
+        at: OptionalNsInstant,
         ifs: Option<Ifs<PhyOf<RadioDriverImpl>>>,
         rollback_on_crcerror: bool,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskRx, TaskTx>;
@@ -764,7 +763,7 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>: RadioState<TaskRx> {
     /// `rollback_on_crcerror` flag.`
     fn schedule_off(
         self,
-        at: Option<LocalClockInstant>,
+        at: OptionalNsInstant,
         rollback_on_crcerror: bool,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskRx, TaskOff>;
 }
@@ -839,9 +838,7 @@ pub struct RadioTransition<
     RadioDriverImpl: DriverConfig,
     ThisTask: RadioTask,
     NextTask: RadioTask,
-    OnScheduled: Fn(
-        &mut RadioDriver<RadioDriverImpl, ThisTask>,
-    ) -> Result<Option<LocalClockInstant>, SchedulingError>,
+    OnScheduled: Fn(&mut RadioDriver<RadioDriverImpl, ThisTask>) -> Result<OptionalNsInstant, SchedulingError>,
     OnCompleted: Fn() -> Result<(), SchedulingError>,
     Cleanup: Fn() -> Result<(), RadioTaskError<NextTask>>,
 > {
@@ -922,7 +919,7 @@ impl<
         NextTask: RadioTask,
         OnScheduled: Fn(
             &mut RadioDriver<RadioDriverImpl, ThisTask>,
-        ) -> Result<Option<LocalClockInstant>, SchedulingError>,
+        ) -> Result<OptionalNsInstant, SchedulingError>,
         OnCompleted: Fn() -> Result<(), SchedulingError>,
         Cleanup: Fn() -> Result<(), RadioTaskError<NextTask>>,
     > RadioTransition<RadioDriverImpl, ThisTask, NextTask, OnScheduled, OnCompleted, Cleanup>
@@ -990,7 +987,7 @@ impl<
         NextTask: RadioTask,
         OnScheduled: Fn(
             &mut RadioDriver<RadioDriverImpl, ThisTask>,
-        ) -> Result<Option<LocalClockInstant>, SchedulingError>,
+        ) -> Result<OptionalNsInstant, SchedulingError>,
         OnCompleted: Fn() -> Result<(), SchedulingError>,
         Cleanup: Fn() -> Result<(), RadioTaskError<NextTask>>,
     > ExternalRadioTransition<RadioDriverImpl, ThisTask, NextTask>
@@ -1073,8 +1070,8 @@ where
             sleep_timer,
             high_precision_timer,
             scheduled_entry,
-            measured_entry: None,
-            rx_frame_started: None,
+            measured_entry: None.into(),
+            rx_frame_started: None.into(),
             task: Some(self.next_task),
         };
         let next_state_entry = next_state.transition().await;
@@ -1086,15 +1083,15 @@ where
             rtos_trace::trace::task_exec_end();
 
             let (mut off_state, entry) = any_state.switch_off().await;
-            off_state.measured_entry = Some(entry);
+            off_state.measured_entry = entry.into();
             CompletedRadioTransition::Fallback(
-                RadioTransitionResult::new(prev_task_result, off_state, entry, None),
+                RadioTransitionResult::new(prev_task_result, off_state, entry, None.into()),
                 next_task_error,
             )
         };
 
         if let Ok(entry_timestamp) = next_state_entry {
-            next_state.measured_entry = Some(entry_timestamp);
+            next_state.measured_entry = entry_timestamp.into();
             if let Err(next_task_error) = next_state.entry() {
                 return fallback(next_task_error, prev_task_result, next_state).await;
             }
@@ -1149,9 +1146,7 @@ pub trait SelfRadioTransition<RadioDriverImpl: DriverConfig, Task: RadioTask> {
 impl<
         RadioDriverImpl: DriverConfig,
         Task: RadioTask,
-        OnScheduled: Fn(
-            &mut RadioDriver<RadioDriverImpl, Task>,
-        ) -> Result<Option<LocalClockInstant>, SchedulingError>,
+        OnScheduled: Fn(&mut RadioDriver<RadioDriverImpl, Task>) -> Result<OptionalNsInstant, SchedulingError>,
         OnCompleted: Fn() -> Result<(), SchedulingError>,
         Cleanup: Fn() -> Result<(), RadioTaskError<Task>>,
     > SelfRadioTransition<RadioDriverImpl, Task>
@@ -1210,8 +1205,8 @@ where
             sleep_timer,
             high_precision_timer,
             scheduled_entry,
-            measured_entry: None,
-            rx_frame_started: None,
+            measured_entry: None.into(),
+            rx_frame_started: None.into(),
             task: Some(self.next_task),
         };
         let next_state_entry = next_state.transition().await;
@@ -1223,15 +1218,15 @@ where
             rtos_trace::trace::task_exec_end();
 
             let (mut off_state, entry) = any_state.switch_off().await;
-            off_state.measured_entry = Some(entry);
+            off_state.measured_entry = entry.into();
             CompletedRadioTransition::Fallback(
-                RadioTransitionResult::new(prev_task_result, off_state, entry, None),
+                RadioTransitionResult::new(prev_task_result, off_state, entry, None.into()),
                 next_task_error,
             )
         };
 
         if let Ok(entry_timestamp) = next_state_entry {
-            next_state.measured_entry = Some(entry_timestamp);
+            next_state.measured_entry = entry_timestamp.into();
         }
 
         if let Err(next_task_error) = (self.cleanup)() {
@@ -1268,11 +1263,11 @@ pub struct RadioTransitionResult<
 
     /// The precise instant at which the currently active radio state was
     /// entered.
-    pub measured_entry: LocalClockInstant,
+    pub measured_entry: NsInstant,
 
     /// The instant to which the current radio state was originally scheduled.
     /// Passed along for tuning and debugging purposes.
-    pub scheduled_entry: Option<LocalClockInstant>,
+    pub scheduled_entry: OptionalNsInstant,
 }
 
 impl<RadioDriverImpl: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>
@@ -1281,8 +1276,8 @@ impl<RadioDriverImpl: DriverConfig, PrevTask: RadioTask, ThisTask: RadioTask>
     pub(crate) fn new(
         prev_task_result: PrevTask::Result,
         this_state: RadioDriver<RadioDriverImpl, ThisTask>,
-        measured_entry: LocalClockInstant,
-        scheduled_entry: Option<LocalClockInstant>,
+        measured_entry: NsInstant,
+        scheduled_entry: OptionalNsInstant,
     ) -> Self {
         Self {
             prev_task_result,

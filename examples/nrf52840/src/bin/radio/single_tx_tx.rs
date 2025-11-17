@@ -8,7 +8,7 @@ use dot15d4::{
             },
             DriverConfig, RadioDriver,
         },
-        timer::LocalClockInstant,
+        timer::NsInstant,
     },
     util::allocator::{BufferAllocator, IntoBuffer},
 };
@@ -21,7 +21,7 @@ use crate::{
 pub async fn best_effort<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     cca: bool,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
@@ -38,7 +38,7 @@ where
 
     // off -> tx
     let mut tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), None)
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), None.into())
         .complete_and_transition()
         .await
     {
@@ -110,7 +110,7 @@ pub enum Test {
 pub async fn timed<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     cca: bool,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
@@ -134,7 +134,7 @@ where
     )
     .await;
     let mut tx_radio = match off_radio
-        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), Some(tx_at))
+        .schedule_tx(tx_task::<Config>(cca, buffer_allocator), tx_at.into())
         .complete_and_transition()
         .await
     {

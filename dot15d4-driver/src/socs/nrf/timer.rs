@@ -20,8 +20,8 @@ use nrf52840_pac::{interrupt, Peripherals, CLOCK, NVIC, PPI, RADIO, RTC0, TIMER0
 use crate::{
     socs::nrf::executor::NrfInterruptPriority,
     timer::{
-        HardwareEvent, HardwareSignal, HighPrecisionTimer, LocalClockDuration, LocalClockInstant,
-        RadioTimerApi, RadioTimerError, TimedSignal,
+        HardwareEvent, HardwareSignal, HighPrecisionTimer, NsDuration, NsInstant,
+        OptionalNsInstant, RadioTimerApi, RadioTimerError, TimedSignal,
     },
 };
 
@@ -204,7 +204,7 @@ struct State {
     ///         that state is neither synchronizing nor active. May be written
     ///         from interrupt context while synchronizing. Read-only access
     ///         from all contexts while active.
-    timer_epoch: Cell<LocalClockInstant>,
+    timer_epoch: Cell<NsInstant>,
 
     /// GPIOTE channel used for GPIO signal triggering.
     ///
@@ -280,7 +280,7 @@ impl State {
             init_state: AtomicU8::new(InitializationState::Uninitialized as u8),
             half_period: AtomicU32::new(0),
             alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
-            timer_epoch: Cell::new(LocalClockInstant::from_ticks(0)),
+            timer_epoch: Cell::new(NsInstant::from_ticks(0)),
             #[cfg(feature = "timer-trace")]
             gpiote_out_channel: AtomicUsize::new(0),
             #[cfg(feature = "timer-trace")]
@@ -653,7 +653,7 @@ impl State {
     /// - Shared read-only access while the [`RtcChannel::TimerSynchronization`]
     ///   is active.
     /// - Must not be called in any other state.
-    unsafe fn timer_epoch(&self) -> LocalClockInstant {
+    unsafe fn timer_epoch(&self) -> NsInstant {
         debug_assert_eq!(
             self.alarms[AlarmChannel::HighPrecisionTimer as usize]
                 .state
@@ -1380,10 +1380,7 @@ impl State {
         self.rtc_activate_alarm(AlarmChannel::HighPrecisionTimer);
 
         #[cfg(feature = "rtos-trace")]
-        crate::timer::trace::record_start_hp_timer(
-            LocalClockInstant::from_ticks(0),
-            rtc_tick as u32,
-        );
+        crate::timer::trace::record_start_hp_timer(NsInstant::from_ticks(0), rtc_tick as u32);
     }
 
     // Called exclusively from scheduling context.
@@ -1490,7 +1487,7 @@ impl State {
 
     fn timer_safely_schedule_signal(
         &self,
-        instant: LocalClockInstant,
+        instant: NsInstant,
         timer_ticks: NonZeroU32,
         timer_channel: usize,
         signal_ppi_channel_mask: NonZeroU32,
@@ -1536,7 +1533,7 @@ impl State {
     // Called exclusively from scheduling context.
     fn timer_try_schedule_signal(
         &self,
-        instant: LocalClockInstant,
+        instant: NsInstant,
         timer_ticks: NonZeroU32,
         signal: HardwareSignal,
     ) -> Result<(), RadioTimerError> {
@@ -1553,7 +1550,7 @@ impl State {
     // Called exclusively from scheduling context.
     fn timer_try_schedule_signal_unless(
         &self,
-        instant: LocalClockInstant,
+        instant: NsInstant,
         timer_ticks: NonZeroU32,
         signal: HardwareSignal,
         event: HardwareEvent,
@@ -1702,7 +1699,7 @@ impl TickConversion {
 
     // The max number of RTC ticks representable in nanoseconds (~584 years):
     // max_ticks = ((2^64-1) ns / 10^9 ns/s) * rtc_frequency
-    const MAX_RTC_INSTANT: LocalClockInstant = LocalClockInstant::from_ticks(u64::MAX);
+    const MAX_RTC_INSTANT: NsInstant = NsInstant::from_ticks(u64::MAX);
     const MAX_RTC_TICKS: u64 = ((Self::MAX_RTC_INSTANT.ticks() as u128
         * NrfRadioSleepTimer::FREQUENCY.to_Hz() as u128)
         / Self::NS_PER_S) as u64;
@@ -1710,10 +1707,10 @@ impl TickConversion {
     // The max duration convertible with a maximum rounding error of one tick at
     // 64 bit precision. See inline comments in `duration_to_timer_ticks()` for
     // more details.
-    const MAX_TIMER_DURATION: LocalClockDuration = LocalClockDuration::micros(33554432);
+    const MAX_TIMER_DURATION: NsDuration = NsDuration::micros(33554432);
 
     #[inline(always)]
-    const fn instant_to_rtc_tick(instant: LocalClockInstant) -> u64 {
+    const fn instant_to_rtc_tick(instant: NsInstant) -> u64 {
         // To keep ns-to-tick conversion cheap we avoid division while
         // minimizing rounding errors:
         //
@@ -1744,7 +1741,7 @@ impl TickConversion {
     }
 
     #[inline(always)]
-    const fn duration_to_timer_ticks(duration: LocalClockDuration) -> u32 {
+    const fn duration_to_timer_ticks(duration: NsDuration) -> u32 {
         debug_assert!(duration.ticks() <= TickConversion::MAX_TIMER_DURATION.ticks());
 
         // To keep ns-to-tick conversion cheap we avoid division while
@@ -1781,18 +1778,15 @@ impl TickConversion {
     }
 
     #[inline(always)]
-    const fn instant_to_timer_ticks_with_epoch(
-        timer_epoch: LocalClockInstant,
-        instant: LocalClockInstant,
-    ) -> u32 {
+    const fn instant_to_timer_ticks_with_epoch(timer_epoch: NsInstant, instant: NsInstant) -> u32 {
         debug_assert!(instant.ticks() > timer_epoch.ticks());
-        Self::duration_to_timer_ticks(LocalClockDuration::from_ticks(
+        Self::duration_to_timer_ticks(NsDuration::from_ticks(
             instant.ticks() - timer_epoch.ticks(),
         ))
     }
 
     #[inline(always)]
-    const fn rtc_tick_to_instant(rtc_tick: u64) -> LocalClockInstant {
+    const fn rtc_tick_to_instant(rtc_tick: u64) -> NsInstant {
         debug_assert!(rtc_tick <= Self::MAX_RTC_TICKS);
 
         // To keep tick-to-ns conversion cheap we avoid division:
@@ -1813,11 +1807,11 @@ impl TickConversion {
         // Safety: We checked above that the number of ticks given is less than
         //         the max ticks that are still representable in nanoseconds.
         //         Therefore casting down will always succeed.
-        LocalClockInstant::from_ticks(ns as u64)
+        NsInstant::from_ticks(ns as u64)
     }
 
     #[inline(always)]
-    const fn timer_ticks_to_duration(timer_ticks: u32) -> LocalClockDuration {
+    const fn timer_ticks_to_duration(timer_ticks: u32) -> NsDuration {
         // To keep tick-to-ns conversion cheap we avoid division:
         //
         // timestamp_ns = ticks * (1 / timer_frequency_hz) * 10^9 ns/s
@@ -1836,14 +1830,14 @@ impl TickConversion {
         // Safety: We checked above that the number of ticks given is less than
         //         the max ticks that are still representable in nanoseconds.
         //         Therefore casting down will always succeed.
-        LocalClockDuration::from_ticks(ns)
+        NsDuration::from_ticks(ns)
     }
 
     #[inline(always)]
     const fn timer_ticks_to_instant_with_epoch(
-        timer_epoch: LocalClockInstant,
+        timer_epoch: NsInstant,
         timer_ticks: u32,
-    ) -> LocalClockInstant {
+    ) -> NsInstant {
         let timer_duration = Self::timer_ticks_to_duration(timer_ticks);
         timer_epoch.checked_add_duration(timer_duration).unwrap()
     }
@@ -1854,7 +1848,7 @@ impl TickConversion {
 // Note: We do this in a const expression rather than a test so that we can also
 //       prove proper "constification" of the conversion functions.
 const _: () = {
-    let max_rtc_tick = TickConversion::instant_to_rtc_tick(LocalClockInstant::from_ticks(u64::MAX));
+    let max_rtc_tick = TickConversion::instant_to_rtc_tick(NsInstant::from_ticks(u64::MAX));
     assert!(max_rtc_tick == TickConversion::MAX_RTC_TICKS);
 
     // One RTC tick is ~30517 ns, the rounding error must be less.
@@ -1865,9 +1859,8 @@ const _: () = {
     const EXPECTED_REMAINDER_TIMER_TICKS: u32 = ((NrfRadioHighPrecisionTimer::FREQUENCY.to_Hz()
         * EXPECTED_REMAINDER_RTC_NS)
         / TickConversion::NS_PER_S as u64) as u32;
-    let timer_ticks = TickConversion::duration_to_timer_ticks(LocalClockDuration::from_ticks(
-        EXPECTED_REMAINDER_RTC_NS,
-    ));
+    let timer_ticks =
+        TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(EXPECTED_REMAINDER_RTC_NS));
     assert!(timer_ticks == EXPECTED_REMAINDER_TIMER_TICKS);
 
     // One TIMER tick is 62.5 ns, the remaining rounding error must be less.
@@ -1878,13 +1871,13 @@ const _: () = {
     const EXPECTED_MAX_TIMER_TICKS: u32 = ((TickConversion::MAX_TIMER_DURATION.ticks()
         * NrfRadioHighPrecisionTimer::FREQUENCY.to_Hz())
         / TickConversion::NS_PER_S as u64) as u32;
-    let max_timer_ticks = TickConversion::duration_to_timer_ticks(LocalClockDuration::from_ticks(
+    let max_timer_ticks = TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(
         TickConversion::MAX_TIMER_DURATION.ticks(),
     ));
     // We accept a rounding error of one tick.
     assert!(max_timer_ticks == EXPECTED_MAX_TIMER_TICKS - 1);
 
-    assert!(TickConversion::duration_to_timer_ticks(LocalClockDuration::from_ticks(875)) == 13);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(875)) == 13);
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -1927,22 +1920,19 @@ impl NrfRadioSleepTimer {
 }
 
 impl RadioTimerApi for NrfRadioSleepTimer {
-    const TICK_PERIOD: LocalClockDuration = Self::FREQUENCY.into_duration();
-    const GUARD_TIME: LocalClockDuration = LocalClockDuration::micros(150);
+    const TICK_PERIOD: NsDuration = Self::FREQUENCY.into_duration();
+    const GUARD_TIME: NsDuration = NsDuration::micros(150);
 
     type HighPrecisionTimer = NrfRadioHighPrecisionTimer;
 
-    fn now(&self) -> LocalClockInstant {
+    fn now(&self) -> NsInstant {
         STATE.assert_initialized();
 
         let rtc_tick = STATE.rtc_now_tick();
         TickConversion::rtc_tick_to_instant(rtc_tick)
     }
 
-    async unsafe fn wait_until(
-        &mut self,
-        instant: LocalClockInstant,
-    ) -> Result<(), RadioTimerError> {
+    async unsafe fn wait_until(&mut self, instant: NsInstant) -> Result<(), RadioTimerError> {
         STATE.assert_initialized();
 
         let rtc_tick = TickConversion::instant_to_rtc_tick(instant);
@@ -1967,19 +1957,19 @@ impl RadioTimerApi for NrfRadioSleepTimer {
 
     fn start_high_precision_timer(
         &self,
-        at: Option<LocalClockInstant>,
+        at: OptionalNsInstant,
     ) -> Result<Self::HighPrecisionTimer, RadioTimerError> {
         STATE.assert_initialized();
 
         STATE.rtc_try_acquire_alarm(AlarmChannel::HighPrecisionTimer)?;
 
-        if let Some(at) = at {
+        if let Some(at) = at.into() {
             // We need to start at least two timer ticks earlier so we can
             // schedule signals at non-zero ticks even accounting for a one-tick
             // PPI delay.
-            const TIMER_OFFSET: LocalClockDuration = TickConversion::timer_ticks_to_duration(2)
+            const TIMER_OFFSET: NsDuration = TickConversion::timer_ticks_to_duration(2)
                 // Adding 1ns to avoid rounding errors.
-                .checked_add(LocalClockDuration::from_ticks(1))
+                .checked_add(NsDuration::from_ticks(1))
                 .unwrap();
 
             let rtc_tick = TickConversion::instant_to_rtc_tick(at - TIMER_OFFSET);
@@ -2009,7 +1999,7 @@ pub struct NrfRadioHighPrecisionTimer {
 impl NrfRadioHighPrecisionTimer {
     pub const FREQUENCY: TimerRateU64<16_000_000> = TimerRateU64::from_raw(1);
 
-    fn timer_epoch() -> LocalClockInstant {
+    fn timer_epoch() -> NsInstant {
         // Note: This only works if the timer interrupt is running at a higher
         //       priority than the scheduling context. Immediate synchronization
         //       blocks for at most one RTC tick.
@@ -2020,7 +2010,7 @@ impl NrfRadioHighPrecisionTimer {
         unsafe { STATE.timer_epoch() }
     }
 
-    fn timer_ticks(instant: LocalClockInstant) -> u32 {
+    fn timer_ticks(instant: NsInstant) -> u32 {
         let timer_epoch = Self::timer_epoch();
         debug_assert_ne!(timer_epoch.ticks(), 0);
 
@@ -2177,7 +2167,7 @@ impl NrfRadioHighPrecisionTimer {
 /// register for the signal (6) will enable it atomically unless the event had
 /// occurred already.
 impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
-    const TICK_PERIOD: LocalClockDuration = Self::FREQUENCY.into_duration();
+    const TICK_PERIOD: NsDuration = Self::FREQUENCY.into_duration();
 
     fn schedule_timed_signal(&self, timed_signal: TimedSignal) -> Result<&Self, RadioTimerError> {
         let TimedSignal { instant, signal } = timed_signal;
@@ -2227,15 +2217,13 @@ impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
         STATE.timer_try_observe_event(event).map(|_| self)
     }
 
-    fn poll_event(&self, event: HardwareEvent) -> Option<LocalClockInstant> {
+    fn poll_event(&self, event: HardwareEvent) -> OptionalNsInstant {
         let timer_ticks = STATE.timer_get_and_clear_captured_ticks(event);
         if timer_ticks > 0 {
-            Some(TickConversion::timer_ticks_to_instant_with_epoch(
-                Self::timer_epoch(),
-                timer_ticks,
-            ))
+            TickConversion::timer_ticks_to_instant_with_epoch(Self::timer_epoch(), timer_ticks)
+                .into()
         } else {
-            None
+            None.into()
         }
     }
 

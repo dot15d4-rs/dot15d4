@@ -33,11 +33,11 @@ use self::{
         },
         DriverConfig, PhyOf, RadioDriver,
     },
-    timer::{LocalClockDuration, LocalClockInstant},
+    timer::{NsDuration, NsInstant},
 };
 
-use dot15d4_driver::radio::tasks::StopListeningResult;
 pub use dot15d4_driver::*;
+use dot15d4_driver::{radio::tasks::StopListeningResult, timer::OptionalNsInstant};
 
 // Currently we make no distinction in the implementation of driver service
 // tasks and radio tasks. But that only holds until we introduce more drivers
@@ -53,9 +53,9 @@ pub trait DriverServiceTask {
 /// Tasks can be scheduled as fast as possible ("best effort") or at a
 /// well-defined tick of the local radio clock ("scheduled").
 ///
-/// The timestamp is represented as a [`LocalClockInstant`] in terms of the
-/// radio driver's local timer, i.e. the timestamp must already have been
-/// compensated for clock drift.
+/// The timestamp is represented as a [`NsInstant`] in terms of the radio
+/// driver's local timer, i.e. the timestamp must already have been compensated
+/// for clock drift.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Timestamp {
     /// A task with this timestamp will be executed back-to-back to the previous
@@ -69,14 +69,14 @@ pub enum Timestamp {
     /// Usually the timestamp will be related to the RMARKER of a frame. For all
     /// PHYs the RMARKER is defined to be the time when the beginning of the
     /// first symbol following the SFD of the frame is at the local antenna.
-    Scheduled(LocalClockInstant),
+    Scheduled(NsInstant),
 }
 
-impl From<Timestamp> for Option<LocalClockInstant> {
+impl From<Timestamp> for OptionalNsInstant {
     fn from(value: Timestamp) -> Self {
         match value {
-            Timestamp::BestEffort => None,
-            Timestamp::Scheduled(instant) => Some(instant),
+            Timestamp::BestEffort => None.into(),
+            Timestamp::Scheduled(instant) => instant.into(),
         }
     }
 }
@@ -104,7 +104,7 @@ pub enum DrvSvcResultRx {
         /// received radio frame
         RadioFrame<RadioFrameSized>,
         /// RMARKER timestamp of the received frame
-        LocalClockInstant,
+        NsInstant,
     ),
     /// A new task was scheduled before a frame was received.
     RxWindowEnded(
@@ -120,7 +120,7 @@ pub enum DrvSvcResultRx {
         /// recovered radio frame
         RadioFrame<RadioFrameUnsized>,
         /// RMARKER timestamp of the received frame
-        LocalClockInstant,
+        NsInstant,
     ),
     /// A frame with correct CRC was received but didn't match the filtering
     /// requirements, see IEEE 802.15.4-2024, section 6.6.2. This can be useful
@@ -129,7 +129,7 @@ pub enum DrvSvcResultRx {
         /// received radio frame
         RadioFrame<RadioFrameSized>,
         /// RMARKER timestamp of the received frame
-        LocalClockInstant,
+        NsInstant,
     ),
 }
 pub type DrvSvcErrorRx = RxError;
@@ -159,7 +159,7 @@ pub enum DrvSvcResultTx {
         /// The transmitted frame.
         RadioFrame<RadioFrameSized>,
         /// RMARKER timestamp of the transmitted frame
-        LocalClockInstant,
+        NsInstant,
     ), // TODO: Support returning an optional Enh-Ack frame.
     /// The frame was sent but the ACK timeout expired or an Enh-ACK frame was
     /// received but its content indicates a NACK (used, e.g. in TSCH to signal
@@ -168,7 +168,7 @@ pub enum DrvSvcResultTx {
         /// The radio frame that was not ack'ed.
         RadioFrame<RadioFrameSized>,
         /// RMARKER timestamp of the transmitted frame
-        LocalClockInstant,
+        NsInstant,
     ), // TODO: Support returning an optional Enh-Ack frame.
 }
 pub type DrvSvcErrorTx = TxError;
@@ -527,7 +527,7 @@ where
                     let hardware_address = listening_rx_driver.ieee802154_address();
                     let receiving_rx_driver =
                         if let Ok(StopListeningResult::FrameStarted(_, receiving_rx_driver)) =
-                            listening_rx_driver.stop_listening(None).await
+                            listening_rx_driver.stop_listening(None.into()).await
                         {
                             receiving_rx_driver
                         } else {
@@ -555,9 +555,11 @@ where
                     drop(tx_request_ref);
 
                     let latest_frame_start = if let Timestamp::Scheduled(tx_at) = at {
-                        Some(listening_rx_driver.latest_rx_frame_start_before_tx(tx_at, cca, None))
+                        listening_rx_driver
+                            .latest_rx_frame_start_before_tx(tx_at, cca, None)
+                            .into()
                     } else {
-                        None
+                        None.into()
                     };
 
                     let hardware_address = listening_rx_driver.ieee802154_address();
@@ -682,7 +684,7 @@ where
         };
 
         match receiving_rx_driver
-            .schedule_tx(outbound_ack_task, None, Some(Ifs::ack()), true)
+            .schedule_tx(outbound_ack_task, None.into(), Some(Ifs::ack()), true)
             .complete_and_transition()
             .await
         {
@@ -736,7 +738,7 @@ where
     async fn receive_frame(
         &self,
         receiving_rx_driver: impl ReceivingRxState<RadioDriverImpl>,
-        rx_ack_info: Option<(RadioFrame<RadioFrameSized>, LocalClockInstant, u8)>,
+        rx_ack_info: Option<(RadioFrame<RadioFrameSized>, NsInstant, u8)>,
         prev_task_response_token: ResponseToken,
         next_task_ifs: Option<Ifs<PhyOf<RadioDriverImpl>>>,
     ) -> (DriverState<RadioDriverImpl>, Option<ResponseToken>) {
@@ -744,7 +746,7 @@ where
             this: &DriverService<'_, RadioDriverImpl>,
             prev_task_response_token: ResponseToken,
             rx_task_result: RxResult,
-            rx_ack_info: Option<(RadioFrame<RadioFrameSized>, LocalClockInstant, u8)>,
+            rx_ack_info: Option<(RadioFrame<RadioFrameSized>, NsInstant, u8)>,
         ) {
             if let Some((tx_radio_frame, tx_timestamp, seq_nr)) = rx_ack_info {
                 // Expect rx ACK frame
@@ -889,7 +891,7 @@ where
                 }
             },
             None => match receiving_rx_driver
-                .schedule_off(None, true)
+                .schedule_off(None.into(), true)
                 .complete_and_transition()
                 .await
             {
@@ -1002,7 +1004,7 @@ where
         &self,
         radio_transition_result: RadioTransitionResult<RadioDriverImpl, RadioTaskRx, RadioTaskOff>,
         prev_task_response_token: ResponseToken,
-        rx_ack_info: Option<(RadioFrame<RadioFrameSized>, LocalClockInstant)>,
+        rx_ack_info: Option<(RadioFrame<RadioFrameSized>, NsInstant)>,
         next_request: Option<(ResponseToken, DrvSvcRequest)>,
     ) -> (DriverState<RadioDriverImpl>, Option<ResponseToken>) {
         let RadioTransitionResult {
@@ -1096,7 +1098,7 @@ where
                 assert!(matches!(start, Timestamp::BestEffort));
 
                 match off_driver
-                    .schedule_rx(RadioTaskRx { radio_frame }, None)
+                    .schedule_rx(RadioTaskRx { radio_frame }, None.into())
                     .complete_and_transition()
                     .await
                 {
@@ -1331,17 +1333,19 @@ where
         let next_task_ifs = Ifs::from_mpdu_length(tx_radio_frame.sdu_length().get());
         // TODO: Currently we use an arbitrary reception window tolerance.
         //       This must be tuned based on actual performance measurements.
-        const MAX_ACK_FRAME_START_DELAY: LocalClockDuration = LocalClockDuration::micros(10);
+        const MAX_ACK_FRAME_START_DELAY: NsDuration = NsDuration::micros(10);
         let latest_ack_start = earliest_ack_start + MAX_ACK_FRAME_START_DELAY;
         let stop_listening_result = match listening_rx_driver
-            .stop_listening(Some(latest_ack_start))
+            .stop_listening(latest_ack_start.into())
             .await
         {
             Ok(result) => result,
-            Err((_, listening_rx_driver)) => match listening_rx_driver.stop_listening(None).await {
-                Ok(result) => result,
-                Err(_) => unreachable!(),
-            },
+            Err((_, listening_rx_driver)) => {
+                match listening_rx_driver.stop_listening(None.into()).await {
+                    Ok(result) => result,
+                    Err(_) => unreachable!(),
+                }
+            }
         };
 
         match stop_listening_result {
@@ -1393,13 +1397,8 @@ where
                         radio_frame: tx_task.radio_frame,
                         cca: tx_task.cca,
                     };
-                    let at = if let Timestamp::Scheduled(at) = tx_task.at {
-                        Some(at)
-                    } else {
-                        None
-                    };
                     match off_driver
-                        .schedule_tx(radio_tx_task, at)
+                        .schedule_tx(radio_tx_task, tx_task.at.into())
                         .complete_and_transition()
                         .await
                     {
@@ -1429,13 +1428,8 @@ where
                     let radio_rx_task = RadioTaskRx {
                         radio_frame: rx_task.radio_frame,
                     };
-                    let start = if let Timestamp::Scheduled(at) = rx_task.start {
-                        Some(at)
-                    } else {
-                        None
-                    };
                     match off_driver
-                        .schedule_rx(radio_rx_task, start)
+                        .schedule_rx(radio_rx_task, rx_task.start.into())
                         .complete_and_transition()
                         .await
                     {

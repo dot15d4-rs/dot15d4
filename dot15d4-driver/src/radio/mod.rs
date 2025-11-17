@@ -2,7 +2,9 @@
 
 use core::fmt::Debug;
 
-use crate::timer::{HighPrecisionTimer, LocalClockInstant, RadioTimerApi, RadioTimerError};
+use crate::timer::{
+    HighPrecisionTimer, NsInstant, OptionalNsInstant, RadioTimerApi, RadioTimerError,
+};
 
 use self::{
     phy::PhyConfig,
@@ -203,17 +205,17 @@ pub struct RadioDriver<RadioDriverImpl: DriverConfig, Task> {
     /// purposes. Shall be set while the task is being scheduled. See
     /// [`tasks::RadioState::transition`] for a definition of the semantics of
     /// this timestamp.
-    pub(crate) scheduled_entry: Option<LocalClockInstant>,
+    pub(crate) scheduled_entry: OptionalNsInstant,
     /// The time the task entered. This timestamp SHALL be measured and set as
     /// soon as the task entered. See [`tasks::RadioState::transition`] for a
     /// definition of the semantics of this timestamp.
-    pub(crate) measured_entry: Option<LocalClockInstant>,
+    pub(crate) measured_entry: OptionalNsInstant,
     /// The RMARKER of an incoming frame.
     ///
     /// This value is observed at the end of the listening rx state and
     /// available throughout the receiving rx state. Not available in any other
     /// radio state.
-    rx_frame_started: Option<LocalClockInstant>,
+    rx_frame_started: OptionalNsInstant,
     /// The currently active task which may be consumed by the driver at any
     /// time during task execution.
     pub(crate) task: Option<Task>,
@@ -232,14 +234,14 @@ where
             inner,
             sleep_timer,
             high_precision_timer,
-            scheduled_entry: Some(LocalClockInstant::from_ticks(0)),
-            measured_entry: Some(LocalClockInstant::from_ticks(0)),
-            rx_frame_started: None,
+            scheduled_entry: None.into(),
+            measured_entry: OptionalNsInstant::try_from_ticks(1),
+            rx_frame_started: None.into(),
             task: Some(TaskOff),
         }
     }
 
-    pub(crate) async fn wait_until_off(mut self) -> (Self, LocalClockInstant) {
+    pub(crate) async fn wait_until_off(mut self) -> (Self, NsInstant) {
         let off_entry = self.transition().await;
         debug_assert!(off_entry.is_ok());
         (self, off_entry.unwrap())
@@ -252,7 +254,7 @@ where
 {
     pub(crate) async fn rx_window_ended<RxState: ReceivingRxState<RadioDriverImpl>>(
         mut self,
-        disabled_at: Option<LocalClockInstant>,
+        disabled_at: OptionalNsInstant,
     ) -> StopListeningResult<RadioDriverImpl, RxState> {
         let rx_result = RxResult::RxWindowEnded(self.task.take().unwrap().radio_frame);
         let (off_state, measured_entry) = RadioDriver {
@@ -260,8 +262,8 @@ where
             sleep_timer: self.sleep_timer,
             high_precision_timer: self.high_precision_timer,
             scheduled_entry: disabled_at,
-            measured_entry: None,
-            rx_frame_started: None,
+            measured_entry: None.into(),
+            rx_frame_started: None.into(),
             task: Some(TaskOff),
         }
         .wait_until_off()
@@ -278,7 +280,7 @@ where
 impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl, Task> {
     pub(crate) fn start_timer(
         &mut self,
-        start_at: Option<LocalClockInstant>,
+        start_at: OptionalNsInstant,
     ) -> Result<&HighPrecisionTimerOf<RadioDriverImpl>, RadioTimerError> {
         debug_assert!(self.high_precision_timer.is_none());
 
@@ -298,13 +300,13 @@ impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl
         self.high_precision_timer.as_ref().unwrap().reset();
     }
 
-    pub(crate) fn set_rx_frame_started(&mut self, rx_frame_started: LocalClockInstant) {
+    pub(crate) fn set_rx_frame_started(&mut self, rx_frame_started: NsInstant) {
         debug_assert!(self.rx_frame_started.is_none());
 
-        self.rx_frame_started = Some(rx_frame_started)
+        self.rx_frame_started = rx_frame_started.into();
     }
 
-    pub(crate) fn rx_frame_started(&self) -> Option<LocalClockInstant> {
+    pub(crate) fn rx_frame_started(&self) -> OptionalNsInstant {
         self.rx_frame_started
     }
 

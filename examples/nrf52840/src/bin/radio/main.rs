@@ -28,7 +28,7 @@ use dot15d4::{
             phy::{OQpsk250KBit, Phy, PhyConfig},
             RadioDriver,
         },
-        timer::LocalClockDuration,
+        timer::NsDuration,
     },
     util::{buffer_allocator, info},
 };
@@ -43,8 +43,7 @@ use dot15d4_examples_nrf52840::{gpiote_executor, observe_gpio_event, wait_for_gp
 use self::util::done;
 
 const TEST_SLOT_DURATION_MS: usize = 10;
-const TEST_SLOT_DURATION: LocalClockDuration =
-    LocalClockDuration::millis(TEST_SLOT_DURATION_MS as u64);
+const TEST_SLOT_DURATION: NsDuration = NsDuration::millis(TEST_SLOT_DURATION_MS as u64);
 
 #[cfg(not(feature = "device-sync-client"))]
 use single_rx_off::Test as RxOffTest;

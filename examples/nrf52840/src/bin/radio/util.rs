@@ -10,7 +10,7 @@ use dot15d4::driver::radio::HighPrecisionTimerOf;
 ))]
 use dot15d4::driver::timer::HighPrecisionTimer;
 #[cfg(all(feature = "timer-trace", not(debug_assertions)))]
-use dot15d4::driver::timer::{export::ExtU64, HardwareSignal, LocalClockDuration, TimedSignal};
+use dot15d4::driver::timer::{export::ExtU64, HardwareSignal, NsDuration, TimedSignal};
 use dot15d4::{
     driver::{
         radio::{
@@ -22,7 +22,7 @@ use dot15d4::{
             tasks::{RadioTask, RadioTransitionResult, TaskRx, TaskTx},
             DriverConfig, PhyOf,
         },
-        timer::{LocalClockInstant, RadioTimerApi},
+        timer::{NsInstant, OptionalNsInstant, RadioTimerApi},
     },
     mac::frame::{
         repr::{MpduRepr, SeqNrRepr},
@@ -100,17 +100,17 @@ pub fn tx_task<Config: DriverConfig>(cca: bool, buffer_allocator: BufferAllocato
 // Panics if the slot cannot be allocated.
 pub async fn allocate_test_slot<Timer: RadioTimerApi>(
     timer: &mut Timer,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     test_suite: TestSuite,
     test_slot: usize,
     best_effort: bool,
-) -> LocalClockInstant {
+) -> NsInstant {
     const TEST_SLOT_DURATION_NS: u64 = TEST_SLOT_DURATION.ticks();
 
     let anchor_time_ns = anchor_time.ticks();
     let test_start_time_ns =
         anchor_time_ns + (test_suite.slot() + test_slot) as u64 * TEST_SLOT_DURATION_NS;
-    let test_start_time = LocalClockInstant::from_ticks(test_start_time_ns);
+    let test_start_time = NsInstant::from_ticks(test_start_time_ns);
 
     // Note: Bit banging test marker codes at an acceptable frequency only works
     //       in release mode.
@@ -127,7 +127,7 @@ pub async fn allocate_test_slot<Timer: RadioTimerApi>(
             .start_high_precision_timer(Some(test_slot_marker_time - Timer::GUARD_TIME))
             .unwrap();
 
-        const MANCHESTER_HALF_PERIOD_NS: u64 = LocalClockDuration::micros(30).ticks();
+        const MANCHESTER_HALF_PERIOD_NS: u64 = NsDuration::micros(30).ticks();
 
         let test_slot_marker_time_ns = test_slot_marker_time.ticks();
         for (index, &toggle_at_tick) in test_suite.encoded_test_id().iter().enumerate() {
@@ -135,7 +135,7 @@ pub async fn allocate_test_slot<Timer: RadioTimerApi>(
                 break;
             }
 
-            let toggle_at = LocalClockInstant::from_ticks(
+            let toggle_at = NsInstant::from_ticks(
                 test_slot_marker_time_ns + toggle_at_tick as u64 * MANCHESTER_HALF_PERIOD_NS,
             );
             let timed_signal = TimedSignal::new(toggle_at, HardwareSignal::GpioToggle);
@@ -256,9 +256,9 @@ pub struct TestResult {
     pub test_suite: TestSuite,
     pub test_slot: usize,
     pub test_step: usize,
-    pub anchor_time: LocalClockInstant,
-    pub expected_timestamp: Option<LocalClockInstant>,
-    pub measured_timestamp: LocalClockInstant,
+    pub anchor_time: NsInstant,
+    pub expected_timestamp: OptionalNsInstant,
+    pub measured_timestamp: NsInstant,
     pub cca: bool,
 }
 
@@ -272,7 +272,7 @@ impl TestResult {
         test_suite: TestSuite,
         test_slot: usize,
         test_step: usize,
-        anchor_time: LocalClockInstant,
+        anchor_time: NsInstant,
         radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
         cca: bool,
     ) -> Self {
@@ -299,7 +299,7 @@ pub fn log_transition_result<Config: DriverConfig, PrevTask: RadioTask, ThisTask
     test_suite: TestSuite,
     test_slot: usize,
     test_step: usize,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     radio_transition_result: &RadioTransitionResult<Config, PrevTask, ThisTask>,
     cca: bool,
 ) {
