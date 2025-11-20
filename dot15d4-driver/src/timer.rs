@@ -57,6 +57,12 @@ impl OptionalNsInstant {
     }
 
     #[inline]
+    pub const fn set(&mut self, instant: NsInstant) {
+        assert!(instant.ticks() > 0);
+        self.inner = instant
+    }
+
+    #[inline]
     pub const fn unwrap(self) -> NsInstant {
         if self.is_some() {
             self.inner

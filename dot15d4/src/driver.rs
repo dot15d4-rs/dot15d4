@@ -395,12 +395,9 @@ pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
 
 impl<'svc, RadioDriverImpl: DriverConfig> DriverService<'svc, RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, RadioTaskOff>:
-        OffState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, RadioTaskRx>:
-        ListeningRxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, RadioTaskTx>:
-        TxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskOff>: OffState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskRx>: ListeningRxState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskTx>: TxState<RadioDriverImpl>,
 {
     /// Creates a new [`DriverService`] instance wrapping the given driver
     /// implementation.

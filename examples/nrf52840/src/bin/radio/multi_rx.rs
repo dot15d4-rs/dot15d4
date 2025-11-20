@@ -1,13 +1,10 @@
 #[cfg(feature = "device-sync-client")]
-use dot15d4::driver::radio::tasks::{RadioDriverApi, TaskTx, TxResult, TxState};
+use dot15d4::driver::radio::tasks::{TaskTx, TxResult, TxState};
 #[cfg(not(feature = "device-sync-client"))]
 use dot15d4::{
     driver::radio::{
         phy::PhyConfig,
-        tasks::{
-            ListeningRxState, RadioDriverApi, ReceivingRxState, RxResult, StopListeningResult,
-            TaskRx,
-        },
+        tasks::{ListeningRxState, ReceivingRxState, RxResult, StopListeningResult, TaskRx},
         PhyOf,
     },
     mac::frame::mpdu::MpduFrame,
@@ -43,8 +40,8 @@ pub async fn server<Config: DriverConfig>(
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
-    RadioDriver<Config, TaskOff>: OffState<Config> + RadioDriverApi<Config>,
-    RadioDriver<Config, TaskRx>: ListeningRxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskOff>: OffState<Config>,
+    RadioDriver<Config, TaskRx>: ListeningRxState<Config>,
 {
     // off -> rx
     let mut earliest_frame_start =
@@ -151,8 +148,8 @@ pub async fn client<Config: DriverConfig>(
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
-    RadioDriver<Config, TaskOff>: OffState<Config> + RadioDriverApi<Config>,
-    RadioDriver<Config, TaskTx>: TxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskOff>: OffState<Config>,
+    RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     // off -> tx
     let mut tx_at = allocate_test_slot(timer, anchor_time, TestSuite::MultiTimedRx, 0, false).await;

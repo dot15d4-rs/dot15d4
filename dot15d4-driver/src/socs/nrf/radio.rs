@@ -1,7 +1,7 @@
 //! nRF IEEE 802.15.4 radio driver
 
 use core::{
-    future::poll_fn,
+    future::{poll_fn, Future},
     num::NonZero,
     sync::atomic::{compiler_fence, Ordering},
     task::Poll,
@@ -28,7 +28,7 @@ use crate::{
             ReceivingRxState, RxError, RxResult, SchedulingError, SelfRadioTransition,
             StopListeningResult, TaskOff, TaskRx, TaskTx, TxError, TxResult, TxState,
         },
-        DriverConfig, FcsNone, PhyOf, RadioDriver,
+        DriverConfig, FcsNone, PhyOf, RadioDriver, RadioDriverState,
     },
     socs::nrf::NrfRadioHighPrecisionTimer,
     timer::{
@@ -223,6 +223,37 @@ pub struct NrfRadioTracingConfig {
     pub ppi_trxend_channel: usize,
 }
 
+static mut STATE: RadioDriverState<NrfRadioDriver> = RadioDriverState::new();
+
+impl<Task> RadioDriver<NrfRadioDriver, Task> {
+    fn state(&mut self) -> &'static mut RadioDriverState<NrfRadioDriver> {
+        // Safety:
+        // - We ensure that there only ever is a single instance of the radio
+        //   driver: Initial state is derived from unique instances of the
+        //   peripherals owned by this driver. Whenever a new state is created
+        //   the old state must be handed in. This can be checked by verifying
+        //   all occurrences of RadioDriver::new_internal().
+        // - Based on that, requiring &mut self ensures that only a single
+        //   mutable reference can be created at any time by piggybacking on the
+        //   exclusivity guarantee of a mutable reference to a singleton.
+        // - Also see safety remarks for of the Sync-implementation of driver state.
+        #[allow(static_mut_refs)]
+        unsafe {
+            &mut STATE
+        }
+    }
+
+    fn state_ref(&self) -> &'static RadioDriverState<NrfRadioDriver> {
+        // Safety: Same as above, only that this time we piggyback on the
+        //         exclusivity guarantee of shared access to the radio driver
+        //         singleton.
+        #[allow(static_mut_refs)]
+        unsafe {
+            &STATE
+        }
+    }
+}
+
 /// "Radio Off" state.
 ///
 /// Entry: DISABLED event
@@ -248,12 +279,23 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         radio: pac::RADIO,
         // Note: The nRF radio timer implicitly enforces clock policy for the
         //       radio.
-        timer: NrfRadioSleepTimer,
+        sleep_timer: NrfRadioSleepTimer,
         #[cfg(feature = "executor-trace")] executor_trace_channel: usize,
         #[cfg(feature = "radio-trace")] tracing_config: NrfRadioTracingConfig,
     ) -> Self {
         #[cfg(feature = "rtos-trace")]
         crate::radio::trace::instrument();
+
+        let mut driver = Self::new_internal();
+
+        let inner = NrfRadioDriver {
+            executor: *self::executor(
+                NrfInterruptPriority::HIGHEST,
+                #[cfg(feature = "executor-trace")]
+                executor_trace_channel,
+            ),
+        };
+        driver.state().init(inner, sleep_timer);
 
         #[cfg(feature = "radio-trace")]
         {
@@ -351,16 +393,6 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
         // has been received.
         radio.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
 
-        let inner = NrfRadioDriver {
-            executor: *self::executor(
-                NrfInterruptPriority::HIGHEST,
-                #[cfg(feature = "executor-trace")]
-                executor_trace_channel,
-            ),
-        };
-
-        let mut driver = Self::initial_state(inner, timer, None);
-
         driver.set_sfd(OQpsk250KBit::DEFAULT_SFD);
         driver.set_tx_power(0);
         driver.set_channel(Channel::_11);
@@ -431,7 +463,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
     }
 }
 
-impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDriver, Task> {
+impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver, Task> for RadioDriver<NrfRadioDriver, Task> {
     fn ieee802154_address(&self) -> [u8; 8] {
         // Safety: Read-only access to a read-only register.
         let ficr: pac::FICR = unsafe { pac::Peripherals::steal() }.FICR;
@@ -449,7 +481,20 @@ impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDri
         ]
     }
 
-    async fn switch_off(self) -> (RadioDriver<NrfRadioDriver, TaskOff>, NsInstant) {
+    fn enter_next_task<NextTask: RadioTask>(
+        mut self,
+        next_task: NextTask,
+    ) -> RadioDriver<NrfRadioDriver, NextTask>
+    where
+        RadioDriver<NrfRadioDriver, NextTask>: RadioState<NrfRadioDriver, NextTask>,
+    {
+        self.state().enter_next_task(next_task);
+        RadioDriver::new_internal()
+    }
+
+    fn switch_off(
+        mut self,
+    ) -> impl Future<Output = (RadioDriver<NrfRadioDriver, TaskOff>, NsInstant)> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_FALL_BACK);
 
@@ -457,32 +502,41 @@ impl<Task: RadioTask> RadioDriverApi<NrfRadioDriver> for RadioDriver<NrfRadioDri
         match r.state.read().state().variant().unwrap() {
             STATE_A::TX_DISABLE | STATE_A::RX_DISABLE | STATE_A::DISABLED => {}
             _ => {
-                self.reset_timer();
-                self.timer()
+                let state = self.state();
+                state.reset_timer();
+                state
+                    .timer()
                     .observe_event(HardwareEvent::RadioDisabled)
                     .unwrap();
                 r.tasks_disable.write(|w| w.tasks_disable().set_bit());
             }
         }
+        self.enter_next_task(TaskOff).wait_until_off()
+    }
 
-        let RadioDriver {
-            inner,
-            sleep_timer,
-            high_precision_timer,
-            ..
-        } = self;
+    fn sleep_timer(&self) -> <NrfRadioDriver as DriverConfig>::Timer {
+        self.state_ref().sleep_timer()
+    }
 
-        RadioDriver::initial_state(inner, sleep_timer, high_precision_timer)
-            .wait_until_off()
-            .await
+    fn scheduled_entry(&self) -> OptionalNsInstant {
+        self.state_ref().scheduled_entry
+    }
+
+    fn set_measured_entry(&mut self, measured_entry: NsInstant) {
+        self.state().measured_entry.set(measured_entry)
+    }
+
+    fn take_task(&mut self) -> Task {
+        self.state().take_task()
     }
 }
 
-impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
+impl RadioState<NrfRadioDriver, TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
     async fn transition(&mut self) -> Result<NsInstant, RadioTaskError<TaskOff>> {
-        // Wait until the state enters.
+        let state = self.state();
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(poll_fn(|_| {
                     let r = radio();
@@ -502,11 +556,11 @@ impl RadioState<TaskOff> for RadioDriver<NrfRadioDriver, TaskOff> {
                 .await;
         }
 
-        let entry = self
+        let entry = state
             .timer()
             .poll_event(HardwareEvent::RadioDisabled)
             .ok_or_else(|| self.scheduling_error());
-        self.stop_timer();
+        state.stop_timer();
         entry
     }
 
@@ -558,6 +612,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 let timed_rx_enable = self.start.map(timed_rx_enable);
                 let timer = self
                     .driver
+                    .state()
                     .start_timer(timed_rx_enable.map(|ts| ts.instant).into())?;
                 if let Some(timed_rx_enable) = timed_rx_enable {
                     timer.schedule_timed_signal(timed_rx_enable)?;
@@ -634,6 +689,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 let timed_tx_enable = self.at.map(|instant| timed_tx_enable(instant, cca));
                 let timer = self
                     .driver
+                    .state()
                     .start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
                 if let Some(timed_tx_enable) = timed_tx_enable {
                     timer.schedule_timed_signal(timed_tx_enable)?;
@@ -709,13 +765,15 @@ impl RadioDriver<NrfRadioDriver, TaskRx> {
     }
 }
 
-impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
+impl RadioState<NrfRadioDriver, TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
     async fn transition(&mut self) -> Result<NsInstant, RadioTaskError<TaskRx>> {
+        let state = self.state();
         let is_back_to_back_rx = Self::is_back_to_back_rx();
 
         // Wait until the state enters.
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(async {
                     let r = radio();
@@ -764,7 +822,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
             HardwareEvent::RadioRxEnabled
         };
 
-        let entry = self
+        let entry = state
             .timer()
             .poll_event(entry_event)
             .map(|ts| match entry_event {
@@ -780,7 +838,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         if is_back_to_back_rx {
             if let Ok(entry) = entry {
-                self.set_rx_frame_started(entry);
+                state.set_rx_frame_started(entry);
             }
         }
 
@@ -795,14 +853,16 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         &mut self,
         rollback_on_crcerror: bool,
     ) -> Result<RxResult, RadioTaskError<TaskRx>> {
+        let state = self.state();
         let r = radio();
 
-        debug_assert!(self.rx_frame_started().is_some());
+        debug_assert!(state.rx_frame_started().is_some());
 
         // Wait until (the remainder of) the frame has been received or ongoing
         // reception is cut off at the end of the rx window.
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(poll_fn(|_| {
                     if r.events_end.read().events_end().bit_is_set() {
@@ -830,7 +890,7 @@ impl RadioState<TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> {
         // frame) and therefore also didn't reset the event.
         r.events_bcmatch.reset();
 
-        let frame_started_at = self.rx_frame_started().unwrap();
+        let frame_started_at = state.rx_frame_started().unwrap();
         if r.events_crcok.read().events_crcok().bit_is_set() {
             r.events_crcok.reset();
 
@@ -927,13 +987,15 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
     }
 
     async fn wait_for_frame_start(&mut self) -> NsInstant {
+        let state = self.state();
         // Shortcut in case we had already observed the framestart event before.
-        if let Some(rx_rmarker) = self.rx_frame_started().into() {
+        if let Some(rx_rmarker) = state.rx_frame_started().into() {
             return rx_rmarker;
         }
 
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(async {
                     let r = radio();
@@ -963,11 +1025,11 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 .await;
         }
 
-        let rx_rmarker = self
+        let rx_rmarker = state
             .timer()
             .poll_event(HardwareEvent::RadioFrameStarted)
             .unwrap();
-        self.set_rx_frame_started(rx_rmarker);
+        state.set_rx_frame_started(rx_rmarker);
         rx_rmarker
     }
 
@@ -978,13 +1040,15 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         StopListeningResult<NrfRadioDriver, impl ReceivingRxState<NrfRadioDriver>>,
         (SchedulingError, Self),
     > {
+        let state = self.state();
+
         // Shortcut in case we had already observed the framestart event before.
-        if let Some(rx_rmarker) = self.rx_frame_started().into() {
-            self.stop_timer();
+        if let Some(rx_rmarker) = state.rx_frame_started().into() {
+            state.stop_timer();
             return Ok(StopListeningResult::FrameStarted(rx_rmarker, self));
         }
 
-        let timer = self.timer();
+        let timer = state.timer();
         if let Err(err) = timer.observe_event(HardwareEvent::RadioDisabled) {
             return Err((err.into(), self));
         }
@@ -1021,7 +1085,8 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     return Err((err.into(), self));
                 }
                 Ok(_) => unsafe {
-                    self.inner
+                    state
+                        .inner()
                         .executor
                         .spawn(poll_fn(|_| {
                             disabled = r.events_disabled.read().events_disabled().bit_is_set();
@@ -1085,12 +1150,12 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         } else {
             debug_assert!(r.events_disabled.read().events_disabled().bit_is_clear());
 
-            let rx_rmarker = self
+            let rx_rmarker = state
                 .timer()
                 .poll_event(HardwareEvent::RadioFrameStarted)
                 .unwrap();
-            self.stop_timer();
-            self.set_rx_frame_started(rx_rmarker);
+            state.stop_timer();
+            state.set_rx_frame_started(rx_rmarker);
             StopListeningResult::FrameStarted(rx_rmarker, self)
         };
 
@@ -1115,162 +1180,162 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         let mut preliminary_frame_info: Option<PreliminaryFrameInfo> = None;
 
-        let capture_preliminary_frame_info = async {
-            let r = radio();
+        unsafe {
+            self.state()
+                .inner()
+                .executor
+                .spawn(async {
+                    let r = radio();
 
-            let cleanup_on_drop = CancellationGuard::new(|| {
-                r.intenclr.write(|w| {
-                    w.bcmatch().set_bit();
-                    w.end().set_bit()
-                });
+                    let cleanup_on_drop = CancellationGuard::new(|| {
+                        r.intenclr.write(|w| {
+                            w.bcmatch().set_bit();
+                            w.end().set_bit()
+                        });
 
-                dma_end_fence();
+                        dma_end_fence();
 
-                // Do not clear the end event as it is used in the rx
-                // completion() method.
-                r.tasks_bcstop.write(|w| w.tasks_bcstop().set_bit());
-                r.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
-                r.events_bcmatch.reset();
-            });
-
-            let ended = poll_fn(|_| {
-                let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
-                if bcmatch || r.events_end.read().events_end().bit_is_set() {
-                    // Do not clear the end event as it is used below and in the
-                    // rx completion() method.
-                    r.intenclr.write(|w| {
-                        w.bcmatch().set_bit();
-                        w.end().set_bit()
-                    });
-                    r.events_bcmatch.reset();
-                    return Poll::Ready(!bcmatch);
-                }
-
-                r.intenset.write(|w| {
-                    w.bcmatch().set_bit();
-                    w.end().set_bit()
-                });
-                Poll::Pending
-            })
-            .await;
-
-            dma_end_fence();
-
-            if ended && r.events_crcerror.read().events_crcerror().bit_is_set() {
-                return;
-            }
-
-            // Cannot use self::ref_task() as we need to borrow self.task and
-            // self.inner at the same time.
-            let radio_frame = &self.task.as_ref().unwrap().radio_frame;
-
-            // Safety: The bit counter match guarantees that the frame
-            //         control field has been received.
-            let fc_and_addressing_repr = unsafe { radio_frame.fc_and_addressing_repr() };
-
-            if fc_and_addressing_repr.is_err() {
-                return;
-            }
-
-            let (frame_control, addressing_repr) = fc_and_addressing_repr.unwrap();
-            let addressing_fields_lengths = addressing_repr.try_addressing_fields_lengths();
-
-            if addressing_fields_lengths.is_err() {
-                return;
-            }
-
-            let seq_nr_len = if frame_control.sequence_number_suppression() {
-                0
-            } else {
-                SEQ_NR_LEN
-            };
-
-            let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths.unwrap();
-            let dst_len = (dst_pan_id_len + dst_addr_len) as usize;
-
-            let pdu_ref = radio_frame.pdu_ref();
-            let mpdu_length = pdu_ref[0] as u16;
-
-            if seq_nr_len == 0 && dst_len == 0 {
-                preliminary_frame_info = Some(PreliminaryFrameInfo {
-                    mpdu_length,
-                    frame_control: Some(frame_control),
-                    seq_nr: None,
-                    addressing_fields: None,
-                });
-                return;
-            }
-
-            let ended = if !ended {
-                // Note: BCMATCH counts are calculated relative to the MPDU
-                //       (i.e. w/o headroom).
-                let bcc = ((FC_LEN + seq_nr_len + dst_len) as u32) << 3;
-
-                // Wait until the sequence number and/or destination address
-                // fields have been received.
-                r.bcc.write(|w| w.bcc().variant(bcc));
-
-                poll_fn(|_| {
-                    let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
-                    if bcmatch || r.events_end.read().events_end().bit_is_set() {
                         // Do not clear the end event as it is used in the rx
-                        // completion() method. The remaining cleanup will be
-                        // done by the cancel guard.
-                        return Poll::Ready(!bcmatch);
+                        // completion() method.
+                        r.tasks_bcstop.write(|w| w.tasks_bcstop().set_bit());
+                        r.bcc.write(|w| w.bcc().variant(BCC_FC_BITS));
+                        r.events_bcmatch.reset();
+                    });
+
+                    let ended = poll_fn(|_| {
+                        let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
+                        if bcmatch || r.events_end.read().events_end().bit_is_set() {
+                            // Do not clear the end event as it is used below and in the
+                            // rx completion() method.
+                            r.intenclr.write(|w| {
+                                w.bcmatch().set_bit();
+                                w.end().set_bit()
+                            });
+                            r.events_bcmatch.reset();
+                            return Poll::Ready(!bcmatch);
+                        }
+
+                        r.intenset.write(|w| {
+                            w.bcmatch().set_bit();
+                            w.end().set_bit()
+                        });
+                        Poll::Pending
+                    })
+                    .await;
+
+                    dma_end_fence();
+
+                    if ended && r.events_crcerror.read().events_crcerror().bit_is_set() {
+                        return;
                     }
 
-                    r.intenset.write(|w| {
-                        w.bcmatch().set_bit();
-                        w.end().set_bit()
+                    // Cannot use self::ref_task() as we need to borrow self.task and
+                    // self.inner at the same time.
+                    let radio_frame = &self.state_ref().ref_task::<TaskRx>().radio_frame;
+
+                    // Safety: The bit counter match guarantees that the frame
+                    //         control field has been received.
+                    let fc_and_addressing_repr = radio_frame.fc_and_addressing_repr();
+
+                    if fc_and_addressing_repr.is_err() {
+                        return;
+                    }
+
+                    let (frame_control, addressing_repr) = fc_and_addressing_repr.unwrap();
+                    let addressing_fields_lengths = addressing_repr.try_addressing_fields_lengths();
+
+                    if addressing_fields_lengths.is_err() {
+                        return;
+                    }
+
+                    let seq_nr_len = if frame_control.sequence_number_suppression() {
+                        0
+                    } else {
+                        SEQ_NR_LEN
+                    };
+
+                    let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths.unwrap();
+                    let dst_len = (dst_pan_id_len + dst_addr_len) as usize;
+
+                    let pdu_ref = radio_frame.pdu_ref();
+                    let mpdu_length = pdu_ref[0] as u16;
+
+                    if seq_nr_len == 0 && dst_len == 0 {
+                        preliminary_frame_info = Some(PreliminaryFrameInfo {
+                            mpdu_length,
+                            frame_control: Some(frame_control),
+                            seq_nr: None,
+                            addressing_fields: None,
+                        });
+                        return;
+                    }
+
+                    let ended = if !ended {
+                        // Note: BCMATCH counts are calculated relative to the MPDU
+                        //       (i.e. w/o headroom).
+                        let bcc = ((FC_LEN + seq_nr_len + dst_len) as u32) << 3;
+
+                        // Wait until the sequence number and/or destination address
+                        // fields have been received.
+                        r.bcc.write(|w| w.bcc().variant(bcc));
+
+                        poll_fn(|_| {
+                            let bcmatch = r.events_bcmatch.read().events_bcmatch().bit_is_set();
+                            if bcmatch || r.events_end.read().events_end().bit_is_set() {
+                                // Do not clear the end event as it is used in the rx
+                                // completion() method. The remaining cleanup will be
+                                // done by the cancel guard.
+                                return Poll::Ready(!bcmatch);
+                            }
+
+                            r.intenset.write(|w| {
+                                w.bcmatch().set_bit();
+                                w.end().set_bit()
+                            });
+                            Poll::Pending
+                        })
+                        .await
+                    } else {
+                        true
+                    };
+
+                    drop(cleanup_on_drop);
+
+                    dma_end_fence();
+
+                    if ended {
+                        if r.events_crcerror.read().events_crcerror().bit_is_set() {
+                            return;
+                        } else {
+                            debug_assert!(r.events_crcok.read().events_crcok().bit_is_set());
+                        }
+                    }
+
+                    const HEADROOM: usize = 1;
+
+                    let seq_nr_offset = HEADROOM + FC_LEN;
+                    let seq_nr = if frame_control.sequence_number_suppression() {
+                        None
+                    } else {
+                        Some(pdu_ref[seq_nr_offset])
+                    };
+
+                    let addressing_offset = seq_nr_offset + seq_nr_len;
+                    let addressing_bytes = &pdu_ref[addressing_offset..];
+
+                    // Safety: We checked that we do actually have addressing fields.
+                    //         The bit counter guarantees that all bytes up to the
+                    //         addressing fields have been received.
+                    let addressing_fields =
+                        AddressingFields::new_unchecked(addressing_bytes, addressing_repr);
+
+                    preliminary_frame_info = Some(PreliminaryFrameInfo {
+                        mpdu_length,
+                        frame_control: Some(frame_control),
+                        seq_nr,
+                        addressing_fields: Some(addressing_fields),
                     });
-                    Poll::Pending
                 })
-                .await
-            } else {
-                true
-            };
-
-            drop(cleanup_on_drop);
-
-            dma_end_fence();
-
-            if ended {
-                if r.events_crcerror.read().events_crcerror().bit_is_set() {
-                    return;
-                } else {
-                    debug_assert!(r.events_crcok.read().events_crcok().bit_is_set());
-                }
-            }
-
-            const HEADROOM: usize = 1;
-
-            let seq_nr_offset = HEADROOM + FC_LEN;
-            let seq_nr = if frame_control.sequence_number_suppression() {
-                None
-            } else {
-                Some(pdu_ref[seq_nr_offset])
-            };
-
-            let addressing_offset = seq_nr_offset + seq_nr_len;
-            let addressing_bytes = &pdu_ref[addressing_offset..];
-
-            // Safety: We checked that we do actually have addressing fields.
-            //         The bit counter guarantees that all bytes up to the
-            //         addressing fields have been received.
-            let addressing_fields =
-                unsafe { AddressingFields::new_unchecked(addressing_bytes, addressing_repr) };
-
-            preliminary_frame_info = Some(PreliminaryFrameInfo {
-                mpdu_length,
-                frame_control: Some(frame_control),
-                seq_nr,
-                addressing_fields: Some(addressing_fields),
-            });
-        };
-        unsafe {
-            self.inner
-                .executor
-                .spawn(capture_preliminary_frame_info)
                 .await
         };
 
@@ -1307,7 +1372,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             }
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
-                let timer = self.driver.start_timer(None.into())?;
+                let timer = self.driver.state().start_timer(None.into())?;
 
                 let is_back_to_back_rx = self.ifs.is_none();
                 if is_back_to_back_rx {
@@ -1452,6 +1517,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 });
                 let timer = self
                     .driver
+                    .state()
                     .start_timer(timed_signals.map(|ts| ts.0.instant).into())?;
                 if let Some((rx_off, tx_enable)) = timed_signals {
                     debug_assert!(rx_off.instant < tx_enable.instant);
@@ -1578,7 +1644,7 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
                 // We're in RX or RXIDLE state and need to ramp down the
                 // receiver.
-                let timer = self.driver.start_timer(self.at)?;
+                let timer = self.driver.state().start_timer(self.at)?;
                 if let Some(at) = self.at.into() {
                     timer.schedule_timed_signal(timed_off(at))?;
                 }
@@ -1653,14 +1719,16 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 /// Note: On entry, we await FRAMESTART rather than the TXREADY so that we can
 ///       reliably reset this event in case a subsequent rx task is scheduled
 ///       which needs to observe that event.
-impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
+impl RadioState<NrfRadioDriver, TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     async fn transition(&mut self) -> Result<NsInstant, RadioTaskError<TaskTx>> {
+        let state = self.state();
         let r = radio();
 
-        let tx_task = self.ref_task();
+        let tx_task = state.ref_task::<TaskTx>();
         if tx_task.cca {
             unsafe {
-                self.inner
+                state
+                    .inner()
                     .executor
                     .spawn(poll_fn(|_| {
                         if r.events_ccaidle.read().events_ccaidle().bit_is_set()
@@ -1696,7 +1764,8 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
 
         // Wait until the state enters.
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(poll_fn(|_| {
                     if r.events_framestart.read().events_framestart().bit_is_set() {
@@ -1719,12 +1788,12 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
                 .await;
         }
 
-        let entry = self
+        let entry = state
             .timer()
             .poll_event(HardwareEvent::RadioFrameStarted)
             .map(|ts| ts - T_MEASURED_TX_FRAMESTART_ERROR)
             .ok_or_else(|| self.scheduling_error());
-        self.stop_timer();
+        state.stop_timer();
         entry
     }
 
@@ -1733,10 +1802,12 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
     }
 
     async fn completion(&mut self, _: bool) -> Result<TxResult, RadioTaskError<TaskTx>> {
+        let state = self.state();
         let r = radio();
 
         unsafe {
-            self.inner
+            state
+                .inner()
                 .executor
                 .spawn(poll_fn(|_| {
                     if r.events_end.read().events_end().bit_is_set() {
@@ -1757,8 +1828,8 @@ impl RadioState<TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> {
 
         dma_end_fence();
 
-        let radio_frame = self.task.take().unwrap().radio_frame;
-        Ok(TxResult::Sent(radio_frame, self.measured_entry.unwrap()))
+        let radio_frame = state.take_task::<TaskTx>().radio_frame;
+        Ok(TxResult::Sent(radio_frame, state.measured_entry.unwrap()))
     }
 
     fn exit(&mut self) -> Result<(), SchedulingError> {
@@ -1788,6 +1859,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
                 self.driver
+                    .state()
                     .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioRxEnabled)?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
@@ -1889,6 +1961,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
                 self.driver
+                    .state()
                     .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
@@ -2004,6 +2077,7 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
                 self.driver
+                    .state()
                     .start_timer(None.into())?
                     .observe_event(HardwareEvent::RadioDisabled)?;
 

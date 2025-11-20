@@ -8,8 +8,8 @@ use self::{
     driver::{
         radio::{
             tasks::{
-                ListeningRxState, OffState, RadioDriverApi, TaskOff as RadioTaskOff,
-                TaskRx as RadioTaskRx, TaskTx as RadioTaskTx, TxState,
+                ListeningRxState, OffState, TaskOff as RadioTaskOff, TaskRx as RadioTaskRx,
+                TaskTx as RadioTaskTx, TxState,
             },
             DriverConfig, RadioDriver,
         },
@@ -31,12 +31,9 @@ impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl> {
 
 impl<RadioDriverImpl: DriverConfig> Device<RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, RadioTaskOff>:
-        OffState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, RadioTaskRx>:
-        ListeningRxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, RadioTaskTx>:
-        TxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskOff>: OffState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskRx>: ListeningRxState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, RadioTaskTx>: TxState<RadioDriverImpl>,
 {
     pub async fn run<'upper_layer>(
         self,

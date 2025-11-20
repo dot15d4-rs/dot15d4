@@ -3,7 +3,7 @@ use dot15d4::{
         radio::{
             phy::Ifs,
             tasks::{
-                CompletedRadioTransition::*, ExternalRadioTransition, OffState, RadioDriverApi,
+                CompletedRadioTransition::*, ExternalRadioTransition, OffState,
                 SelfRadioTransition, TaskOff, TaskTx, TxResult, TxState,
             },
             DriverConfig, RadioDriver,
@@ -26,8 +26,8 @@ pub async fn best_effort<Config: DriverConfig>(
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
-    RadioDriver<Config, TaskOff>: OffState<Config> + RadioDriverApi<Config>,
-    RadioDriver<Config, TaskTx>: TxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskOff>: OffState<Config>,
+    RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     let test_suite = if cca {
         TestSuite::SingleBestEffortTxTxWithCca
@@ -115,8 +115,8 @@ pub async fn timed<Config: DriverConfig>(
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
-    RadioDriver<Config, TaskOff>: OffState<Config> + RadioDriverApi<Config>,
-    RadioDriver<Config, TaskTx>: TxState<Config> + RadioDriverApi<Config>,
+    RadioDriver<Config, TaskOff>: OffState<Config>,
+    RadioDriver<Config, TaskTx>: TxState<Config>,
 {
     let test_suite = if cca {
         TestSuite::SingleTimedTxTxWithCca
