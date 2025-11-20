@@ -1,16 +1,17 @@
 #![cfg_attr(not(feature = "nrf"), allow(unused))]
 
-use core::fmt::Debug;
+use core::{fmt::Debug, marker::PhantomData, mem::MaybeUninit};
 
-use crate::timer::{
-    HighPrecisionTimer, NsInstant, OptionalNsInstant, RadioTimerApi, RadioTimerError,
+use crate::{
+    radio::tasks::{AnyTask, RadioDriverApi, RadioTask},
+    timer::{HighPrecisionTimer, NsInstant, OptionalNsInstant, RadioTimerApi, RadioTimerError},
 };
 
 use self::{
     phy::PhyConfig,
     tasks::{
-        RadioState, RadioTask, RadioTaskError, RadioTransitionResult, ReceivingRxState, RxResult,
-        SchedulingError, StopListeningResult, TaskOff, TaskRx,
+        RadioState, RadioTransitionResult, ReceivingRxState, RxResult, StopListeningResult,
+        TaskOff, TaskRx,
     },
 };
 
@@ -194,53 +195,30 @@ pub type PhyOf<RadioDriverImpl> = <RadioDriverImpl as DriverConfig>::Phy;
 ///
 /// SAFETY: Radio drivers are not synchronized. All its methods SHALL be called
 ///         from a single scheduler.
-pub struct RadioDriver<RadioDriverImpl: DriverConfig, Task> {
-    /// Any private state used by a specific radio driver implementation.
-    pub(crate) inner: RadioDriverImpl,
-    // An instance of the radio sleep timer.
-    pub sleep_timer: RadioDriverImpl::Timer,
-    /// An instance of the high precision timer while it is running.
-    pub(crate) high_precision_timer: Option<HighPrecisionTimerOf<RadioDriverImpl>>,
-    /// The scheduled entry time. Kept for debugging and error handling
-    /// purposes. Shall be set while the task is being scheduled. See
-    /// [`tasks::RadioState::transition`] for a definition of the semantics of
-    /// this timestamp.
-    pub(crate) scheduled_entry: OptionalNsInstant,
-    /// The time the task entered. This timestamp SHALL be measured and set as
-    /// soon as the task entered. See [`tasks::RadioState::transition`] for a
-    /// definition of the semantics of this timestamp.
-    pub(crate) measured_entry: OptionalNsInstant,
-    /// The RMARKER of an incoming frame.
+pub struct RadioDriver<RadioDriverImpl, Task> {
+    config: PhantomData<RadioDriverImpl>,
+    task: PhantomData<Task>,
+}
+
+impl<RadioDriverImpl: DriverConfig, Task> RadioDriver<RadioDriverImpl, Task> {
+    /// Constructor used to instantiate a new typestate.
     ///
-    /// This value is observed at the end of the listening rx state and
-    /// available throughout the receiving rx state. Not available in any other
-    /// radio state.
-    rx_frame_started: OptionalNsInstant,
-    /// The currently active task which may be consumed by the driver at any
-    /// time during task execution.
-    pub(crate) task: Option<Task>,
+    /// SHALL only be used within framework-internal methods that provably
+    /// switch state. External clients of the state machine SHALL rely on
+    /// [`tasks::RadioTransition``]'s public API to step the radio state
+    /// machine.
+    pub(crate) fn new_internal() -> Self {
+        Self {
+            config: PhantomData,
+            task: PhantomData,
+        }
+    }
 }
 
 impl<RadioDriverImpl: DriverConfig> RadioDriver<RadioDriverImpl, TaskOff>
 where
-    Self: RadioState<TaskOff>,
+    Self: RadioState<RadioDriverImpl, TaskOff>,
 {
-    pub(crate) fn initial_state(
-        inner: RadioDriverImpl,
-        sleep_timer: RadioDriverImpl::Timer,
-        high_precision_timer: Option<<RadioDriverImpl::Timer as RadioTimerApi>::HighPrecisionTimer>,
-    ) -> Self {
-        Self {
-            inner,
-            sleep_timer,
-            high_precision_timer,
-            scheduled_entry: None.into(),
-            measured_entry: OptionalNsInstant::try_from_ticks(1),
-            rx_frame_started: None.into(),
-            task: Some(TaskOff),
-        }
-    }
-
     pub(crate) async fn wait_until_off(mut self) -> (Self, NsInstant) {
         let off_entry = self.transition().await;
         debug_assert!(off_entry.is_ok());
@@ -250,24 +228,15 @@ where
 
 impl<RadioDriverImpl: DriverConfig> RadioDriver<RadioDriverImpl, TaskRx>
 where
-    RadioDriver<RadioDriverImpl, TaskOff>: RadioState<TaskOff>,
+    Self: RadioState<RadioDriverImpl, TaskRx>,
+    RadioDriver<RadioDriverImpl, TaskOff>: RadioState<RadioDriverImpl, TaskOff>,
 {
     pub(crate) async fn rx_window_ended<RxState: ReceivingRxState<RadioDriverImpl>>(
         mut self,
         disabled_at: OptionalNsInstant,
     ) -> StopListeningResult<RadioDriverImpl, RxState> {
-        let rx_result = RxResult::RxWindowEnded(self.task.take().unwrap().radio_frame);
-        let (off_state, measured_entry) = RadioDriver {
-            inner: self.inner,
-            sleep_timer: self.sleep_timer,
-            high_precision_timer: self.high_precision_timer,
-            scheduled_entry: disabled_at,
-            measured_entry: None.into(),
-            rx_frame_started: None.into(),
-            task: Some(TaskOff),
-        }
-        .wait_until_off()
-        .await;
+        let rx_result = RxResult::RxWindowEnded(self.take_task().radio_frame);
+        let (off_state, measured_entry) = RadioDriver::new_internal().wait_until_off().await;
         StopListeningResult::RxWindowEnded(RadioTransitionResult::new(
             rx_result,
             off_state,
@@ -277,14 +246,98 @@ where
     }
 }
 
-impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl, Task> {
+/// Implementation-independent radio driver state.
+///
+/// Radio driver state is kept separately from the typestate modelling access to
+/// it. This is an optimization to reduce size of asynchronous tasks handling
+/// radio state.
+pub struct RadioDriverState<RadioDriverImpl: DriverConfig> {
+    /// Possibly uninitialized field may only be accessed once this field is
+    /// true.
+    is_initialized: bool,
+
+    /// Any private state used by a specific radio driver implementation.
+    inner: MaybeUninit<RadioDriverImpl>,
+
+    // An instance of the radio sleep timer.
+    sleep_timer: MaybeUninit<RadioDriverImpl::Timer>,
+
+    /// An instance of the high precision timer while it is running.
+    high_precision_timer: Option<HighPrecisionTimerOf<RadioDriverImpl>>,
+
+    /// The scheduled entry time. Kept for debugging and error handling
+    /// purposes. Shall be set while the task is being scheduled. See
+    /// [`tasks::RadioState::transition`] for a definition of the semantics of
+    /// this timestamp.
+    pub(crate) scheduled_entry: OptionalNsInstant,
+
+    /// The time the task entered. This timestamp SHALL be measured and set as
+    /// soon as the task entered. See [`tasks::RadioState::transition`] for a
+    /// definition of the semantics of this timestamp.
+    pub(crate) measured_entry: OptionalNsInstant,
+
+    /// The RMARKER of an incoming frame.
+    ///
+    /// This value is observed at the end of the listening rx state and
+    /// available throughout the receiving rx state. Not available in any other
+    /// radio state.
+    rx_frame_started: OptionalNsInstant,
+
+    /// The currently active task which may be consumed by the driver at any
+    /// time during task execution.
+    ///
+    /// Note: Storing the task here rather than in [`RadioDriver`] is an
+    ///       optimization that makes the typestate a ZST for zero-cost use in
+    ///       async functions and blocks.
+    task: Option<AnyTask>,
+}
+
+impl<RadioDriverImpl: DriverConfig> RadioDriverState<RadioDriverImpl> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            is_initialized: false,
+            inner: MaybeUninit::uninit(),
+            sleep_timer: MaybeUninit::uninit(),
+            high_precision_timer: None,
+            scheduled_entry: OptionalNsInstant::none(),
+            measured_entry: OptionalNsInstant::none(),
+            rx_frame_started: OptionalNsInstant::none(),
+            task: Some(AnyTask::Off(TaskOff)),
+        }
+    }
+
+    pub(crate) fn init(&mut self, inner: RadioDriverImpl, sleep_timer: RadioDriverImpl::Timer) {
+        assert!(!self.is_initialized);
+        self.is_initialized = true;
+        self.inner.write(inner);
+        self.sleep_timer.write(sleep_timer);
+    }
+
+    pub(crate) fn enter_next_task<Task: RadioTask>(&mut self, next_task: Task) {
+        self.measured_entry = None.into();
+        self.rx_frame_started = None.into();
+        self.task = Some(next_task.into());
+    }
+
+    pub(crate) fn inner(&mut self) -> &mut RadioDriverImpl {
+        debug_assert!(self.is_initialized);
+        // Safety: The driver is initialized.
+        unsafe { self.inner.assume_init_mut() }
+    }
+
+    pub(crate) fn sleep_timer(&self) -> RadioDriverImpl::Timer {
+        debug_assert!(self.is_initialized);
+        // Safety: The driver is initialized.
+        unsafe { self.sleep_timer.assume_init() }
+    }
+
     pub(crate) fn start_timer(
         &mut self,
         start_at: OptionalNsInstant,
     ) -> Result<&HighPrecisionTimerOf<RadioDriverImpl>, RadioTimerError> {
         debug_assert!(self.high_precision_timer.is_none());
 
-        self.high_precision_timer = Some(self.sleep_timer.start_high_precision_timer(start_at)?);
+        self.high_precision_timer = Some(self.sleep_timer().start_high_precision_timer(start_at)?);
         Ok(self.timer())
     }
 
@@ -310,21 +363,12 @@ impl<RadioDriverImpl: DriverConfig, Task: RadioTask> RadioDriver<RadioDriverImpl
         self.rx_frame_started
     }
 
-    pub(crate) fn take_task(&mut self) -> Task {
-        self.task.take().unwrap()
+    pub(crate) fn take_task<Task: RadioTask>(&mut self) -> Task {
+        self.task.take().unwrap().try_into_task().unwrap()
     }
 
-    pub(crate) fn ref_task(&self) -> &Task {
-        self.task.as_ref().unwrap()
-    }
-
-    pub(crate) fn scheduling_error(&mut self) -> RadioTaskError<Task> {
-        RadioTaskError::Scheduling(
-            self.take_task(),
-            SchedulingError {
-                instant: self.scheduled_entry,
-            },
-        )
+    pub(crate) fn ref_task<Task: RadioTask>(&self) -> &Task {
+        self.task.as_ref().unwrap().try_into_task_ref().unwrap()
     }
 }
 

@@ -37,7 +37,7 @@ pub struct Ieee802154Stack<RadioDriverImpl: DriverConfig> {
 
 impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, TaskOff>: RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskOff>: RadioDriverApi<RadioDriverImpl, TaskOff>,
 {
     pub fn new(
         radio: RadioDriver<RadioDriverImpl, TaskOff>,
@@ -66,16 +66,13 @@ where
 
 impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
 where
-    RadioDriver<RadioDriverImpl, TaskOff>:
-        OffState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, TaskRx>:
-        ListeningRxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
-    RadioDriver<RadioDriverImpl, TaskTx>:
-        TxState<RadioDriverImpl> + RadioDriverApi<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskRx>: ListeningRxState<RadioDriverImpl>,
+    RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl>,
 {
     pub async fn run(&self) -> ! {
         let radio = self.radio.take().expect("already running");
-        let timer = radio.sleep_timer;
+        let timer = radio.sleep_timer();
         let device = Device::new(radio);
         device
             .run(
