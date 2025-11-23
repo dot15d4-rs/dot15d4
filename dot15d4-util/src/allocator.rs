@@ -2,7 +2,6 @@
 
 use core::{
     alloc::Layout,
-    array::from_fn,
     cell::{RefCell, UnsafeCell},
     future::poll_fn,
     marker::PhantomPinned,
@@ -13,9 +12,7 @@ use core::{
 };
 
 use allocator_api2::alloc::{AllocError, Allocator};
-use generic_array::{ArrayLength, GenericArray};
 use heapless::Deque;
-use typenum::{Const, ToUInt, U};
 
 use crate::tokens::TokenGuard;
 
@@ -23,9 +20,7 @@ use crate::tokens::TokenGuard;
 // dependency management.
 pub mod export {
     pub use allocator_api2::alloc::{AllocError, Allocator};
-    pub use generic_array::ArrayLength;
     pub use static_cell::{ConstStaticCell, StaticCell};
-    pub use typenum::{Const, ToUInt, U};
 }
 
 #[allow(rustdoc::broken_intra_doc_links)]
@@ -153,14 +148,8 @@ pub trait IntoBuffer {
 ///         [`static_cell::StaticCell::init()`]. Allocator frontends built with
 ///         this backend may be cloned and copied as long as they operate from a
 ///         single thread.
-pub struct BufferAllocatorBackend<const BUFFER_SIZE: usize, const CAPACITY: usize>
-where
-    Const<CAPACITY>: ToUInt,
-    <Const<CAPACITY> as ToUInt>::Output: ArrayLength,
-    Const<BUFFER_SIZE>: ToUInt,
-    <Const<BUFFER_SIZE> as ToUInt>::Output: ArrayLength,
-{
-    buffers: GenericArray<UnsafeCell<generic_array::GenericArray<u8, U<BUFFER_SIZE>>>, U<CAPACITY>>,
+pub struct BufferAllocatorBackend<const BUFFER_SIZE: usize, const CAPACITY: usize> {
+    buffers: UnsafeCell<[[u8; BUFFER_SIZE]; CAPACITY]>,
     /// Safety: The pointers will be self-references to buffers. But as we
     ///         enforce static lifetime and pinning (see [`Self::pin()`]), the
     ///         pointers will never be dangling.
@@ -168,12 +157,8 @@ where
     _pinned: PhantomPinned,
 }
 
-impl<const BUFFER_SIZE: usize, const CAPACITY: usize> BufferAllocatorBackend<BUFFER_SIZE, CAPACITY>
-where
-    Const<CAPACITY>: ToUInt,
-    <Const<CAPACITY> as ToUInt>::Output: ArrayLength,
-    Const<BUFFER_SIZE>: ToUInt,
-    <Const<BUFFER_SIZE> as ToUInt>::Output: ArrayLength,
+impl<const BUFFER_SIZE: usize, const CAPACITY: usize>
+    BufferAllocatorBackend<BUFFER_SIZE, CAPACITY>
 {
     /// Initialize a new instance.
     ///
@@ -181,9 +166,7 @@ where
     /// reference to the newly created instance to [`Self::pin()`].
     pub fn new() -> Self {
         Self {
-            buffers: GenericArray::from_array::<CAPACITY>(from_fn(|_| {
-                UnsafeCell::new(GenericArray::from_array([0; BUFFER_SIZE]))
-            })),
+            buffers: UnsafeCell::new([[0; BUFFER_SIZE]; CAPACITY]),
             free_list: UnsafeCell::new(Deque::new()),
             _pinned: PhantomPinned,
         }
@@ -202,7 +185,7 @@ where
             let buffer_ptr=
                 // Safety: We enforce static lifetime of the allocator and the
                 //         pointers are guaranteed to be non-null.
-                unsafe { NonNull::new_unchecked(self.buffers[i].get_mut().as_mut_ptr()) };
+                unsafe { NonNull::new_unchecked(self.buffers.get_mut()[i].as_mut_ptr()) };
             free_list.push_front(buffer_ptr).unwrap();
         }
         Pin::static_ref(self)
@@ -220,11 +203,6 @@ where
 ///   therefore be passed to any method of the allocator.
 unsafe impl<const BUFFER_SIZE: usize, const CAPACITY: usize> Allocator
     for Pin<&'static BufferAllocatorBackend<BUFFER_SIZE, CAPACITY>>
-where
-    Const<CAPACITY>: ToUInt,
-    <Const<CAPACITY> as ToUInt>::Output: ArrayLength,
-    Const<BUFFER_SIZE>: ToUInt,
-    <Const<BUFFER_SIZE> as ToUInt>::Output: ArrayLength,
 {
     /// Allocates a zerocopy, 1-aligned message buffer with at least the given
     /// size.
@@ -278,11 +256,6 @@ where
 
 impl<const BUFFER_SIZE: usize, const CAPACITY: usize> Default
     for BufferAllocatorBackend<BUFFER_SIZE, CAPACITY>
-where
-    Const<CAPACITY>: ToUInt,
-    <Const<CAPACITY> as ToUInt>::Output: ArrayLength,
-    Const<BUFFER_SIZE>: ToUInt,
-    <Const<BUFFER_SIZE> as ToUInt>::Output: ArrayLength,
 {
     fn default() -> Self {
         Self::new()
@@ -369,21 +342,13 @@ impl BufferAllocator {
 ///
 /// This backlog is not synchronized, so it must be used from a single executor
 /// (thread).
-pub struct BufferAllocatorBacklog<const CAPACITY: usize>
-where
-    Const<CAPACITY>: ToUInt,
-    U<CAPACITY>: ArrayLength,
-{
+pub struct BufferAllocatorBacklog<const CAPACITY: usize> {
     /// The waker list deque supports O(1) access. Wakers will be called in the
     /// order they were stored, when buffer capacity becomes available.
     wakers: RefCell<Deque<Waker, CAPACITY>>,
 }
 
-impl<const CAPACITY: usize> BufferAllocatorBacklog<CAPACITY>
-where
-    Const<CAPACITY>: ToUInt,
-    U<CAPACITY>: ArrayLength,
-{
+impl<const CAPACITY: usize> BufferAllocatorBacklog<CAPACITY> {
     pub const fn new() -> Self {
         Self {
             wakers: RefCell::new(Deque::new()),
@@ -405,11 +370,7 @@ where
     }
 }
 
-impl<const CAPACITY: usize> Default for BufferAllocatorBacklog<CAPACITY>
-where
-    Const<CAPACITY>: ToUInt,
-    U<CAPACITY>: ArrayLength,
-{
+impl<const CAPACITY: usize> Default for BufferAllocatorBacklog<CAPACITY> {
     fn default() -> Self {
         Self::new()
     }
@@ -429,20 +390,12 @@ where
 /// - <https://github.com/pcwalton/offset-allocator>
 /// - <https://crates.io/crates/ring-alloc>
 #[derive(Clone, Copy)]
-pub struct AsyncBufferAllocator<const BACKLOG: usize>
-where
-    Const<BACKLOG>: ToUInt,
-    U<BACKLOG>: ArrayLength,
-{
+pub struct AsyncBufferAllocator<const BACKLOG: usize> {
     allocator: BufferAllocator,
     backlog: &'static BufferAllocatorBacklog<BACKLOG>,
 }
 
-impl<const NUM_CLIENTS: usize> AsyncBufferAllocator<NUM_CLIENTS>
-where
-    Const<NUM_CLIENTS>: ToUInt,
-    U<NUM_CLIENTS>: ArrayLength,
-{
+impl<const NUM_CLIENTS: usize> AsyncBufferAllocator<NUM_CLIENTS> {
     /// Instantiates a new asynchronous buffer allocator based on the given
     /// synchronous allocator.
     ///
