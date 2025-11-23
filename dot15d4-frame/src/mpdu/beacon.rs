@@ -2,10 +2,7 @@ use dot15d4_driver::radio::{
     frame::{AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr},
     DriverConfig,
 };
-use dot15d4_util::{
-    allocator::{export::*, AsyncBufferAllocator},
-    Error, Result,
-};
+use dot15d4_util::{allocator::AsyncBufferAllocator, Error, Result};
 
 #[cfg(feature = "ies")]
 use crate::repr::IeListRepr;
@@ -48,11 +45,7 @@ pub async fn beacon_frame<'ies, Config: DriverConfig, const ALLOCATOR_BACKLOG: u
     ies: Option<IeReprList<'ies, IeRepr<'ies>>>,
     beacon_payload_length: u16,
     buffer_allocator: AsyncBufferAllocator<ALLOCATOR_BACKLOG>,
-) -> Result<MpduParser<MpduFrame, MpduWithAllFields>>
-where
-    Const<ALLOCATOR_BACKLOG>: ToUInt,
-    U<ALLOCATOR_BACKLOG>: ArrayLength,
-{
+) -> Result<MpduParser<MpduFrame, MpduWithAllFields>> {
     let beacon_frame_repr = match ies {
         Some(_ies) => {
             #[cfg(not(feature = "ies"))]
