@@ -2,13 +2,11 @@
 
 use core::{
     alloc::Layout,
-    cell::{RefCell, UnsafeCell},
-    future::poll_fn,
+    cell::UnsafeCell,
     marker::PhantomPinned,
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr::{slice_from_raw_parts_mut, NonNull},
-    task::{Context, Poll, Waker},
 };
 
 use allocator_api2::alloc::{AllocError, Allocator};
@@ -336,139 +334,6 @@ impl BufferAllocator {
     }
 }
 
-/// A list of wakers required by the [`AsyncBufferAllocator`] to build a backlog
-/// of clients waiting for buffer capacity. This structure will typically be
-/// allocated statically and must not be cloned or copied.
-///
-/// This backlog is not synchronized, so it must be used from a single executor
-/// (thread).
-pub struct BufferAllocatorBacklog<const CAPACITY: usize> {
-    /// The waker list deque supports O(1) access. Wakers will be called in the
-    /// order they were stored, when buffer capacity becomes available.
-    wakers: RefCell<Deque<Waker, CAPACITY>>,
-}
-
-impl<const CAPACITY: usize> BufferAllocatorBacklog<CAPACITY> {
-    pub const fn new() -> Self {
-        Self {
-            wakers: RefCell::new(Deque::new()),
-        }
-    }
-
-    /// Stores the given waker. Panics if the backlog capacity is exhausted.
-    fn push_waker(&self, waker: Waker) {
-        self.wakers
-            .borrow_mut()
-            .push_front(waker)
-            .expect("no capacity")
-    }
-
-    /// If one or more wakers are waiting then the waker that waits for the
-    /// longest time is returned.
-    fn try_pop_waker(&self) -> Option<Waker> {
-        self.wakers.borrow_mut().pop_back()
-    }
-}
-
-impl<const CAPACITY: usize> Default for BufferAllocatorBacklog<CAPACITY> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// An asynchronous version of the [`BufferAllocator`].
-///
-/// The allocator allows clients to wait for buffer capacity under heavy load.
-///
-/// Note: For best performance you should reserve enough buffer capacity that
-///       even under heavy load buffer capacity is not contended. To prove so,
-///       you can set the backlog capacity to zero and/or use the synchronous
-///       API of the allocator.
-///
-/// Currently we wrap our own allocator backend by default. Interesting future
-/// candidates might be:
-/// - <https://github.com/pcwalton/offset-allocator>
-/// - <https://crates.io/crates/ring-alloc>
-#[derive(Clone, Copy)]
-pub struct AsyncBufferAllocator<const BACKLOG: usize> {
-    allocator: BufferAllocator,
-    backlog: &'static BufferAllocatorBacklog<BACKLOG>,
-}
-
-impl<const NUM_CLIENTS: usize> AsyncBufferAllocator<NUM_CLIENTS> {
-    /// Instantiates a new asynchronous buffer allocator based on the given
-    /// synchronous allocator.
-    ///
-    /// Multiple instances can be created from the same [`BufferAllocator`]
-    /// instance or even copies of it. It is safe to allocate a buffer from one
-    /// instance and deallocate it from another. This is ensured by the
-    /// clone-guarantee of the [`BufferAllocator`].
-    pub fn new(
-        allocator: BufferAllocator,
-        backlog: &'static BufferAllocatorBacklog<NUM_CLIENTS>,
-    ) -> Self {
-        Self { allocator, backlog }
-    }
-
-    /// Provides access to the underlying synchronous buffer allocator.
-    pub fn allocator(&self) -> BufferAllocator {
-        self.allocator
-    }
-
-    /// A proxy for [`BufferAllocator::try_allocate_buffer()`] with the
-    /// additional option to register a waker if a buffer cannot be allocated.
-    pub fn try_allocate_buffer(
-        &self,
-        size: usize,
-        cx: Option<&Context>,
-    ) -> Result<BufferToken, AllocError> {
-        self.allocator.try_allocate_buffer(size).inspect_err(|_| {
-            if let Some(cx) = cx {
-                self.backlog.push_waker(cx.waker().clone());
-            }
-        })
-    }
-
-    /// Waits until a buffer with the given size is available from the backing
-    /// allocator, then allocates it and returns it.
-    ///
-    /// The returned buffer is guaranteed to be exactly of the requested size
-    /// and safely mutable during the lifetime of the buffer token.
-    ///
-    /// Note: Using this method introduces a risk of deadlock unless you ensure
-    ///       that at least one task owning and willing to release a buffer is
-    ///       life when blocking on this method. E.g. if you hold a buffer
-    ///       allocation in one task and then block waiting for a message slot
-    ///       on a channel and at the same time you hold a message slot for that
-    ///       channel in another task and then block waiting for a buffer there,
-    ///       you risk deadlock under heavy load. To avoid deadlock always
-    ///       allocate scarce resources in the exactly same order in all tasks.
-    pub async fn allocate_buffer(&self, size: usize) -> BufferToken {
-        poll_fn(|cx| match self.allocator.try_allocate_buffer(size) {
-            Ok(buffer) => Poll::Ready(buffer),
-            Err(_) => {
-                self.backlog.push_waker(cx.waker().clone());
-                Poll::Pending
-            }
-        })
-        .await
-    }
-
-    /// See [`BufferAllocator::deallocate_buffer()`]
-    ///
-    /// # Safety
-    ///
-    /// See the safety section in [`BufferAllocator::deallocate_buffer()`].
-    pub unsafe fn deallocate_buffer(&self, buffer_token: BufferToken) {
-        self.allocator.deallocate_buffer(buffer_token);
-
-        // If a client waits for buffers, then wake it up.
-        self.backlog
-            .try_pop_waker()
-            .inspect(|waker| waker.wake_by_ref());
-    }
-}
-
 /// A macro that relies on [`static_cell::StaticCell::init()`] to instantiate a
 /// message buffer allocator.
 #[macro_export]
@@ -484,20 +349,6 @@ macro_rules! buffer_allocator {
         $crate::allocator::BufferAllocator::new(
             ALLOCATOR.init(ALLOCATOR_BACKEND.init(Default::default()).pin()),
         )
-    }};
-}
-
-/// A macro that relies on [`static_cell::StaticCell::init()`] to instantiate an
-/// asynchronous message buffer allocator.
-#[macro_export]
-macro_rules! async_buffer_allocator {
-    ($size:expr, $buffers:expr, $backlog: expr) => {{
-        use $crate::export::ConstStaticCell;
-
-        static ALLOCATOR_BACKLOG: ConstStaticCell<$crate::BufferAllocatorBacklog<$backlog>> =
-            ConstStaticCell::new($crate::BufferAllocatorBacklog::new());
-        let buffer_allocator = $crate::buffer_allocator!($size, $buffers);
-        $crate::AsyncBufferAllocator::new(buffer_allocator, ALLOCATOR_BACKLOG.take())
     }};
 }
 

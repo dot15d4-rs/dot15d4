@@ -57,9 +57,15 @@ where
     ///
     /// Note: Using this method introduces a risk of deadlock unless you ensure
     ///       that at least one task owning and willing to release a request
-    ///       token is life when blocking on this method. See
-    ///       [`crate::allocator::AsyncBufferAllocator::allocate_buffer()`] for
-    ///       more information and an example.
+    ///       token is life when blocking on this method. E.g. if you hold a
+    ///       buffer allocation in one task and then block waiting for a message
+    ///       slot on a channel and at the same time you hold a message slot for
+    ///       that channel in another task and then block waiting for a buffer
+    ///       there, you risk deadlock under heavy load. To avoid deadlock
+    ///       always allocate scarce resources in the exactly same order in all
+    ///       tasks.
+    ///
+    /// Also see [`crate::allocator::BufferAllocator::try_allocate_buffer()`].
     pub fn allocate_request_token(
         &self,
     ) -> impl Future<Output = RequestToken>
