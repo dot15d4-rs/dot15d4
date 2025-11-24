@@ -2,10 +2,7 @@ use dot15d4_driver::radio::{
     frame::{AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr},
     DriverConfig,
 };
-use dot15d4_util::{
-    allocator::{export::*, AsyncBufferAllocator},
-    Error, Result,
-};
+use dot15d4_util::{allocator::BufferAllocator, Error, Result};
 
 #[cfg(feature = "ies")]
 use crate::repr::IeListRepr;
@@ -44,15 +41,11 @@ pub const BEACON_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
 ///       efficient than instantiating an IE list and payload slice just to move
 ///       (copy) it into the function and copy it once again into the buffer
 ///       verbatim.
-pub async fn beacon_frame<'ies, Config: DriverConfig, const ALLOCATOR_BACKLOG: usize>(
+pub fn beacon_frame<'ies, Config: DriverConfig>(
     ies: Option<IeReprList<'ies, IeRepr<'ies>>>,
     beacon_payload_length: u16,
-    buffer_allocator: AsyncBufferAllocator<ALLOCATOR_BACKLOG>,
-) -> Result<MpduParser<MpduFrame, MpduWithAllFields>>
-where
-    Const<ALLOCATOR_BACKLOG>: ToUInt,
-    U<ALLOCATOR_BACKLOG>: ArrayLength,
-{
+    buffer_allocator: BufferAllocator,
+) -> Result<MpduParser<MpduFrame, MpduWithAllFields>> {
     let beacon_frame_repr = match ies {
         Some(_ies) => {
             #[cfg(not(feature = "ies"))]
@@ -63,7 +56,9 @@ where
         None => BEACON_FRAME_REPR.without_ies(),
     };
     let min_buffer_size = beacon_frame_repr.min_buffer_size::<Config>(beacon_payload_length)?;
-    let buffer = buffer_allocator.allocate_buffer(min_buffer_size).await;
+    let buffer = buffer_allocator
+        .try_allocate_buffer(min_buffer_size)
+        .unwrap();
     match beacon_frame_repr.into_writer::<Config>(
         FrameVersion::Ieee802154_2006,
         FrameType::Beacon,

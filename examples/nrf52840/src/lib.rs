@@ -19,7 +19,7 @@ use dot15d4::driver::{
 #[cfg(feature = "timer-trace")]
 use dot15d4::driver::{
     socs::nrf::NrfRadioTimerTracingConfig,
-    timer::{HardwareEvent, HighPrecisionTimer, LocalClockInstant, RadioTimerApi},
+    timer::{HardwareEvent, HighPrecisionTimer, NsInstant, RadioTimerApi},
 };
 #[cfg(feature = "defmt")]
 use dot15d4::util::rtt::export::set_defmt_channel;
@@ -307,8 +307,8 @@ pub async fn observe_gpio_event<Timer: RadioTimerApi, Executor: InterruptExecuto
     executor: &mut Executor,
     timer: &Timer,
     gpiote: &GPIOTE,
-) -> LocalClockInstant {
-    let high_precision_timer = timer.start_high_precision_timer(None).unwrap();
+) -> NsInstant {
+    let high_precision_timer = timer.start_high_precision_timer(None.into()).unwrap();
 
     high_precision_timer
         .observe_event(HardwareEvent::GpioToggled)
@@ -333,13 +333,25 @@ pub fn radio_tracing_config() -> NrfRadioTracingConfig {
     }
 }
 
-nrf_interrupt_executor!(executor, SWI0_EGU0);
+nrf_interrupt_executor!(swi_executor_internal, SWI0_EGU0);
 
 pub fn swi_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
     #[cfg(feature = "executor-trace")]
     let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
-    executor(
-        NrfInterruptPriority::LOWEST_PRIORITY,
+    swi_executor_internal(
+        NrfInterruptPriority::LOWEST,
+        #[cfg(feature = "executor-trace")]
+        gpiote_trace_channel,
+    )
+}
+
+nrf_interrupt_executor!(gpiote_executor_internal, GPIOTE);
+
+pub fn gpiote_executor() -> &'static mut impl InterruptExecutor<PB = PB3> {
+    #[cfg(feature = "executor-trace")]
+    let gpiote_trace_channel = PIN_EXECUTOR.gpiote_channel as usize;
+    gpiote_executor_internal(
+        NrfInterruptPriority::LOWEST.one_higher().unwrap(),
         #[cfg(feature = "executor-trace")]
         gpiote_trace_channel,
     )

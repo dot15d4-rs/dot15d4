@@ -7,7 +7,7 @@ use dot15d4::{
             },
             DriverConfig, RadioDriver,
         },
-        timer::LocalClockInstant,
+        timer::NsInstant,
     },
     util::allocator::{BufferAllocator, IntoBuffer},
 };
@@ -20,7 +20,7 @@ use crate::{
 pub async fn best_effort<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
@@ -39,7 +39,7 @@ where
 
     // off -> rx
     let listening_rx_radio = match off_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), None)
+        .schedule_rx(rx_task::<Config>(buffer_allocator), None.into())
         .complete_and_transition()
         .await
     {
@@ -59,7 +59,7 @@ where
     };
 
     // rx -> rx window ended
-    match listening_rx_radio.stop_listening(None).await {
+    match listening_rx_radio.stop_listening(None.into()).await {
         Ok(StopListeningResult::RxWindowEnded(radio_transition_result)) => {
             log_transition_result(
                 "Rx->End(BE)",
@@ -93,7 +93,7 @@ pub enum Test {
 pub async fn timed<Config: DriverConfig>(
     timer: &mut Config::Timer,
     off_radio: RadioDriver<Config, TaskOff>,
-    anchor_time: LocalClockInstant,
+    anchor_time: NsInstant,
     buffer_allocator: BufferAllocator,
 ) -> RadioDriver<Config, TaskOff>
 where
@@ -111,7 +111,7 @@ where
     )
     .await;
     let listening_rx_radio = match off_radio
-        .schedule_rx(rx_task::<Config>(buffer_allocator), Some(rx_start))
+        .schedule_rx(rx_task::<Config>(buffer_allocator), rx_start.into())
         .complete_and_transition()
         .await
     {
@@ -139,7 +139,7 @@ where
         false,
     )
     .await;
-    match listening_rx_radio.stop_listening(Some(off_at)).await {
+    match listening_rx_radio.stop_listening(off_at.into()).await {
         Ok(StopListeningResult::RxWindowEnded(radio_transition_result)) => {
             log_transition_result(
                 "Rx->End(T)",

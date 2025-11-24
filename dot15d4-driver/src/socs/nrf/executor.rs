@@ -13,8 +13,7 @@ use core::{
 
 use cortex_m::{
     asm::wfe,
-    peripheral::scb::VectActive,
-    peripheral::{NVIC, SCB},
+    peripheral::{scb::VectActive, NVIC, SCB},
     Peripherals as CorePeripherals,
 };
 use dot15d4_util::sync::CancellationGuard;
@@ -220,6 +219,9 @@ impl State {
             #[cfg(all(feature = "rtos-trace", feature = "executor-trace"))]
             rtos_trace::trace::system_idle();
 
+            // TODO: How can we reliably check that the task has not already
+            //       ended before entering sleep mode w/o delaying interrupt
+            //       execution?
             wfe();
 
             // Safety: Loading the task pointer re-acquires the pinned task for
@@ -374,15 +376,14 @@ macro_rules! nrf_interrupt_executor {
             };
 
             use $crate::{
-                executor::{InterruptExecutor, InterruptPriority},
-                interrupt_executor,
+                executor::{interrupt_executor, InterruptExecutor, InterruptPriority},
                 socs::nrf::executor::{
                     export::{interrupt, Interrupt, StaticCell},
                     NrfInterruptPriority, NrfPriorityBits, State,
                 },
             };
 
-            static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor);
+            static VTABLE: RawWakerVTable = interrupt_executor!(NrfInterruptExecutor, VTABLE);
             static STATE: State =
                 State::new(Interrupt::$interrupt, RawWaker::new(ptr::null(), &VTABLE));
 

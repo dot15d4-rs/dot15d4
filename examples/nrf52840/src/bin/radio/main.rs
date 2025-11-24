@@ -5,7 +5,6 @@
 
 #![no_std]
 #![no_main]
-#![cfg(feature = "nrf52840")]
 #![allow(clippy::uninlined_format_args)]
 
 #[cfg(feature = "device-sync")]
@@ -20,8 +19,6 @@ mod single_tx_tx;
 
 mod util;
 
-#[cfg(feature = "device-sync")]
-use dot15d4::driver::nrf_interrupt_executor;
 #[cfg(not(feature = "device-sync"))]
 use dot15d4::driver::timer::RadioTimerApi;
 use dot15d4::{
@@ -31,7 +28,7 @@ use dot15d4::{
             phy::{OQpsk250KBit, Phy, PhyConfig},
             RadioDriver,
         },
-        timer::LocalClockDuration,
+        timer::NsDuration,
     },
     util::{buffer_allocator, info},
 };
@@ -41,16 +38,12 @@ use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
 use dot15d4_examples_nrf52840::radio_tracing_config;
 use dot15d4_examples_nrf52840::{config_peripherals, swi_executor, AvailableResources};
 #[cfg(feature = "device-sync")]
-use dot15d4_examples_nrf52840::{observe_gpio_event, wait_for_gpio_event};
+use dot15d4_examples_nrf52840::{gpiote_executor, observe_gpio_event, wait_for_gpio_event};
 
 use self::util::done;
 
-#[cfg(feature = "device-sync")]
-nrf_interrupt_executor!(gpiote_executor, GPIOTE);
-
 const TEST_SLOT_DURATION_MS: usize = 10;
-const TEST_SLOT_DURATION: LocalClockDuration =
-    LocalClockDuration::millis(TEST_SLOT_DURATION_MS as u64);
+const TEST_SLOT_DURATION: NsDuration = NsDuration::millis(TEST_SLOT_DURATION_MS as u64);
 
 #[cfg(not(feature = "device-sync-client"))]
 use single_rx_off::Test as RxOffTest;
@@ -163,7 +156,7 @@ fn main() -> ! {
     );
     let swi_executor = swi_executor();
     #[cfg(feature = "device-sync")]
-    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
+    let gpiote_executor = gpiote_executor();
 
     let buffer_allocator = buffer_allocator!(
         { <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize },

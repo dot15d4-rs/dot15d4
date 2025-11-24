@@ -2,16 +2,13 @@
 
 #![no_std]
 #![no_main]
-#![cfg(feature = "nrf52840")]
+#![cfg(feature = "timer-trace")]
 #![allow(clippy::uninlined_format_args)]
 
-use dot15d4::{
-    driver::{executor::InterruptExecutor, socs::nrf::executor::nrf_interrupt_executor},
-    util::info,
+use dot15d4::{driver::executor::InterruptExecutor, util::info};
+use dot15d4_examples_nrf52840::{
+    config_peripherals, gpiote_executor, observe_gpio_event, swi_executor,
 };
-use dot15d4_examples_nrf52840::{config_peripherals, observe_gpio_event, swi_executor};
-
-nrf_interrupt_executor!(gpiote_executor, GPIOTE);
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -24,7 +21,7 @@ fn main() -> ! {
     );
 
     let swi_executor = swi_executor();
-    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
+    let gpiote_executor = gpiote_executor();
 
     let gpiote = resources.gpiote;
     let timer = resources.timer;

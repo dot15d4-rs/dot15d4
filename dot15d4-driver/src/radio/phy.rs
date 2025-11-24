@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use fugit::Duration;
 
-use crate::timer::LocalClockDuration;
+use crate::timer::NsDuration;
 
 use super::constants::{A_MAX_SIFS_FRAME_SIZE, A_NUM_SUPERFRAME_SLOTS};
 
@@ -24,7 +24,7 @@ pub trait PhyConfig {
 
     /// Rx-to-tx or tx-to-rx turnaround time (in symbol periods), as defined in
     /// 10.2.2 and 10.2.3.
-    const A_TURNAROUND_TIME: LocalClockDuration;
+    const A_TURNAROUND_TIME: NsDuration;
 
     // Constants from section 11.3, Table 11-1, PHY constants
 
@@ -32,15 +32,15 @@ pub trait PhyConfig {
     const PHY_MAX_PACKET_SIZE: u16;
 
     /// The time required to perform CCA detection in symbol periods.
-    const PHY_CCA_DURATION: LocalClockDuration;
+    const PHY_CCA_DURATION: NsDuration;
 
     /// The number of symbols forming a superframe slot when the superframe
     /// order is equal to zero, as described in 6.2.1.
-    const A_BASE_SLOT_DURATION: LocalClockDuration;
+    const A_BASE_SLOT_DURATION: NsDuration;
 
     /// The number of symbols forming a superframe when the superframe order is
     /// equal to zero.
-    const A_BASE_SUPERFRAME_DURATION: LocalClockDuration;
+    const A_BASE_SUPERFRAME_DURATION: NsDuration;
 
     // Constants of IEEE 802.15.4-2024, section 8.4.2, Table 8-35, MAC constants
 
@@ -51,7 +51,7 @@ pub trait PhyConfig {
     /// the temporary increase in the beacon frame length needed to perform GTS
     /// maintenance, as described in 7.3.1.5. Additional restrictions apply when
     /// PCA is enabled, as described in 6.2.5.4.
-    const A_MIN_CAP_LENGTH: LocalClockDuration;
+    const A_MIN_CAP_LENGTH: NsDuration;
 
     // MAC PIB attributes of IEEE 802.15.4-2024, section 8.4.3.1, Table 8-36
 
@@ -62,20 +62,20 @@ pub trait PhyConfig {
 
     /// The number of symbols forming the basic time period used by the CSMA-CA
     /// algorithm.
-    const MAC_UNIT_BACKOFF_PERIOD: LocalClockDuration;
+    const MAC_UNIT_BACKOFF_PERIOD: NsDuration;
 
     /// SIFS: 12 symbols = 192µs
-    const MAC_SIFS_PERIOD: LocalClockDuration;
+    const MAC_SIFS_PERIOD: NsDuration;
 
     /// LIFS: 40 symbols = 480µs
-    const MAC_LIFS_PERIOD: LocalClockDuration;
+    const MAC_LIFS_PERIOD: NsDuration;
 
     /// AIFS=1ms, for SUN PHY, LECIM PHY, TVWS PHY, SIFS otherwise.
     ///
     /// Note: For some reason this is defined ad-hoc in section 6.6.3.3 rather
     ///       than being a MAC PIB property as the other IFS types. This
     ///       also explains the distinct nomenclature.
-    const AIFS: LocalClockDuration;
+    const AIFS: NsDuration;
 
     /// This is the time it takes for a frame to be received up to the beginning
     /// of the first symbol after the frame's start-of-frame (SFD) marker. This
@@ -86,7 +86,7 @@ pub trait PhyConfig {
     /// To calculate an offset from the antenna, the phyTxRmarkerOffset or
     /// phyRxRmarkerOffset PIB attributes must be added, see IEEE 802.15.4-2024,
     /// sections 10.29.1.1 and 12.3.2, table 12-2.
-    const RMARKER_OFFSET: LocalClockDuration;
+    const RMARKER_OFFSET: NsDuration;
 }
 
 /// O-QPSK 250kBit PHY
@@ -101,11 +101,11 @@ impl OQpsk250KBit {
     pub const PHY_HDR_LEN: usize = 1;
 
     // SHR duration: preamble (8 symbols) + SFD (2 symbols)
-    pub const T_SHR: LocalClockDuration =
+    pub const T_SHR: NsDuration =
         <Phy<OQpsk250KBit> as PhyConfig>::SymbolPeriods::from_ticks(10).convert();
 
     // PHR duration: one byte (2 symbols)
-    pub const T_PHR: LocalClockDuration =
+    pub const T_PHR: NsDuration =
         <Phy<OQpsk250KBit> as PhyConfig>::SymbolPeriods::from_ticks(Self::PHY_HDR_LEN as u64 * 2)
             .convert();
 }
@@ -168,34 +168,34 @@ impl PhyConfig for Phy<OQpsk250KBit> {
     /// O-QPSK symbol period: 1 / symbol rate, i.e. 16µs.
     type SymbolPeriods = Duration<u64, 1, { O_QPSK_SYMBOL_RATE }>;
 
-    const A_TURNAROUND_TIME: LocalClockDuration = Self::SymbolPeriods::from_ticks(12).convert();
+    const A_TURNAROUND_TIME: NsDuration = Self::SymbolPeriods::from_ticks(12).convert();
 
     const PHY_MAX_PACKET_SIZE: u16 = PHY_MAX_PACKET_SIZE_127;
-    const PHY_CCA_DURATION: LocalClockDuration = Self::SymbolPeriods::from_ticks(8).convert();
+    const PHY_CCA_DURATION: NsDuration = Self::SymbolPeriods::from_ticks(8).convert();
 
-    const A_BASE_SLOT_DURATION: LocalClockDuration = Self::SymbolPeriods::from_ticks(60).convert();
-    const A_BASE_SUPERFRAME_DURATION: LocalClockDuration = Self::SymbolPeriods::from_ticks(
+    const A_BASE_SLOT_DURATION: NsDuration = Self::SymbolPeriods::from_ticks(60).convert();
+    const A_BASE_SUPERFRAME_DURATION: NsDuration = Self::SymbolPeriods::from_ticks(
         Self::A_BASE_SLOT_DURATION.ticks() * A_NUM_SUPERFRAME_SLOTS as u64,
     )
     .convert();
-    const A_MIN_CAP_LENGTH: LocalClockDuration = Self::SymbolPeriods::from_ticks(440).convert();
+    const A_MIN_CAP_LENGTH: NsDuration = Self::SymbolPeriods::from_ticks(440).convert();
 
     const MAC_FCS_TYPE: u8 = 1;
-    const MAC_UNIT_BACKOFF_PERIOD: LocalClockDuration = Self::SymbolPeriods::from_ticks(
+    const MAC_UNIT_BACKOFF_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(
         Self::A_TURNAROUND_TIME.ticks() + Self::PHY_CCA_DURATION.ticks(),
     )
     .convert();
-    const MAC_SIFS_PERIOD: LocalClockDuration = Self::SymbolPeriods::from_ticks(12).convert();
-    const MAC_LIFS_PERIOD: LocalClockDuration = Self::SymbolPeriods::from_ticks(40).convert();
-    const AIFS: LocalClockDuration = Self::MAC_SIFS_PERIOD;
-    const RMARKER_OFFSET: LocalClockDuration = OQpsk250KBit::T_SHR;
+    const MAC_SIFS_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(12).convert();
+    const MAC_LIFS_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(40).convert();
+    const AIFS: NsDuration = Self::MAC_SIFS_PERIOD;
+    const RMARKER_OFFSET: NsDuration = OQpsk250KBit::T_SHR;
 }
 
 const _: () =
     assert!(<Phy<OQpsk250KBit> as PhyConfig>::SymbolPeriods::from_ticks(1).to_micros() == 16);
 
 impl Ifs<Phy<OQpsk250KBit>> {
-    pub const fn into_local_clock_duration(self) -> LocalClockDuration {
+    pub const fn into_local_clock_duration(self) -> NsDuration {
         match self {
             Ifs::Aifs(_) => <Phy<OQpsk250KBit> as PhyConfig>::AIFS,
             Ifs::Sifs(_) => <Phy<OQpsk250KBit> as PhyConfig>::MAC_SIFS_PERIOD,
@@ -204,7 +204,7 @@ impl Ifs<Phy<OQpsk250KBit>> {
     }
 }
 
-impl From<Ifs<Phy<OQpsk250KBit>>> for LocalClockDuration {
+impl From<Ifs<Phy<OQpsk250KBit>>> for NsDuration {
     fn from(value: Ifs<Phy<OQpsk250KBit>>) -> Self {
         value.into_local_clock_duration()
     }

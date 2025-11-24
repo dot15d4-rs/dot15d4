@@ -2,26 +2,22 @@
 
 #![no_std]
 #![no_main]
+#![cfg(feature = "timer-trace")]
 
-#[cfg(feature = "device-sync")]
-use dot15d4::driver::nrf_interrupt_executor;
 #[cfg(feature = "rtos-trace")]
 use embassy_nrf as _;
 
 use dot15d4::driver::{
     executor::InterruptExecutor,
     socs::nrf::NrfRadioSleepTimer,
-    timer::{HardwareSignal, HighPrecisionTimer, LocalClockDuration, RadioTimerApi, TimedSignal},
+    timer::{HardwareSignal, HighPrecisionTimer, NsDuration, RadioTimerApi, TimedSignal},
 };
 use dot15d4_examples_nrf52840::{
     config_peripherals, gpio_trace::PIN_TIMER_SIGNAL, swi_executor, toggle_gpiote_pin,
 };
 #[cfg(feature = "device-sync")]
-use dot15d4_examples_nrf52840::{observe_gpio_event, wait_for_gpio_event};
+use dot15d4_examples_nrf52840::{gpiote_executor, observe_gpio_event, wait_for_gpio_event};
 use embassy_executor::Spawner;
-
-#[cfg(feature = "device-sync")]
-nrf_interrupt_executor!(gpiote_executor, GPIOTE);
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -35,7 +31,7 @@ async fn main(_spawner: Spawner) {
 
     let swi_executor = swi_executor();
     #[cfg(feature = "device-sync")]
-    let gpiote_executor = gpiote_executor((swi_executor.priority().one_higher()).unwrap());
+    let gpiote_executor = gpiote_executor();
 
     let mut timer = resources.timer;
     let gpiote = resources.gpiote;
@@ -56,7 +52,7 @@ async fn main(_spawner: Spawner) {
         };
 
         for _ in 0..10 {
-            const PERIOD: LocalClockDuration = LocalClockDuration::micros(500);
+            const PERIOD: NsDuration = NsDuration::micros(500);
 
             timeout += PERIOD;
 
@@ -67,7 +63,8 @@ async fn main(_spawner: Spawner) {
                     .unwrap()
             };
 
-            let mut high_precision_timer = timer.start_high_precision_timer(Some(timeout)).unwrap();
+            let mut high_precision_timer =
+                timer.start_high_precision_timer(timeout.into()).unwrap();
             high_precision_timer
                 .schedule_timed_signal(TimedSignal::new(timeout, HardwareSignal::GpioToggle))
                 .unwrap();
