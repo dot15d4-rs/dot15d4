@@ -21,7 +21,7 @@ fn const_config(out_dir: &Path) {
         ("MAC_MAX_FRAME_RETRIES", ("u8", "3")),
         (
             "MAC_PAN_ID",
-            ("PanId<[u8; 2]>", "PanId::new_owned([0xed, 0xfe])"),
+            ("PanId<[u8; 2]>", "PanId::new_owned([0xef, 0xbe])"),
         ),
         ("MAC_IMPLICIT_BROADCAST", ("bool", "false")),
     ]);

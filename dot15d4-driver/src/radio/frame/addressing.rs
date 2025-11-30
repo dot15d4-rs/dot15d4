@@ -891,7 +891,8 @@ impl AddressingRepr {
     /// Pan ID compression
     pub const fn pan_id_compression(&self) -> bool {
         match self.pan_id_compression {
-            PanIdCompressionRepr::Yes | PanIdCompressionRepr::No => true,
+            PanIdCompressionRepr::Yes => true,
+            PanIdCompressionRepr::No => false,
             PanIdCompressionRepr::Legacy => match (self.dst, self.src) {
                 (AddressingMode::Short, AddressingMode::Short)
                 | (AddressingMode::Short, AddressingMode::Extended)
