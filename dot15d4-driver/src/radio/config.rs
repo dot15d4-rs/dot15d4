@@ -1,6 +1,6 @@
 /// IEEE 802.15.4 channels
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Eq)]
 pub enum Channel {
     /// 2_405 MHz
     _11,

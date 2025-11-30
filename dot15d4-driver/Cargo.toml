@@ -11,6 +11,7 @@ fugit = "0.3"
 portable-atomic = "1"
 static_cell = "2"
 paste = { version = "1", optional = true }
+const_for = "0.1"
 
 cortex-m = { version = "0.7", features = [
     "critical-section-single-core",
