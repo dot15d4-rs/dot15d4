@@ -159,3 +159,79 @@ pub fn find_mlme_content_range(buf: &[u8]) -> Option<(usize, usize)> {
 
     None
 }
+#[cfg(test)]
+mod tests {
+    use crate::radio::frame::header::{header_ie_id, HeaderIeHeader};
+    use crate::radio::frame::payload::{payload_ie_id, PayloadIeHeader};
+
+    #[test]
+    fn test_payload_ie_header_new_valid() {
+        let mut buf = [0u8; 2];
+        {
+            let mut header = PayloadIeHeader::new_unchecked(&mut buf);
+            header.init(payload_ie_id::MLME, 10);
+        }
+
+        let header = PayloadIeHeader::new(&buf).unwrap();
+        assert_eq!(header.ie_type(), 1);
+        assert_eq!(header.group_id(), payload_ie_id::MLME);
+        assert_eq!(header.length(), 10);
+        assert_eq!(header.total_length(), 12);
+    }
+
+    #[test]
+    fn test_payload_ie_header_new_too_short() {
+        let buf = [0u8; 1];
+        assert!(PayloadIeHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_payload_ie_header_new_invalid_type() {
+        // Create Header IE (type=0) and try to parse as Payload IE
+        let mut buf = [0u8; 2];
+        {
+            let mut header = HeaderIeHeader::new_unchecked(&mut buf);
+            header.init(header_ie_id::TIME_CORRECTION, 2);
+        }
+        assert!(PayloadIeHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_payload_ie_header_length_max() {
+        let mut buf = [0u8; 2];
+        let mut header = PayloadIeHeader::new_unchecked(&mut buf);
+
+        // Maximum length is 2047 (11 bits)
+        header.set_length(2047);
+        assert_eq!(header.length(), 2047);
+
+        header.set_length(0);
+        assert_eq!(header.length(), 0);
+    }
+
+    #[test]
+    fn test_payload_ie_header_group_ids() {
+        let mut buf = [0u8; 2];
+        let mut header = PayloadIeHeader::new_unchecked(&mut buf);
+
+        header.init(payload_ie_id::ESDU, 0);
+        assert_eq!(header.group_id(), payload_ie_id::ESDU);
+        assert!(!header.is_mlme());
+        assert!(!header.is_termination());
+
+        header.init(payload_ie_id::MLME, 0);
+        assert_eq!(header.group_id(), payload_ie_id::MLME);
+        assert!(header.is_mlme());
+        assert!(!header.is_termination());
+
+        header.init(payload_ie_id::VENDOR_SPECIFIC, 0);
+        assert_eq!(header.group_id(), payload_ie_id::VENDOR_SPECIFIC);
+        assert!(!header.is_mlme());
+        assert!(!header.is_termination());
+
+        header.init(payload_ie_id::TERMINATION, 0);
+        assert_eq!(header.group_id(), payload_ie_id::TERMINATION);
+        assert!(!header.is_mlme());
+        assert!(header.is_termination());
+    }
+}
