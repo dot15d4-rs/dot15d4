@@ -1104,4 +1104,358 @@ pub fn find_nested_ie_content_mut(ies_buf: &mut [u8], sub_id: u8) -> Option<&mut
 
     Some(&mut ies_buf[content_start..content_end])
 }
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_link_descriptor() {
+        let mut buf = [0u8; 5];
+        {
+            let mut link = LinkDescriptor::new_unchecked(&mut buf);
+            link.set_timeslot(10);
+            link.set_channel_offset(3);
+            link.set_options(link_options::TX | link_options::SHARED);
+        }
+
+        let link = LinkDescriptor::new(&buf).unwrap();
+        assert_eq!(link.timeslot(), 10);
+        assert_eq!(link.channel_offset(), 3);
+        assert!(link.is_tx());
+        assert!(!link.is_rx());
+        assert!(link.is_shared());
+    }
+
+    #[test]
+    fn test_nested_ie_short_header_new_valid() {
+        let mut buf = [0u8; 2];
+        {
+            let mut header = NestedIeShortHeader::new_unchecked(&mut buf);
+            header.init(nested_ie_id::TSCH_SYNC, 6);
+        }
+
+        let header = NestedIeShortHeader::new(&buf).unwrap();
+        assert_eq!(header.ie_type(), 0);
+        assert_eq!(header.sub_id(), nested_ie_id::TSCH_SYNC);
+        assert_eq!(header.length(), 6);
+        assert_eq!(header.total_length(), 8);
+    }
+
+    #[test]
+    fn test_nested_ie_short_header_too_short() {
+        let buf = [0u8; 1];
+        assert!(NestedIeShortHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_nested_ie_short_header_wrong_type() {
+        // Create a long format header (type=1)
+        let mut buf = [0u8; 2];
+        buf[1] = 0x80; // Set type bit to 1
+        assert!(NestedIeShortHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_nested_ie_short_header_length_max() {
+        let mut buf = [0u8; 2];
+        let mut header = NestedIeShortHeader::new_unchecked(&mut buf);
+
+        // Maximum length is 255 (8 bits)
+        header.set_length(255);
+        assert_eq!(header.length(), 255);
+    }
+
+    // =========================================================================
+    // NestedIeLongHeader Tests
+    // =========================================================================
+
+    #[test]
+    fn test_nested_ie_long_header_new_valid() {
+        let mut buf = [0u8; 2];
+        {
+            let mut header = NestedIeLongHeader::new_unchecked(&mut buf);
+            header.init(nested_ie_id::CHANNEL_HOPPING, 20);
+        }
+
+        let header = NestedIeLongHeader::new(&buf).unwrap();
+        assert_eq!(header.ie_type(), 1);
+        assert_eq!(header.sub_id(), nested_ie_id::CHANNEL_HOPPING);
+        assert_eq!(header.length(), 20);
+        assert_eq!(header.total_length(), 22);
+    }
+
+    #[test]
+    fn test_nested_ie_long_header_too_short() {
+        let buf = [0u8; 1];
+        assert!(NestedIeLongHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_nested_ie_long_header_wrong_type() {
+        // Create a short format header (type=0)
+        let buf = [0u8; 2];
+        assert!(NestedIeLongHeader::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_nested_ie_long_header_length_max() {
+        let mut buf = [0u8; 2];
+        let mut header = NestedIeLongHeader::new_unchecked(&mut buf);
+
+        // Maximum length is 2047 (11 bits)
+        header.init(0, 2047);
+        assert_eq!(header.length(), 2047);
+    }
+
+    #[test]
+    fn test_tsch_sync_ie_new_valid() {
+        let buf = [0u8; 6];
+        let ie = TschSyncIe::new(&buf).unwrap();
+        assert_eq!(ie.asn(), 0);
+        assert_eq!(ie.join_metric(), 0);
+    }
+
+    #[test]
+    fn test_tsch_sync_ie_new_too_short() {
+        let buf = [0u8; 5];
+        assert!(TschSyncIe::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_tsch_sync_ie() {
+        let mut buf = [0u8; 6];
+        let mut ie = TschSyncIe::new_unchecked(&mut buf);
+
+        ie.set_asn(0x1234567890);
+        ie.set_join_metric(42);
+
+        assert_eq!(ie.asn(), 0x1234567890);
+        assert_eq!(ie.join_metric(), 42);
+    }
+
+    #[test]
+    fn test_tsch_timeslot_ie_reduced() {
+        let mut buf = [0u8; 1];
+        let mut ie = TschTimeslotIe::new_unchecked(&mut buf);
+
+        ie.set_timeslot_id(5);
+        assert!(ie.is_reduced());
+        assert_eq!(ie.timeslot_id(), 5);
+
+        // Optional fields should be None
+        assert!(ie.cca_offset().is_none());
+        assert!(ie.cca().is_none());
+        assert!(ie.tx_offset().is_none());
+    }
+
+    #[test]
+    fn test_tsch_timeslot_ie_full() {
+        let mut buf = [0u8; 25];
+        let mut ie = TschTimeslotIe::new_unchecked(&mut buf);
+
+        ie.set_timeslot_id(1);
+        ie.set_cca_offset(1800);
+        ie.set_cca(128);
+        ie.set_tx_offset(2120);
+        ie.set_rx_offset(1020);
+        ie.set_rx_ack_delay(800);
+        ie.set_tx_ack_delay(1000);
+        ie.set_rx_wait(2200);
+        ie.set_ack_wait(400);
+        ie.set_rx_tx(192);
+        ie.set_max_ack(2400);
+        ie.set_max_tx(4256);
+        ie.set_timeslot_length(10000);
+
+        assert!(!ie.is_reduced());
+        assert_eq!(ie.timeslot_id(), 1);
+        assert_eq!(ie.cca_offset(), Some(1800));
+        assert_eq!(ie.cca(), Some(128));
+        assert_eq!(ie.tx_offset(), Some(2120));
+        assert_eq!(ie.rx_offset(), Some(1020));
+        assert_eq!(ie.rx_ack_delay(), Some(800));
+        assert_eq!(ie.tx_ack_delay(), Some(1000));
+        assert_eq!(ie.rx_wait(), Some(2200));
+        assert_eq!(ie.ack_wait(), Some(400));
+        assert_eq!(ie.rx_tx(), Some(192));
+        assert_eq!(ie.max_ack(), Some(2400));
+        assert_eq!(ie.max_tx(), Some(4256));
+        assert_eq!(ie.timeslot_length(), Some(10000));
+    }
+
+    #[test]
+    fn test_tsch_timeslot_ie_new_empty() {
+        let buf: [u8; 0] = [];
+        assert!(TschTimeslotIe::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_link_descriptor_new_valid() {
+        let buf = [0u8; 5];
+        let link = LinkDescriptor::new(&buf).unwrap();
+        assert_eq!(link.timeslot(), 0);
+        assert_eq!(link.channel_offset(), 0);
+        assert_eq!(link.options(), 0);
+    }
+
+    #[test]
+    fn test_link_descriptor_new_too_short() {
+        let buf = [0u8; 4];
+        assert!(LinkDescriptor::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_link_descriptor_fields() {
+        let mut buf = [0u8; 5];
+        let mut link = LinkDescriptor::new_unchecked(&mut buf);
+
+        link.set_timeslot(100);
+        link.set_channel_offset(5);
+        link.set_options(link_options::TX | link_options::SHARED);
+
+        assert_eq!(link.timeslot(), 100);
+        assert_eq!(link.channel_offset(), 5);
+        assert!(link.is_tx());
+        assert!(!link.is_rx());
+        assert!(link.is_shared());
+        assert!(!link.is_timekeeping());
+        assert!(!link.is_priority());
+    }
+
+    #[test]
+    fn test_link_descriptor_all_options() {
+        let mut buf = [0u8; 5];
+        let mut link = LinkDescriptor::new_unchecked(&mut buf);
+
+        link.set_options(
+            link_options::TX
+                | link_options::RX
+                | link_options::SHARED
+                | link_options::TIMEKEEPING
+                | link_options::PRIORITY,
+        );
+
+        assert!(link.is_tx());
+        assert!(link.is_rx());
+        assert!(link.is_shared());
+        assert!(link.is_timekeeping());
+        assert!(link.is_priority());
+    }
+
+    #[test]
+    fn test_slotframe_descriptor_new_valid() {
+        let buf = [0u8; 4];
+        let sf = SlotframeDescriptor::new(&buf).unwrap();
+        assert_eq!(sf.handle(), 0);
+        assert_eq!(sf.size(), 0);
+        assert_eq!(sf.num_links(), 0);
+    }
+
+    #[test]
+    fn test_slotframe_descriptor_new_too_short() {
+        let buf = [0u8; 3];
+        assert!(SlotframeDescriptor::new(&buf).is_none());
+    }
+
+    #[test]
+    fn test_slotframe_descriptor_fields() {
+        let mut buf = [0u8; 4];
+        let mut sf = SlotframeDescriptor::new_unchecked(&mut buf);
+
+        sf.set_handle(1);
+        sf.set_size(101);
+        sf.set_num_links(3);
+
+        assert_eq!(sf.handle(), 1);
+        assert_eq!(sf.size(), 101);
+        assert_eq!(sf.num_links(), 3);
+        assert_eq!(sf.total_length(), 4 + 3 * 5); // header + 3 links
+    }
+
+    #[test]
+    fn test_slotframe_descriptor_with_links() {
+        // Slotframe header (4) + 2 links (10)
+        let mut buf = [0u8; 14];
+
+        {
+            let mut sf = SlotframeDescriptor::new_unchecked(&mut buf[..]);
+            sf.set_handle(0);
+            sf.set_size(101);
+            sf.set_num_links(2);
+
+            // Link 1
+            let mut links = sf.links_mut();
+            let mut link1 = links.next().unwrap();
+            link1.set_timeslot(0);
+            link1.set_channel_offset(0);
+            link1.set_options(link_options::TX | link_options::RX);
+
+            // Link 2
+            let mut link2 = links.next().unwrap();
+            link2.set_timeslot(50);
+            link2.set_channel_offset(1);
+            link2.set_options(link_options::TX);
+        }
+
+        // Read back
+        let sf = SlotframeDescriptor::new(&buf).unwrap();
+        assert_eq!(sf.num_links(), 2);
+
+        let mut links = sf.links();
+
+        let link1 = links.next().unwrap();
+        assert_eq!(link1.timeslot(), 0);
+        assert_eq!(link1.channel_offset(), 0);
+        assert!(link1.is_tx());
+        assert!(link1.is_rx());
+
+        let link2 = links.next().unwrap();
+        assert_eq!(link2.timeslot(), 50);
+        assert_eq!(link2.channel_offset(), 1);
+        assert!(link2.is_tx());
+        assert!(!link2.is_rx());
+
+        assert!(links.next().is_none());
+    }
+
+    // #[test]
+    // fn test_tsch_slotframe_link_ie_single_slotframe() {
+    //     // 1 byte count + slotframe header (4) + 1 link (5)
+    //     let mut buf = [0u8; 10];
+
+    //     {
+    //         let mut ie = TschSlotframeLinkIe::new_unchecked(&mut buf[..]);
+    //         ie.set_num_slotframes(1);
+
+    //         let mut slotframes = ie.slotframes_mut();
+    //         let mut sf = slotframes.next().unwrap();
+    //         sf.set_handle(0);
+    //         sf.set_size(101);
+    //         sf.set_num_links(1);
+
+    //         let mut links = sf.links_mut();
+    //         let mut link = links.next().unwrap();
+    //         link.set_timeslot(10);
+    //         link.set_channel_offset(2);
+    //         link.set_options(link_options::TX | link_options::SHARED);
+    //     }
+
+    //     let ie = TschSlotframeLinkIe::new(&buf).unwrap();
+    //     assert_eq!(ie.num_slotframes(), 1);
+
+    //     let mut slotframes = ie.slotframes();
+    //     let sf = slotframes.next().unwrap();
+    //     assert_eq!(sf.handle(), 0);
+    //     assert_eq!(sf.size(), 101);
+    //     assert_eq!(sf.num_links(), 1);
+
+    //     let mut links = sf.links();
+    //     let link = links.next().unwrap();
+    //     assert_eq!(link.timeslot(), 10);
+    //     assert_eq!(link.channel_offset(), 2);
+    //     assert!(link.is_tx());
+    //     assert!(link.is_shared());
+    // }
+}
 
