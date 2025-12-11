@@ -659,4 +659,76 @@ impl IeListRepr<'_> {
         Ok(ies_and_frame_payload_len)
     }
 }
+#[cfg(test)]
+mod tests {
+    use crate::radio::frame::ies::nested::{link_options, LinkDescriptor};
+
+    use super::*;
+
+    #[test]
+    fn test_ie_fields_iteration() {
+        // Build a frame with Time Correction + HT1 + MLME(TSCH Sync)
+        let frame = [
+            // Header IE: Time Correction (id=0x1e, len=2)
+            0x02, 0x0F, 0x64, 0x00, // Header IE: HT1 (id=0x7e, len=0)
+            0x00, 0x3F, // Payload IE: MLME (group=1, len=8)
+            0x08, 0x88, // Nested IE: TSCH Sync (short, id=0x1a, len=6)
+            0x06, 0x1A, 0x05, 0x04, 0x03, 0x02, 0x01, 0x07,
+        ];
+
+        let ie_fields = IesFields::new(&frame[..]);
+
+        // Test header IE iteration
+        let mut count = 0;
+        for ie in ie_fields.header_ies() {
+            count += 1;
+            if ie.is_termination() {
+                break;
+            }
+        }
+        assert_eq!(count, 2); // Time Correction + HT1
+
+        // Test direct accessors
+        let tc = ie_fields.time_correction().unwrap();
+        assert_eq!(tc.time_sync(), 100);
+
+        let sync = ie_fields.tsch_sync().unwrap();
+        assert_eq!(sync.asn(), 0x0102030405);
+        assert_eq!(sync.join_metric(), 7);
+    }
+
+    #[test]
+    fn test_init_ie_headers() {
+        let mut buf = [0u8; 64];
+
+        let ies = [
+            IeRepr::TimeCorrectionHeaderIe,
+            IeRepr::TschSynchronizationNestedIe,
+        ];
+
+        let written = init_ie_headers(&mut buf, &ies, false);
+
+        // Should have: TimeCorrectionHeader(2) + content(2) + HT1(2) + MLME header(2) + TschSyncHeader(2) + content(6)
+        assert_eq!(written, 4 + 2 + 2 + 2 + 6);
+
+        // Verify Time Correction header
+        let tc_header = HeaderIeHeader::new(&buf[0..2]).unwrap();
+        assert_eq!(tc_header.element_id(), header_ie_id::TIME_CORRECTION);
+        assert_eq!(tc_header.length(), 2);
+
+        // Verify HT1
+        let ht1_header = HeaderIeHeader::new(&buf[4..6]).unwrap();
+        assert_eq!(ht1_header.element_id(), header_ie_id::HT1);
+
+        // Verify MLME
+        let mlme_header = PayloadIeHeader::new(&buf[6..8]).unwrap();
+        assert_eq!(mlme_header.group_id(), payload_ie_id::MLME);
+        assert_eq!(mlme_header.length(), 8); // nested header(2) + content(6)
+
+        // Verify TSCH Sync nested header
+        let sync_header = NestedIeShortHeader::new(&buf[8..10]).unwrap();
+        assert_eq!(sync_header.sub_id(), nested_ie_id::TSCH_SYNC);
+        assert_eq!(sync_header.length(), 6);
+    }
+}
 
