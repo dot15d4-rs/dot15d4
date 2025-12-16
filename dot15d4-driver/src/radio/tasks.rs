@@ -558,6 +558,7 @@ pub trait OffState<RadioDriverImpl: DriverConfig>:
         self,
         rx_task: TaskRx,
         start: OptionalNsInstant,
+        channel: Option<Channel>,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskOff, TaskRx>;
 
     /// Schedules a transition to the tx state.
@@ -568,6 +569,7 @@ pub trait OffState<RadioDriverImpl: DriverConfig>:
         self,
         tx_task: TaskTx,
         at: OptionalNsInstant,
+        channel: Option<Channel>,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskOff, TaskTx>;
 }
 

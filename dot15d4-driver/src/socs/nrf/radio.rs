@@ -395,7 +395,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
 
         driver.set_sfd(OQpsk250KBit::DEFAULT_SFD);
         driver.set_tx_power(0);
-        driver.set_channel(Channel::_11);
+        driver.set_channel(Channel::_12);
         driver.set_cca(CcaMode::CarrierSense);
 
         driver
@@ -593,6 +593,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         self,
         rx_task: TaskRx,
         start: OptionalNsInstant,
+        channel: Option<Channel>,
     ) -> impl ExternalRadioTransition<NrfRadioDriver, TaskOff, TaskRx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_RX_SCHEDULE);
@@ -601,6 +602,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             driver: RadioDriver<NrfRadioDriver, TaskOff>,
             rx_task: TaskRx,
             start: OptionalNsInstant,
+            channel: Option<Channel>,
         }
 
         impl RadioTransition<NrfRadioDriver, TaskOff, TaskRx> for Transition {
@@ -622,6 +624,13 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
                 let r = radio();
+
+                if let Some(channel) = self.channel {
+                    let channel: u8 = channel.into();
+                    let frequency_offset = (channel - 10) * 5;
+                    r.frequency
+                        .write(|w| w.frequency().variant(frequency_offset).map().default());
+                }
 
                 // Ramp up the receiver and start frame reception immediately.
                 let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
@@ -662,6 +671,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             driver: self,
             rx_task,
             start,
+            channel,
         }
     }
 
@@ -669,6 +679,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
         self,
         tx_task: TaskTx,
         at: OptionalNsInstant,
+        channel: Option<Channel>,
     ) -> impl ExternalRadioTransition<NrfRadioDriver, TaskOff, TaskTx> {
         #[cfg(feature = "rtos-trace")]
         rtos_trace::trace::task_exec_begin(TASK_TX_SCHEDULE);
@@ -677,6 +688,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             driver: RadioDriver<NrfRadioDriver, TaskOff>,
             tx_task: TaskTx,
             at: OptionalNsInstant,
+            channel: Option<Channel>,
         }
 
         impl RadioTransition<NrfRadioDriver, TaskOff, TaskTx> for Transition {
@@ -697,6 +709,13 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 timer.observe_event(HardwareEvent::RadioFrameStarted)?;
 
                 let r = radio();
+
+                if let Some(channel) = self.channel {
+                    let channel: u8 = channel.into();
+                    let frequency_offset = (channel - 10) * 5;
+                    r.frequency
+                        .write(|w| w.frequency().variant(frequency_offset).map().default());
+                }
 
                 let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
@@ -751,6 +770,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             driver: self,
             tx_task,
             at,
+            channel,
         }
     }
 }

@@ -1388,7 +1388,7 @@ impl State {
     fn timer_try_start_at_rtc_tick(&self, rtc_tick: u64) -> Result<(), ()> {
         // Safety: We're exclusively called from scheduling context which
         //         currently owns the high-precision timer alarm channel, see
-        //         the check in program_rtc_cc() which must be called _after_.
+        //         the check in rtc_program_cc() which must be called _after_.
         unsafe { self.set_timer_epoch(rtc_tick) };
         let rtc_now_tick = self.rtc_program_cc(rtc_tick, AlarmChannel::HighPrecisionTimer)?;
 
