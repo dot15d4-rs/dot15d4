@@ -37,6 +37,11 @@ pub trait MpduParsedUpToSecurity {}
 impl MpduParsedUpToSecurity for MpduWithSecurity {}
 impl MpduParsedUpToSecurity for MpduWithAllFields {}
 
+/// A marker trait that subsumes all MPDU states that provide access to
+/// Information Elements fields.
+pub trait MpduParsedUpToIes {}
+impl MpduParsedUpToIes for MpduWithAllFields {}
+
 #[cfg(test)]
 mod test {
     use core::{marker::PhantomData, num::NonZeroU16};
@@ -44,8 +49,9 @@ mod test {
     use dot15d4_driver::{
         radio::{
             frame::{
-                AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
-                RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
+                Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
+                IeListRepr, IeRepr, IeReprList, PanId, PanIdCompressionRepr, RadioFrameRepr,
+                RadioFrameSized, RadioFrameUnsized,
             },
             phy::{OQpsk250KBit, Phy},
             DriverConfig, FcsTwoBytes,
@@ -58,8 +64,6 @@ mod test {
     use dot15d4_util::allocator::{BufferToken, IntoBuffer};
     use static_cell::ConstStaticCell;
 
-    #[cfg(feature = "ies")]
-    use crate::repr::{IeListRepr, IeRepr, IeReprList};
     #[cfg(feature = "security")]
     use crate::repr::{KeyIdRepr, SecurityLevelRepr, SecurityRepr};
     use crate::{
@@ -225,6 +229,71 @@ mod test {
 
         unsafe {
             parsed_mpdu.into_buffer().consume();
+        }
+    }
+    #[test]
+    fn test_tsch() {
+        const MPDU_REPR: MpduRepr<'_, MpduWithIes> = const {
+            let mpdu_repr = MpduRepr::new();
+
+            let mpdu_repr =
+                mpdu_repr
+                    .with_frame_control(SeqNrRepr::No)
+                    .with_addressing(AddressingRepr::new(
+                        AddressingMode::Absent,
+                        AddressingMode::Extended,
+                        false,
+                        PanIdCompressionRepr::No,
+                    ));
+
+            let mpdu_repr = mpdu_repr.without_security();
+
+            {
+                static SLOTFRAMES: [u8; 3] = [2, 3, 4];
+                static IES: [IeRepr; 3] = [
+                    IeRepr::TimeCorrectionHeaderIe,
+                    IeRepr::FullTschTimeslotNestedIe,
+                    IeRepr::TschSlotframeAndLinkNestedIe(&SLOTFRAMES),
+                ];
+                static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
+                static IE_LIST: IeListRepr<'static> =
+                    IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
+                mpdu_repr.with_ies(IE_LIST)
+            }
+
+            // mpdu_repr.without_ies()
+        };
+
+        const FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameUnsized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new();
+        const MAX_BUFFER_LENGTH: usize = FRAME_REPR.max_buffer_length() as usize;
+
+        static BUFFER: ConstStaticCell<[u8; MAX_BUFFER_LENGTH]> =
+            ConstStaticCell::new([0; MAX_BUFFER_LENGTH]);
+        let buffer = BufferToken::new(BUFFER.take());
+
+        let mut mpdu_writer = MPDU_REPR
+            .into_writer::<FakeDriverConfig>(FrameVersion::Ieee802154, FrameType::Beacon, 0, buffer)
+            .unwrap();
+
+        // DEVICE_ID: FC36 5A7D AF1F D6FE (SN: ...7064)
+        const SERVER_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_owned([
+            0xfe, 0xd6, 0x1f, 0xaf, 0x7d, 0x5a, 0x36, 0xfc,
+        ]));
+        // DEVICE_ID: 74EB 0174 27E3 04D2 (SN: ...2182)
+        const CLIENT_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_owned([
+            0xD2, 0x04, 0xE3, 0x27, 0x74, 0x01, 0xEB, 0x74,
+        ]));
+        pub const MAC_PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0xBE, 0xEF]); // PAN Id
+
+        let mut addressing = mpdu_writer.addressing_fields_mut();
+        addressing.src_address_mut().set(&SERVER_MAC_ADDR);
+        addressing.src_pan_id_mut().set(&MAC_PAN_ID);
+
+        let _ies = mpdu_writer.ies_fields_mut();
+
+        unsafe {
+            mpdu_writer.into_buffer().consume();
         }
     }
 
