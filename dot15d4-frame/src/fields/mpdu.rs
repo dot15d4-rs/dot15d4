@@ -1,7 +1,9 @@
+#[cfg(feature = "ies")]
+use dot15d4_driver::radio::frame::IesFields;
 use dot15d4_driver::radio::{
     frame::{
         AddressingFields, AddressingMode, AddressingRepr, FrameControl, FrameType, FrameVersion,
-        RadioFrame, RadioFrameRepr, RadioFrameSized,
+        IeListRepr, RadioFrame, RadioFrameRepr, RadioFrameSized,
     },
     DriverConfig,
 };
@@ -12,7 +14,6 @@ use dot15d4_util::{
 };
 
 #[cfg(feature = "ies")]
-use crate::repr::IeListRepr;
 use crate::{
     mpdu::MpduFrame,
     repr::{MpduRepr, SeqNrRepr},
@@ -252,6 +253,29 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         #[cfg(not(feature = "ies"))]
         let mpdu_field_ranges =
             mpdu_field_ranges.without_ies_with_payload_length::<Config>(frame_payload_length);
+
+        #[cfg(feature = "ies")]
+        {
+            use dot15d4_driver::radio::frame::init_ie_headers;
+            // Initialize IE headers based on IeListRepr
+            if !self.ies.is_empty() {
+                let ie_range = mpdu_field_ranges
+                    .try_range_ies()
+                    .expect("IEs should be present");
+                let ie_buf = &mut mpdu.buffer[ie_range];
+                let has_frame_payload = frame_payload_length > 0;
+
+                match &self.ies {
+                    IeListRepr::Empty => {}
+                    IeListRepr::WithoutTerminationIes(ie_list) => {
+                        init_ie_headers(ie_buf, ie_list.as_slice(), has_frame_payload);
+                    }
+                    IeListRepr::WithTerminationIes(_) => {
+                        // Parsing case - termination IEs already present
+                    }
+                }
+            }
+        }
 
         Ok(MpduParser {
             mpdu_field_ranges,
@@ -535,8 +559,6 @@ impl<AnyMpdu, State: MpduParsedUpToSecurity> MpduParser<AnyMpdu, State> {
 
 /// Exposes read-only fields accessible from an MPDU once it is fully parsed.
 impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields> {
-    // TODO: Add access to IEs.
-
     pub fn try_frame_payload(&self) -> Option<&[u8]> {
         Some(&self.mpdu.as_ref().buffer[self.mpdu_field_ranges.try_range_frame_payload()?])
     }
@@ -546,10 +568,85 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields>
     }
 }
 
-/// Exposes write-only fields accessible from an MPDU once it is fully parsed.
-impl<ReadOnlyMpdu: AsMut<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields> {
-    // TODO: Add access to IEs.
+/// Exposes read-only IE field access from a fully parsed MPDU.
+#[cfg(feature = "ies")]
+impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAllFields> {
+    /// Returns the raw IE bytes slice.
+    ///
+    /// # Panics
+    /// Panics if no IEs are present in the frame.
+    #[inline]
+    pub fn ies_slice(&self) -> &[u8] {
+        let range = self
+            .mpdu_field_ranges
+            .try_range_ies()
+            .expect("No IEs present in frame");
+        &self.mpdu.as_ref().buffer[range]
+    }
 
+    /// Returns the raw IE bytes slice, or `None` if no IEs present.
+    #[inline]
+    pub fn try_ies_slice(&self) -> Option<&[u8]> {
+        let range = self.mpdu_field_ranges.try_range_ies()?;
+        Some(&self.mpdu.as_ref().buffer[range])
+    }
+
+    /// Returns an `IesFields` accessor for structured IE access.
+    #[inline]
+    pub fn ies_fields(&self) -> IesFields<&[u8]> {
+        IesFields::new(self.ies_slice())
+    }
+
+    /// Returns an `IeFields` accessor, or `None` if no IEs present.
+    #[inline]
+    pub fn try_ies_fields(&self) -> Option<IesFields<&[u8]>> {
+        self.try_ies_slice().map(IesFields::new)
+    }
+}
+
+/// Exposes mutable IE field access from a fully parsed MPDU.
+#[cfg(feature = "ies")]
+impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>>
+    MpduParser<ReadWriteMpdu, MpduWithAllFields>
+{
+    /// Returns mutable IE bytes slice.
+    ///
+    /// # Panics
+    /// Panics if no IEs are present in the frame.
+    #[inline]
+    pub fn ies_slice_mut(&mut self) -> &mut [u8] {
+        let range = self
+            .mpdu_field_ranges
+            .try_range_ies()
+            .expect("No IEs present in frame");
+        &mut self.mpdu.as_mut().buffer[range]
+    }
+
+    /// Returns mutable IE bytes slice, or `None` if no IEs present.
+    #[inline]
+    pub fn try_ies_slice_mut(&mut self) -> Option<&mut [u8]> {
+        let range = self.mpdu_field_ranges.try_range_ies()?;
+        Some(&mut self.mpdu.as_mut().buffer[range])
+    }
+
+    /// Returns a mutable `IeFields` accessor.
+    ///
+    /// # Panics
+    /// Panics if no IEs are present in the frame.
+    #[inline]
+    pub fn ies_fields_mut(&mut self) -> IesFields<&mut [u8]> {
+        IesFields::new(self.ies_slice_mut())
+    }
+
+    /// Returns a mutable `IeFields` accessor, or `None` if no IEs present.
+    #[inline]
+    pub fn try_ies_fields_mut(&mut self) -> Option<IesFields<&mut [u8]>> {
+        self.try_ies_slice_mut().map(IesFields::new)
+    }
+}
+
+/// Exposes write-only fields accessible from an MPDU once it is fully parsed.
+impl<WriteOnlyMpdu: AsMut<MpduFrame>> MpduParser<WriteOnlyMpdu, MpduWithAllFields> {
     pub fn try_frame_payload_mut(&mut self) -> Option<&mut [u8]> {
         Some(&mut self.mpdu.as_mut().buffer[self.mpdu_field_ranges.try_range_frame_payload()?])
     }
