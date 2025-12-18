@@ -30,7 +30,8 @@ pub struct TschTimeslotTimings {
     /// microseconds.
     tx_offset: u16,
     /// Maximum transmission time for a frame in microseconds.
-    max_tx: u32,
+    // TODO: SUPPORT 3-bytes value
+    max_tx: u16,
     /// Wait time between the end of the TX and the start of the ACK RX in
     /// microseconds.
     rx_ack_delay: u16,
@@ -49,7 +50,7 @@ pub struct TschTimeslotTimings {
     max_ack: u16,
 
     /// Length of the timeslot in microseconds.
-    timeslot_length: u32,
+    timeslot_length: u16,
 }
 
 impl Default for TschTimeslotTimings {
@@ -187,22 +188,23 @@ impl TschTimeslotTimings {
     }
 
     /// Return the maximum TX in microseconds.
-    pub const fn max_tx(&self) -> u32 {
+    pub const fn max_tx(&self) -> u16 {
         self.max_tx
     }
 
     /// Set the maximum TX in microseconds.
-    pub fn set_max_tx(&mut self, max_tx: u32) {
+    //TODO: support 3-byte value
+    pub fn set_max_tx(&mut self, max_tx: u16) {
         self.max_tx = max_tx;
     }
 
     /// Return the timeslot length in microseconds.
-    pub const fn timeslot_length(&self) -> u32 {
+    pub const fn timeslot_length(&self) -> u16 {
         self.timeslot_length
     }
 
     /// Set the timeslot length in microseconds.
-    pub fn set_timeslot_length(&mut self, timeslot_length: u32) {
+    pub fn set_timeslot_length(&mut self, timeslot_length: u16) {
         self.timeslot_length = timeslot_length;
     }
 }

@@ -14,7 +14,6 @@ dot15d4-util = { version = "0.0.1", path = "../dot15d4-util" }
 dot15d4-driver = { version = "0.0.1", path = "../dot15d4-driver" }
 
 bitflags = "2"
-const_for = "0.1"
 
 [dev-dependencies]
 static_cell = "2.1"
