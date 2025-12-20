@@ -18,7 +18,6 @@ mod mpdu;
 mod security;
 mod seq_nr;
 
-pub use ies::*;
 pub use mpdu::*;
 pub use security::*;
 pub use seq_nr::*;

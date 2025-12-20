@@ -1,6 +1,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 pub mod driver;
 pub mod mac;
+pub mod pib;
+pub mod scheduler;
 
 pub use dot15d4_util as util;
 
@@ -13,9 +15,10 @@ use self::{
             },
             DriverConfig, RadioDriver,
         },
-        DriverRequestChannel, DriverService,
+        DriverEventChannel, DriverRequestChannel, DriverService,
     },
     mac::{MacBufferAllocator, MacIndicationSender, MacRequestReceiver, MacService},
+    scheduler::{SchedulerRequestChannel, SchedulerService},
     util::sync::{select, Either},
 };
 
@@ -45,23 +48,44 @@ where
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
 
-        let driver_service_channel = DriverRequestChannel::new();
+        let driver_request_channel = DriverRequestChannel::new();
+        let driver_response_channel = DriverEventChannel::new();
+        let scheduler_service_channel = SchedulerRequestChannel::new();
+
         let driver_service = DriverService::new(
             self.radio,
-            driver_service_channel.receiver(),
+            driver_request_channel.receiver(),
+            driver_response_channel.sender(),
             buffer_allocator,
         );
+
+        let mut scheduler_service = SchedulerService::<'_, RadioDriverImpl>::new(
+            timer,
+            scheduler_service_channel.receiver(),
+            driver_request_channel.sender(),
+            driver_response_channel.receiver(),
+            buffer_allocator,
+        );
+
         let mut mac_service = MacService::<'_, RadioDriverImpl>::new(
             timer,
             buffer_allocator,
             request_receiver,
             indication_sender,
-            driver_service_channel.sender(),
+            scheduler_service_channel.sender(),
         );
 
-        match select::select(mac_service.run(), driver_service.run()).await {
-            Either::First(_) => panic!("MAC service terminated"),
-            Either::Second(_) => panic!("Driver service terminated"),
+        match select::select(
+            select::select(mac_service.run(), driver_service.run()),
+            scheduler_service.run(),
+        )
+        .await
+        {
+            Either::First(either) => match either {
+                Either::First(_) => panic!("MAC service terminated"),
+                Either::Second(_) => panic!("Driver service terminated"),
+            },
+            Either::Second(_) => panic!("Scheduler service terminated"),
         }
     }
 }
