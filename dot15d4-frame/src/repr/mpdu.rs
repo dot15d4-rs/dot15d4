@@ -1,13 +1,11 @@
 use core::{marker::PhantomData, num::NonZero};
 
 use dot15d4_driver::radio::{
-    frame::{AddressingRepr, RadioFrameRepr, RadioFrameSized},
+    frame::{AddressingRepr, IeListRepr, RadioFrameRepr, RadioFrameSized},
     DriverConfig,
 };
 use dot15d4_util::{Error, Result};
 
-#[cfg(feature = "ies")]
-use crate::repr::ies::IeListRepr;
 #[cfg(feature = "security")]
 use crate::repr::security::SecurityRepr;
 use crate::{

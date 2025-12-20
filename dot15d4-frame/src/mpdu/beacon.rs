@@ -1,15 +1,19 @@
+#[cfg(feature = "ies")]
+use dot15d4_driver::radio::frame::IeListRepr;
 use dot15d4_driver::radio::{
-    frame::{AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr},
+    frame::{
+        AddressingMode, AddressingRepr, FrameType, FrameVersion, IeRepr, IeReprList,
+        PanIdCompressionRepr,
+    },
     DriverConfig,
 };
 use dot15d4_util::{allocator::BufferAllocator, Error, Result};
 
 #[cfg(feature = "ies")]
-use crate::repr::IeListRepr;
 use crate::{
     fields::MpduParser,
     mpdu::MpduFrame,
-    repr::{mpdu_repr, IeRepr, IeReprList, MpduRepr, SeqNrRepr},
+    repr::{mpdu_repr, MpduRepr, SeqNrRepr},
     MpduWithAllFields, MpduWithSecurity,
 };
 
