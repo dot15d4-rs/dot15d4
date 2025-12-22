@@ -1,21 +1,37 @@
+use dot15d4_driver::timer::NsInstant;
+
 use crate::util::sync::HasAddress;
 
+use super::mlme::tsch::{setlink::SetLinkRequest, setslotframe::SetSlotframeRequest};
 pub use super::{
     mcps::data::{DataIndication, DataRequest},
     mlme::{
         beacon::{BeaconNotifyIndication, BeaconRequest},
         set::SetRequestAttribute,
+        tsch::mode::TschModeRequest,
     },
 };
 
+// TODO: update doc, protocol version and sections numbering
 /// Enum representing all (currently) supported MAC services request primitives
 pub enum MacRequest {
+    /// IEEE 802.15.4-2024, section 10.3.10.7
+    MlmeTschMode(TschModeRequest),
+    /// IEEE 802.15.4-2024, section 10.3.10.2
+    MlmeSetSlotframe(SetSlotframeRequest),
+    /// IEEE 802.15.4-2024, section 10.3.10.4
+    MlmeSetLink(SetLinkRequest),
     /// IEEE 802.15.4-2020, section 8.2.6.4
-    MlmeSetRequest(SetRequestAttribute),
+    MlmeSet(SetRequestAttribute),
     /// IEEE 802.15.4-2020, section 8.2.18.1
-    MlmeBeaconRequest(BeaconRequest),
+    MlmeBeacon(BeaconRequest),
     /// IEEE 802.15.4-2020, section 8.3.2
-    McpsDataRequest(DataRequest),
+    McpsData(DataRequest),
+}
+
+// FIXME: temporary solution. Should mirror MacRequest
+pub struct MacConfirm {
+    pub timestamp: Option<NsInstant>,
 }
 
 /// Fake implementation to satisfy the generic channel.

@@ -1,11 +1,10 @@
 mod mcps;
-mod mlme;
-mod neighbors;
-mod pib;
+pub mod mlme;
+pub mod neighbors;
 pub mod primitives;
 mod task;
-mod tsch;
 
+use dot15d4_driver::timer::NsInstant;
 pub use dot15d4_frame as frame;
 
 use core::cell::RefCell;
@@ -13,15 +12,14 @@ use core::cell::RefCell;
 use paste::paste;
 
 use crate::{
-    driver::{
-        radio::{
-            frame::FrameType,
-            phy::{OQpsk250KBit, Phy, PhyConfig},
-            DriverConfig, MAX_DRIVER_OVERHEAD,
-        },
-        DriverRequestSender, DRIVER_CHANNEL_CAPACITY,
+    driver::radio::{
+        frame::FrameType,
+        phy::{OQpsk250KBit, Phy, PhyConfig},
+        DriverConfig, MAX_DRIVER_OVERHEAD,
     },
-    mac::mcps::data::DataRequestResult,
+    mac::mcps::data::DataConfirm,
+    pib::Pib,
+    scheduler::{SchedulerRequestSender, SCHEDULER_CHANNEL_CAPACITY},
     util::{
         allocator::{BufferAllocator, IntoBuffer},
         sync::{
@@ -34,8 +32,11 @@ use crate::{
 use self::{
     frame::mpdu::MpduFrame,
     mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    pib::Pib,
-    primitives::{MacIndication, MacRequest},
+    mlme::tsch::{
+        mode::TschModeRequestTask, setlink::SetLinkRequestTask,
+        setslotframe::SetSlotframeRequestTask,
+    },
+    primitives::{MacConfirm, MacIndication, MacRequest},
     task::*,
 };
 
@@ -47,7 +48,7 @@ const UL_MAX_RX_TOKENS: usize = 1;
 
 /// The max number of UL Tx tokens that may be handed out in parallel.
 /// Note: Each Rx token requires an accompanying Tx token to be allocated.
-const UL_MAX_TX_TOKENS: usize = 1 + UL_MAX_RX_TOKENS;
+const UL_MAX_TX_TOKENS: usize = 4;
 
 /// The number of additional messages that may be pending.
 /// Note: 1 is currently the min number supported.
@@ -60,11 +61,12 @@ const UL_MSG_BACKLOG: usize = 1;
 ///       control channels towards applications directly.
 const UL_NUM_CLIENTS: usize = 1;
 
-pub type MacRequestChannel = Channel<(), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
+pub type MacRequestChannel =
+    Channel<(), MacRequest, MacConfirm, UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
 pub type MacRequestReceiver<'channel> =
-    Receiver<'channel, (), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
+    Receiver<'channel, (), MacRequest, MacConfirm, UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
 pub type MacRequestSender<'channel> =
-    Sender<'channel, (), MacRequest, (), UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
+    Sender<'channel, (), MacRequest, MacConfirm, UL_MAX_TX_TOKENS, UL_MSG_BACKLOG, 1>;
 
 pub type MacIndicationChannel =
     Channel<(), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
@@ -73,15 +75,11 @@ pub type MacIndicationReceiver<'channel> =
 pub type MacIndicationSender<'channel> =
     Sender<'channel, (), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
 
-/// The number of MAC indication tasks that must be executing in parallel making
-/// use of the driver's pipelining capability.
-const MAC_NUM_PARALLEL_INDICATION_TASKS: usize = UL_MAX_RX_TOKENS + 1;
 const MAC_NUM_PARALLEL_REQUEST_TASKS: usize = UL_MAX_TX_TOKENS;
 const _: () = {
     assert!(
-        DRIVER_CHANNEL_CAPACITY
-            == MAC_NUM_PARALLEL_INDICATION_TASKS + MAC_NUM_PARALLEL_REQUEST_TASKS,
-        "driver channel capacity does not match number of MAC tasks"
+        SCHEDULER_CHANNEL_CAPACITY == 1 + MAC_NUM_PARALLEL_REQUEST_TASKS,
+        "scheduler channel capacity does not match number of MAC tasks"
     )
 };
 
@@ -93,11 +91,10 @@ const _: () = {
 ///
 /// Required buffers:
 /// - one buffer per max outstanding upper layer tx token (= max request tasks)
-/// - one buffer per indication task
+/// - one buffer for indication task
 /// - one pre-allocated buffer for outgoing ACKs
 /// - one pre-allocated buffer for incoming ACKs
-pub const MAC_NUM_REQUIRED_BUFFERS: usize =
-    UL_MAX_TX_TOKENS + MAC_NUM_PARALLEL_INDICATION_TASKS + 3;
+pub const MAC_NUM_REQUIRED_BUFFERS: usize = UL_MAX_TX_TOKENS + 1 + 3;
 // TODO: Make this generic over the radio driver configuration.
 pub const MAC_BUFFER_SIZE: usize =
     <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize + MAX_DRIVER_OVERHEAD;
@@ -136,10 +133,10 @@ macro_rules! mac_svc_tasks {
             impl<'task, RadioDriverImpl: DriverConfig> From<MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>> for MacTaskTransition<MacSvcTask<'task, RadioDriverImpl>> {
                 fn from(value: MacTaskTransition<[<$mac_task Task>]<'task, RadioDriverImpl>>) -> Self {
                     match value {
-                        MacTaskTransition::DrvSvcRequest(updated_task, driver_request, task_result) => {
+                        MacTaskTransition::SchedulerRequest(updated_task, scheduler_request, task_result) => {
                             let updated_task = MacSvcTask::$mac_task(updated_task);
                             let task_result = task_result.map(|task_result| MacSvcTaskResult::$mac_task(task_result)) ;
-                            MacTaskTransition::DrvSvcRequest(updated_task, driver_request, task_result)
+                            MacTaskTransition::SchedulerRequest(updated_task, scheduler_request, task_result)
                         },
                         MacTaskTransition::Terminated(task_result) => {
                             let task_result = MacSvcTaskResult::$mac_task(task_result);
@@ -152,9 +149,16 @@ macro_rules! mac_svc_tasks {
     }
 }
 
-mac_svc_tasks!(DataRequest, DataIndication);
+mac_svc_tasks!(
+    DataRequest,
+    DataIndication,
+    TschModeRequest,
+    SetLinkRequest,
+    SetSlotframeRequest
+);
 
-const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_PARALLEL_INDICATION_TASKS;
+/// Number of mac service tasks which include requests tasks and one indication task
+const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + 1;
 
 struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
     // MAC request tasks are indexed by the message slots of the corresponding
@@ -168,13 +172,13 @@ struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
     // efficiently use the driver service's pipelining capability.
     mac_svc_tasks: [Option<MacSvcTask<'state, RadioDriverImpl>>; NUM_MAC_SVC_TASKS],
 
-    // Outstanding driver requests will be pushed to this vector and polled for
+    // Outstanding scheduler requests will be pushed to this vector and polled for
     // responses.
-    outstanding_driver_requests: heapless::Vec<PollingResponseToken, DRIVER_CHANNEL_CAPACITY>,
+    outstanding_scheduler_requests: heapless::Vec<PollingResponseToken, SCHEDULER_CHANNEL_CAPACITY>,
 
-    // A driver-to-MAC message index: The index corresponds to the driver
+    // A scheduler-to-MAC message index: The index corresponds to the scheduler
     // message slot, the content to the corresponding MAC request slot.
-    driver_msg_slot_to_task_index: [usize; DRIVER_CHANNEL_CAPACITY],
+    scheduler_msg_slot_to_task_index: [usize; SCHEDULER_CHANNEL_CAPACITY],
 
     // Response tokens for outstanding MAC requests.
     outstanding_mac_requests: [Option<ResponseToken>; MAC_NUM_PARALLEL_REQUEST_TASKS],
@@ -184,8 +188,8 @@ impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
     fn new() -> Self {
         Self {
             mac_svc_tasks: [const { None }; NUM_MAC_SVC_TASKS],
-            outstanding_driver_requests: heapless::Vec::new(),
-            driver_msg_slot_to_task_index: [0; DRIVER_CHANNEL_CAPACITY],
+            outstanding_scheduler_requests: heapless::Vec::new(),
+            scheduler_msg_slot_to_task_index: [0; SCHEDULER_CHANNEL_CAPACITY],
             outstanding_mac_requests: [const { None }; MAC_NUM_PARALLEL_REQUEST_TASKS],
         }
     }
@@ -196,7 +200,7 @@ impl<RadioDriverImpl: DriverConfig> MacServiceState<'_, RadioDriverImpl> {
 /// PHY sublayer. It uses channels to communicate with upper layer tasks and
 /// with radio drivers.
 pub struct MacService<'svc, RadioDriverImpl: DriverConfig> {
-    /// Timer instance to wait until driver requests become pending.
+    /// Timer instance to wait until scheduler requests become pending.
     // TODO: remove allow attribute once used in code
     #[allow(dead_code)]
     timer: RadioDriverImpl::Timer,
@@ -207,7 +211,7 @@ pub struct MacService<'svc, RadioDriverImpl: DriverConfig> {
     /// Upper layer channel to which MAC indications are sent.
     indication_sender: MacIndicationSender<'svc>,
     /// Channel to communicate with one or several radio drivers.
-    driver_request_sender: DriverRequestSender<'svc>,
+    scheduler_request_sender: SchedulerRequestSender<'svc>,
     /// PAN Information Base
     pib: RefCell<Pib>,
 }
@@ -219,14 +223,14 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         buffer_allocator: MacBufferAllocator,
         request_receiver: MacRequestReceiver<'svc>,
         indication_sender: MacIndicationSender<'svc>,
-        driver_request_sender: DriverRequestSender<'svc>,
+        scheduler_request_sender: SchedulerRequestSender<'svc>,
     ) -> Self {
         Self {
             timer,
             buffer_allocator,
             request_receiver,
             indication_sender,
-            driver_request_sender,
+            scheduler_request_sender,
             pib: RefCell::new(Pib::default()),
         }
     }
@@ -235,8 +239,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
     ///
     /// The loop waits until receiving a MCPS-DATA request from the upper layer.
     /// It will then instantiate the corresponding state machine and start
-    /// driving it. The state machine will produce driver service requests which
-    /// will be passed on to the driver service. Whenever the driver service
+    /// driving it. The state machine will produce scheduler service requests which
+    /// will be passed on to the scheduler service. Whenever the scheduler service
     /// returns a response it will be used to drive the corresponding state
     /// machine.
     pub async fn run(&mut self) -> ! {
@@ -253,8 +257,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             match select(
                 self.request_receiver
                     .receive_request_async(&mut consumer_token, &()),
-                self.driver_request_sender
-                    .wait_for_response(&mut state.outstanding_driver_requests),
+                self.scheduler_request_sender
+                    .wait_for_response(&mut state.outstanding_scheduler_requests),
             )
             .await
             {
@@ -273,12 +277,12 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 }
                 // Driver response
                 Either::Second(MatchingResponse {
-                    response: driver_response,
-                    msg_slot: driver_msg_slot,
+                    response: scheduler_response,
+                    msg_slot: scheduler_msg_slot,
                 }) => {
                     let mac_svc_task_index =
-                        state.driver_msg_slot_to_task_index[driver_msg_slot as usize];
-                    let mac_task_event = MacTaskEvent::DrvSvcResponse(driver_response);
+                        state.scheduler_msg_slot_to_task_index[scheduler_msg_slot as usize];
+                    let mac_task_event = MacTaskEvent::SchedulerResponse(scheduler_response);
                     let mac_svc_task = state.mac_svc_tasks[mac_svc_task_index].take().unwrap();
 
                     self.step_task(&mut state, mac_svc_task_index, mac_svc_task, mac_task_event);
@@ -298,20 +302,24 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         let is_mac_indication = !is_mac_request;
 
         let task_result = match mac_svc_task.step(event) {
-            MacTaskTransition::DrvSvcRequest(updated_task, driver_request, intermediate_result) => {
+            MacTaskTransition::SchedulerRequest(
+                updated_task,
+                scheduler_request,
+                intermediate_result,
+            ) => {
                 // Safety: We reserved sufficient channel capacity.
-                let driver_msg_token = self
-                    .driver_request_sender
+                let scheduler_msg_token = self
+                    .scheduler_request_sender
                     .try_allocate_request_token()
                     .unwrap();
-                let driver_response_token = self
-                    .driver_request_sender
-                    .send_request_polling_response(driver_msg_token, driver_request);
-                state.driver_msg_slot_to_task_index
-                    [driver_response_token.message_slot() as usize] = mac_svc_task_index;
+                let scheduler_response_token = self
+                    .scheduler_request_sender
+                    .send_request_polling_response(scheduler_msg_token, scheduler_request);
+                state.scheduler_msg_slot_to_task_index
+                    [scheduler_response_token.message_slot() as usize] = mac_svc_task_index;
                 state
-                    .outstanding_driver_requests
-                    .push(driver_response_token)
+                    .outstanding_scheduler_requests
+                    .push(scheduler_response_token)
                     .unwrap();
                 state.mac_svc_tasks[mac_svc_task_index] = Some(updated_task);
                 debug_assert!({
@@ -349,35 +357,38 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         }
     }
 
+    fn create_request_task(&self, mac_request: MacRequest) -> MacSvcTask<'_, RadioDriverImpl> {
+        match mac_request {
+            MacRequest::McpsData(data_request) => {
+                MacSvcTask::DataRequest(DataRequestTask::new(data_request))
+            }
+            MacRequest::MlmeBeacon(_) => todo!(),
+            MacRequest::MlmeSet(_) => todo!(),
+            MacRequest::MlmeTschMode(mlme_request) => {
+                MacSvcTask::TschModeRequest(TschModeRequestTask::new(mlme_request))
+            }
+            MacRequest::MlmeSetSlotframe(set_slotframe_request) => {
+                MacSvcTask::SetSlotframeRequest(SetSlotframeRequestTask::new(set_slotframe_request))
+            }
+            MacRequest::MlmeSetLink(set_link_request) => {
+                MacSvcTask::SetLinkRequest(SetLinkRequestTask::new(set_link_request))
+            }
+        }
+    }
     fn create_indication_tasks<'tasks>(&self, state: &mut MacServiceState<'tasks, RadioDriverImpl>)
     where
         'svc: 'tasks,
     {
-        const FIRST_MAC_INDICATION_TASK_INDEX: usize =
-            NUM_MAC_SVC_TASKS - MAC_NUM_PARALLEL_INDICATION_TASKS;
+        const MAC_INDICATION_TASK_INDEX: usize = NUM_MAC_SVC_TASKS - 1;
 
-        for mac_indication_task_index in FIRST_MAC_INDICATION_TASK_INDEX..NUM_MAC_SVC_TASKS {
-            let mac_indication_task =
-                MacSvcTask::DataIndication(DataIndicationTask::<'tasks, RadioDriverImpl>::new(
-                    self.buffer_allocator,
-                ));
-            self.step_task(
-                state,
-                mac_indication_task_index,
-                mac_indication_task,
-                MacTaskEvent::Entry,
-            );
-        }
-    }
-
-    fn create_request_task(&self, mac_request: MacRequest) -> MacSvcTask<'_, RadioDriverImpl> {
-        match mac_request {
-            MacRequest::McpsDataRequest(data_request) => {
-                MacSvcTask::DataRequest(DataRequestTask::new(data_request))
-            }
-            MacRequest::MlmeBeaconRequest(_) => todo!(),
-            MacRequest::MlmeSetRequest(_) => todo!(),
-        }
+        let mac_indication_task =
+            MacSvcTask::DataIndication(DataIndicationTask::<'tasks, RadioDriverImpl>::new());
+        self.step_task(
+            state,
+            MAC_INDICATION_TASK_INDEX,
+            mac_indication_task,
+            MacTaskEvent::Entry,
+        );
     }
 
     fn handle_request_task_result(
@@ -386,13 +397,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         response_token: ResponseToken,
     ) {
         match result {
-            MacSvcTaskResult::DataRequest(task_result) => {
-                let recovered_radio_frame = match task_result {
-                    DataRequestResult::Sent(recovered_radio_frame) => recovered_radio_frame,
-                    DataRequestResult::CcaBusy(unsent_radio_frame)
-                    | DataRequestResult::Nack(unsent_radio_frame) => {
-                        // TODO: CSMA/CA or Retry.
-                        unsent_radio_frame.forget_size::<RadioDriverImpl>()
+            MacSvcTaskResult::DataRequest(data_confirm) => {
+                let (recovered_radio_frame, instant) = match data_confirm {
+                    DataConfirm::Sent(recovered_radio_frame, instant) => {
+                        (recovered_radio_frame, instant)
+                    }
+                    DataConfirm::Nack(unsent_radio_frame, instant) => {
+                        (unsent_radio_frame.forget_size::<RadioDriverImpl>(), instant)
                     }
                 };
 
@@ -410,32 +421,46 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 //         have to be re-allocated. We just don't do that
                 //         currently as the smoltcp driver is synchronous and
                 //         cannot handle any response.
-                self.request_receiver.received(response_token, ());
+                self.request_receiver.received(
+                    response_token,
+                    MacConfirm {
+                        timestamp: Some(instant),
+                    },
+                );
             }
-            // The rest are indications
-            _ => unreachable!(),
+            MacSvcTaskResult::TschModeRequest(_mode_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: None });
+            }
+            MacSvcTaskResult::SetLinkRequest(_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: None });
+            }
+            MacSvcTaskResult::SetSlotframeRequest(_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: None });
+            }
+            MacSvcTaskResult::DataIndication(_) => unreachable!(),
         }
     }
 
     fn handle_indication_task_result(&self, result: MacSvcTaskResult<RadioDriverImpl>) {
         match result {
-            MacSvcTaskResult::DataIndication(DataIndication { mpdu, .. }) => {
-                self.handle_incoming_mpdu(mpdu);
+            MacSvcTaskResult::DataIndication(DataIndication { mpdu, timestamp }) => {
+                self.handle_incoming_mpdu(mpdu, timestamp);
             }
             // The rest are requests
             _ => unreachable!(),
         }
     }
 
-    fn handle_incoming_mpdu(&self, mpdu: MpduFrame) {
+    fn handle_incoming_mpdu(&self, mpdu: MpduFrame, timestamp: NsInstant) {
         // TODO: Implement proper handling of incoming frames.
         match mpdu.frame_control().frame_type() {
-            FrameType::Data => {
+            // TODO: distinguish Data/Beacon
+            FrameType::Data | FrameType::Beacon => {
                 if let Some(request_token) = self.indication_sender.try_allocate_request_token() {
-                    let indication = MacIndication::McpsData(DataIndication {
-                        mpdu,
-                        timestamp: None,
-                    });
+                    let indication = MacIndication::McpsData(DataIndication { mpdu, timestamp });
 
                     // TODO: Poll response, once we work with MAC response
                     //       primitives.
