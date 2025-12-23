@@ -1,4 +1,4 @@
-use crate::driver::{DrvSvcRequest, DrvSvcResponse};
+use crate::scheduler::{SchedulerRequest, SchedulerResponse};
 
 /// A MAC task represents a - possibly infinite - stream of driver
 /// request/response exchanges each of which MAY time out.
@@ -35,7 +35,7 @@ pub enum MacTaskEvent {
 
     /// The driver service has produced a response to the driver service request
     /// previously produced by the state machine's request.
-    DrvSvcResponse(DrvSvcResponse),
+    SchedulerResponse(SchedulerResponse),
 }
 
 /// Represents the transition triggered by a MAC task step.
@@ -56,11 +56,11 @@ pub enum MacTaskTransition<Task: MacTask> {
     /// executor.
     ///
     /// A transition MAY time out.
-    DrvSvcRequest(
+    SchedulerRequest(
         /// The task's next state.
         Task,
         /// The driver service request produced by the transition.
-        DrvSvcRequest,
+        SchedulerRequest,
         /// An optional intermediate task result.
         Option<Task::Result>,
     ),
