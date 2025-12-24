@@ -1,4 +1,9 @@
-use crate::driver::radio::frame::PanId;
+use dot15d4_driver::radio::{
+    const_config::{MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE},
+    frame::PanId,
+};
+
+use crate::scheduler::tsch::MAC_PAN_ID;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
 #[allow(dead_code)]
@@ -55,12 +60,15 @@ pub struct Pib {
     /// Beacon frame. Value ranges from 0 to 15. If value is 15, no periodic
     /// Enhanced Beacon frame will be transmitted.
     pub(crate) enhanced_beacon_order: u8,
+    /// Indication of whether the device is joining (or associated to) a TSCH
+    /// network (i.e. not using unslotted CSMA-CA)
+    pub(crate) tsch_mode: bool,
+    /// Indication of whether the device should use CCA during CSMA-CA TSCH
+    pub(crate) tsch_cca: bool,
 }
 
 impl Default for Pib {
     fn default() -> Self {
-        use crate::driver::radio::const_config::*;
-
         Self {
             extended_address: None,
             associated_pan_coord: false,
@@ -77,6 +85,8 @@ impl Default for Pib {
             security_enabled: false,
             short_address: 0xffff,
             enhanced_beacon_order: 0,
+            tsch_mode: false,
+            tsch_cca: false,
         }
     }
 }
