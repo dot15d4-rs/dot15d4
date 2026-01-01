@@ -229,3 +229,151 @@ impl<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor> Default
         }
     }
 }
+
+#[cfg(test)]
+pub mod tests {
+    use dot15d4_driver::radio::config::Channel;
+    use dot15d4_driver::timer::NsInstant;
+
+    use crate::mac::frame::fields::TschLinkOption;
+    use crate::mac::neighbors::tests::TestNeighbor;
+    use crate::mac::neighbors::MacNeighbor;
+
+    use super::{ScheduleError, TschLink, TschLinkType, TschSchedule, TschSlotframe};
+
+    #[test]
+    fn schedule() {
+        const MAX_SLOTFRAMES: usize = 1;
+        const MAX_LINKS: usize = 2;
+        let hopping_sequence = [Channel::_15, Channel::_25];
+
+        let nbr1 = TestNeighbor::new([0, 0, 0, 0, 0, 0, 0, 1]);
+        let nbr2 = TestNeighbor::new([0, 0, 0, 0, 0, 0, 0, 2]);
+
+        let mut schedule = TschSchedule::<MAX_SLOTFRAMES, MAX_LINKS, _>::new(hopping_sequence);
+
+        let slotframe_handle = schedule.create_slotframe(3).unwrap();
+
+        schedule
+            .add_link(TschLink {
+                slotframe_handle,
+                channel_offset: 0,
+                timeslot: 0,
+                link_options: TschLinkOption::Tx,
+                neighbor: Some(nbr1),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(schedule.links.len(), 1);
+
+        schedule
+            .add_link(TschLink {
+                slotframe_handle,
+                channel_offset: 0,
+                timeslot: 2,
+                link_options: TschLinkOption::Rx,
+                neighbor: Some(nbr2),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(schedule.links.len(), 2);
+
+        let res = schedule.add_link(TschLink {
+            slotframe_handle,
+            channel_offset: 0,
+            timeslot: 1,
+            link_options: TschLinkOption::Rx,
+            ..Default::default()
+        });
+        match res.unwrap_err() {
+            ScheduleError::CapacityExceeded => (),
+            _ => panic!(),
+        };
+
+        assert_eq!(schedule.links.len(), 2);
+    }
+
+    #[test]
+    fn invalid_links() {
+        const MAX_SLOTFRAMES: usize = 2;
+        const MAX_LINKS: usize = 5;
+
+        let hopping_sequence = [Channel::_15, Channel::_25];
+
+        let mut schedule =
+            TschSchedule::<MAX_SLOTFRAMES, MAX_LINKS, TestNeighbor>::new(hopping_sequence);
+
+        let slotframe_handle = schedule.create_slotframe(11).unwrap();
+
+        let res = schedule.add_link(TschLink {
+            slotframe_handle,
+            channel_offset: 0,
+            timeslot: 12,
+            link_options: TschLinkOption::Tx,
+            ..Default::default()
+        });
+        match res.unwrap_err() {
+            ScheduleError::InvalidTimeslot => (),
+            _ => panic!(),
+        };
+
+        let res = schedule.add_link(TschLink {
+            slotframe_handle,
+            channel_offset: 10,
+            timeslot: 8,
+            link_options: TschLinkOption::Rx,
+            ..Default::default()
+        });
+        match res.unwrap_err() {
+            ScheduleError::InvalidChannelOffset => (),
+            _ => panic!(),
+        };
+
+        let res = schedule.add_link(TschLink {
+            slotframe_handle,
+            channel_offset: 0,
+            timeslot: 10,
+            link_options: TschLinkOption::Rx,
+            ..Default::default()
+        });
+        assert!(res.is_ok());
+    }
+    #[test]
+    fn multiple_slotframes() {
+        const MAX_SLOTFRAMES: usize = 2;
+        const MAX_LINKS: usize = 2;
+
+        let hopping_sequence = [Channel::_15, Channel::_25];
+        let mut schedule =
+            TschSchedule::<MAX_SLOTFRAMES, MAX_LINKS, TestNeighbor>::new(hopping_sequence);
+
+        let slotframe1_handle = schedule.create_slotframe(3).unwrap();
+
+        let slotframe2_handle = schedule.create_slotframe(2).unwrap();
+
+        let _res = schedule.add_link(TschLink {
+            slotframe_handle: slotframe1_handle,
+            channel_offset: 0,
+            timeslot: 0,
+            link_options: TschLinkOption::Tx,
+            ..Default::default()
+        });
+
+        // Create a link that will overlap with link from SF 1
+        let _res = schedule.add_link(TschLink {
+            slotframe_handle: slotframe2_handle,
+            channel_offset: 1,
+            timeslot: 0,
+            link_options: TschLinkOption::Rx,
+            ..Default::default()
+        });
+
+        // Adding a third slotframe should not work
+        let res = schedule.create_slotframe(3);
+        match res.unwrap_err() {
+            ScheduleError::CapacityExceeded => (),
+            _ => panic!(),
+        };
+    }
+}
