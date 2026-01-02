@@ -9,8 +9,8 @@
 # step VDD voltage down to 1.8V. In this state the pico2 will drive SWD inputs
 # to voltages above the absolute maximum rating (VDD+0.3).
 
-[default.probe]
-speed = 10000 # Configure lower speeds in case of connection issues.
+# [default.probe]
+# speed = 6000 # Configure lower speeds in case of connection issues.
 
 [default.general]
 chip = "nRF52840_xxAA"
