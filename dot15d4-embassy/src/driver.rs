@@ -208,7 +208,7 @@ impl<'token> embassy_net_driver::TxToken for TxToken<'token> {
         let _ = data_request.set_dst_pan_id(MAC_PAN_ID);
         Self::set_ack_requested(&mut data_request);
 
-        let request = MacRequest::McpsDataRequest(data_request);
+        let request = MacRequest::McpsData(data_request);
         self.request_sender
             .send_request_no_response(self.request_token.take().unwrap(), request);
 
