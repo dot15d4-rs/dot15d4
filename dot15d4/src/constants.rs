@@ -12,7 +12,7 @@ mod customizable {
     pub const MAC_MAX_BE: u8 = 8;
     pub const MAC_MAX_CSMA_BACKOFFS: u8 = 16;
     pub const MAC_MAX_FRAME_RETRIES: u8 = 3; // 0-7
-    pub const MAC_PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0xff, 0xff]); // PAN Id
+    pub const MAC_PAN_ID: u16 = 0xbeef; // PAN Id
     pub const MAC_IMPLICIT_BROADCAST: bool = false;
 }
 

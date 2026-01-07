@@ -1,9 +1,9 @@
-use dot15d4_driver::radio::{
-    const_config::{MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE},
+use crate::{
+    con::{MAC, MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE, MAC_PAN_ID},
     frame::PanId,
 };
 
-use crate::scheduler::tsch::MAC_PAN_ID;
+use crate::scheduler::tsch::schedule::TschPib;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
 #[allow(dead_code)]
@@ -79,7 +79,7 @@ impl Default for Pib {
             min_be: MAC_MIN_BE,
             max_frame_retries: MAC_MAX_FRAME_RETRIES,
             max_csma_backoffs: MAC_MAX_CSMA_BACKOFFS,
-            pan_id: MAC_PAN_ID,
+            pan_id: PanId::new_owned(MAC_PAN_ID.to_le_bytes()),
             promiscuous_mode: false,
             rx_on_when_idle: false,
             security_enabled: false,
