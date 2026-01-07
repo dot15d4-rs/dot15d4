@@ -43,8 +43,6 @@ const MAX_OPERATIONS: usize = 5;
 const COORD_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_owned([
     0xfe, 0xd6, 0x1f, 0xaf, 0x7d, 0x5a, 0x36, 0xfc,
 ]));
-// TODO: configurable PAN ID
-pub const MAC_PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0xEF, 0xBE]); // PAN Id
 
 impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl> {
     pub(super) async fn run_tsch(
