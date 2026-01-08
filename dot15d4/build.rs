@@ -18,6 +18,14 @@ fn const_config(out_dir: &Path) {
         ("MAC_MAX_FRAME_RETRIES", ("u8", "3")),
         ("MAC_PAN_ID", ("u16", "0xbeef")),
         ("MAC_IMPLICIT_BROADCAST", ("bool", "false")),
+        ("MAC_TSCH_MIN_BE", ("u8", "1")),
+        ("MAC_TSCH_MAX_BE", ("u8", "7")),
+        ("MAC_JOIN_METRIC", ("u16", "1")),
+        ("MAC_DISCONNECT_TIME", ("u16", "0x00ff")),
+        ("MAC_TSCH_MAX_LINKS", ("usize", "5")),
+        ("MAC_TSCH_MAX_SLOTFRAMES", ("usize", "1")),
+        ("MAC_TSCH_MAX_PENDING_OPERATIONS", ("usize", "5")),
+        ("MAC_HOPPING_SEQUENCE_MAX_LENGTH", ("usize", "16")),
     ]);
 
     // Make sure we get rerun if needed
@@ -29,7 +37,6 @@ fn const_config(out_dir: &Path) {
     // Collect environment variables
     let mut data = String::new();
     // Write preamble
-    writeln!(data, "use crate::radio::frame::PanId;\n").unwrap();
 
     for (var, value) in std::env::vars() {
         if let Some(name) = var.strip_prefix("DOT15D4_") {

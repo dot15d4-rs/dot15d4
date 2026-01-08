@@ -1,5 +1,7 @@
 use crate::{
-    con::{MAC, MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE, MAC_PAN_ID},
+    constants::{
+        MAC, MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE, MAC_PAN_ID,
+    },
     frame::PanId,
 };
 
