@@ -16,7 +16,6 @@ use self::{
 };
 
 pub mod config;
-pub mod const_config;
 pub mod constants;
 pub mod frame;
 pub mod phy;

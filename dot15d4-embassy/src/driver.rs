@@ -1,9 +1,9 @@
 use core::{cell::RefCell, marker::PhantomData, mem, num::NonZero, task::Context, task::Poll};
 
 use dot15d4::{
+    constants::MAC_PAN_ID,
     driver::radio::{
-        const_config::MAC_PAN_ID,
-        frame::{RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
+        frame::{PanId, RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
     mac::{
@@ -205,7 +205,7 @@ impl<'token> embassy_net_driver::TxToken for TxToken<'token> {
         let mut data_request = DataRequest::new(MpduFrame::from_radio_frame(radio_frame));
         // TODO: This may conflict with a PAN ID configured into smoltcp.
         //       Embassy, however, doesn't allow to configure a PAN ID anyway.
-        let _ = data_request.set_dst_pan_id(MAC_PAN_ID);
+        let _ = data_request.set_dst_pan_id(PanId::new_owned(MAC_PAN_ID.to_le_bytes()));
         Self::set_ack_requested(&mut data_request);
 
         let request = MacRequest::McpsData(data_request);
