@@ -1,10 +1,7 @@
-use super::{
-    super::{
-        const_config::{MAC_IMPLICIT_BROADCAST, MAC_PAN_ID},
-        tasks::PreliminaryFrameInfo,
-    },
-    Address, ShortAddress, BROADCAST_PAN_ID,
-};
+use dot15d4_driver::radio::frame::{Address, PanId, ShortAddress, BROADCAST_PAN_ID};
+use dot15d4_driver::radio::tasks::PreliminaryFrameInfo;
+
+use crate::constants::{MAC_IMPLICIT_BROADCAST, MAC_PAN_ID};
 
 /// Checks if the given MPDU is valid and intended for us. For the hardware
 /// address, the full big-endian 64-bit address should be provided.
@@ -35,7 +32,9 @@ pub fn is_frame_valid_and_for_us(
     let dst_pan_id = addressing_fields
         .try_dst_pan_id()
         .unwrap_or(BROADCAST_PAN_ID);
-    if *dst_pan_id.as_ref() != *MAC_PAN_ID.as_ref() && dst_pan_id != BROADCAST_PAN_ID {
+    // TODO: get current PAN ID from PIB instead of default value
+    let pan_id = PanId::new_owned(MAC_PAN_ID.to_le_bytes());
+    if *dst_pan_id.as_ref() != *pan_id.as_ref() && dst_pan_id != BROADCAST_PAN_ID {
         return false;
     }
 
