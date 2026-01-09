@@ -4,6 +4,7 @@ pub mod driver;
 pub mod mac;
 pub mod pib;
 pub mod scheduler;
+mod utils;
 
 pub use dot15d4_util as util;
 

@@ -12,14 +12,12 @@ mod frame_control;
 mod ies;
 mod radio_frame;
 mod repr;
-mod utils;
 
 pub use addressing::*;
 pub use frame_control::*;
 pub use ies::*;
 pub use radio_frame::*;
 pub use repr::*;
-pub use utils::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RadioFrameUnsized;

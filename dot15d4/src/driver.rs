@@ -11,6 +11,7 @@ use crate::{
         MacBufferAllocator,
     },
     util::frame::Frame,
+    utils::is_frame_valid_and_for_us,
 };
 
 use self::{
@@ -31,7 +32,6 @@ pub use dot15d4_driver::*;
 use dot15d4_driver::{
     radio::{
         config::Channel as PhyChannel,
-        frame::is_frame_valid_and_for_us,
         tasks::{RadioDriverApi, ReceivingRxState, RxError, RxResult, StopListeningResult},
         PhyOf,
     },
