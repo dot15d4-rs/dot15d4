@@ -2,6 +2,7 @@
 
 pub mod command;
 mod csma;
+#[cfg(feature = "tsch")]
 pub mod tsch;
 
 use core::cell::Cell;
@@ -107,6 +108,7 @@ impl HasAddress<TaskDirection> for SchedulerRequest {
 
 pub(crate) enum SchedulerState {
     UsingCsmaCa,
+    #[cfg(feature = "tsch")]
     UsingTsch,
 }
 

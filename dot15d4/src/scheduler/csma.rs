@@ -1,19 +1,20 @@
-use dot15d4_driver::radio::DriverConfig;
-
-use dot15d4_driver::radio::frame::{RadioFrame, RadioFrameSized};
+use dot15d4_driver::radio::{
+    frame::{RadioFrame, RadioFrameSized},
+    DriverConfig,
+};
 use dot15d4_util::{
     allocator::IntoBuffer,
     sync::{select, ConsumerToken, Either, ResponseToken},
 };
 
-use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
-use crate::scheduler::command::SchedulerCommand;
-use crate::scheduler::{
-    SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
-};
-
+#[cfg(feature = "tsch")]
 use super::command::UseTschCommandResult;
 use super::{SchedulerService, SchedulerState};
+use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
+use crate::scheduler::{
+    command::SchedulerCommand, SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult,
+    TaskDirection,
+};
 
 pub enum CsmaSchedulerState {
     Initial,
@@ -257,11 +258,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                         }
                         SchedulerRequest::Command(command) => {
                             match command {
+                                #[cfg(feature = "tsch")]
                                 // TODO: use tsch feature
                                 SchedulerCommand::UseTsch(_tsch_mode, _tsch_cca) => {
                                     // TODO: handle config change, define pub fn in tsch ? set_mode ?
                                     return self.terminate(response_token).await;
                                 }
+                                #[cfg(feature = "tsch")]
                                 SchedulerCommand::SetTschSlotframe(_)
                                 | SchedulerCommand::SetTschLink(_) => {
                                     self.handle_tsch_command(command);
@@ -390,6 +393,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                         .await;
                     CsmaSchedulerState::Transmitting(sched_response_token)
                 }
+                #[cfg(feature = "tsch")]
                 SchedulerRequest::Command(SchedulerCommand::UseTsch(_, _)) => {
                     self.terminate(sched_response_token).await
                 }
@@ -409,6 +413,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         }
     }
 
+    #[cfg(feature = "tsch")]
     async fn terminate(&self, command_response_token: ResponseToken) -> CsmaSchedulerState {
         // // Handle last operation result
         // self.driver_request_sender

@@ -78,6 +78,8 @@ rtos-trace = [
 ]
 _gpio-trace = []
 
+tsch = ["dot15d4/tsch"]
+
 # Enables multi-device tests.
 #
 # Synchronizes the clock of multiple test devices with an external sleep timer

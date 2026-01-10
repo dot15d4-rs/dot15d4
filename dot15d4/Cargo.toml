@@ -46,6 +46,9 @@ security = ["dot15d4-frame/security"]
 # Support for information elements
 ies = ["dot15d4-frame/ies"]
 
+# Support for TSCH
+tsch = ["ies"]
+
 # Tracing
 executor-trace = ["dot15d4-driver/executor-trace"]
 timer-trace = ["dot15d4-driver/timer-trace"]

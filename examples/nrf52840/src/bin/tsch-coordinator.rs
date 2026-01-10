@@ -11,19 +11,22 @@ use dot15d4::{
         DriverRequestReceiver, DriverRequestSender, DriverService,
     },
     mac::{
-        frame::fields::TschLinkOption,
-        mlme::tsch::{
-            setlink::SetLinkRequest, setslotframe::SetSlotframeRequest, TschScheduleOperation,
-        },
-        primitives::{MacRequest, TschModeRequest},
-        MacBufferAllocator, MacIndicationChannel, MacIndicationReceiver, MacIndicationSender,
-        MacRequestChannel, MacRequestReceiver, MacRequestSender, MacService, MAC_BUFFER_SIZE,
+        frame::fields::TschLinkOption, primitives::MacRequest, MacBufferAllocator,
+        MacIndicationChannel, MacIndicationReceiver, MacIndicationSender, MacRequestChannel,
+        MacRequestReceiver, MacRequestSender, MacService, MAC_BUFFER_SIZE,
     },
     scheduler::{
-        tsch::schedule::TschLinkType, SchedulerRequestChannel, SchedulerRequestReceiver,
-        SchedulerRequestSender, SchedulerService,
+        SchedulerRequestChannel, SchedulerRequestReceiver, SchedulerRequestSender, SchedulerService,
     },
     util::{buffer_allocator, info},
+};
+#[cfg(feature = "tsch")]
+use dot15d4::{
+    mac::mlme::tsch::{
+        mode::TschModeRequest, setlink::SetLinkRequest, setslotframe::SetSlotframeRequest,
+        TschScheduleOperation,
+    },
+    scheduler::tsch::schedule::TschLinkType,
 };
 #[cfg(feature = "executor-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;
@@ -163,6 +166,7 @@ async fn driver_service_task(
     driver_service.run().await
 }
 
+#[cfg(feature = "tsch")]
 async fn start_tsch(request_sender: &MacRequestSender<'static>) {
     // We create a single slotframe with handle 0 and size 100
     let request_token = request_sender.allocate_request_token().await;
@@ -212,6 +216,7 @@ async fn upper_layer_task(
     _mac_indication_receiver: MacIndicationReceiver<'static>,
 ) -> ! {
     info!("Start as client");
+    #[cfg(feature = "tsch")]
     start_tsch(&request_sender).await;
     pending().await
 }
