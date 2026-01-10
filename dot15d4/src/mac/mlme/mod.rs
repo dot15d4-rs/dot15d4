@@ -4,4 +4,5 @@ pub mod reset;
 pub mod scan;
 pub mod set;
 pub mod start;
+#[cfg(feature = "tsch")]
 pub mod tsch;

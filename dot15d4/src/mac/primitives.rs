@@ -2,24 +2,27 @@ use dot15d4_driver::timer::NsInstant;
 
 use crate::util::sync::HasAddress;
 
+use super::mlme::set::SetRequestAttribute;
+#[cfg(feature = "tsch")]
+pub use super::mlme::tsch::mode::TschModeRequest;
+#[cfg(feature = "tsch")]
 use super::mlme::tsch::{setlink::SetLinkRequest, setslotframe::SetSlotframeRequest};
 pub use super::{
     mcps::data::{DataIndication, DataRequest},
-    mlme::{
-        beacon::{BeaconNotifyIndication, BeaconRequest},
-        set::SetRequestAttribute,
-        tsch::mode::TschModeRequest,
-    },
+    mlme::beacon::{BeaconNotifyIndication, BeaconRequest},
 };
 
 // TODO: update doc, protocol version and sections numbering
 /// Enum representing all (currently) supported MAC services request primitives
 pub enum MacRequest {
     /// IEEE 802.15.4-2024, section 10.3.10.7
+    #[cfg(feature = "tsch")]
     MlmeTschMode(TschModeRequest),
     /// IEEE 802.15.4-2024, section 10.3.10.2
+    #[cfg(feature = "tsch")]
     MlmeSetSlotframe(SetSlotframeRequest),
     /// IEEE 802.15.4-2024, section 10.3.10.4
+    #[cfg(feature = "tsch")]
     MlmeSetLink(SetLinkRequest),
     /// IEEE 802.15.4-2020, section 8.2.6.4
     MlmeSet(SetRequestAttribute),

@@ -7,10 +7,18 @@ mod task;
 use dot15d4_driver::timer::NsInstant;
 pub use dot15d4_frame as frame;
 
-use core::cell::RefCell;
-
 use paste::paste;
 
+#[cfg(feature = "tsch")]
+use self::mlme::tsch::{
+    mode::TschModeRequestTask, setlink::SetLinkRequestTask, setslotframe::SetSlotframeRequestTask,
+};
+use self::{
+    frame::mpdu::MpduFrame,
+    mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
+    primitives::{MacConfirm, MacIndication, MacRequest},
+    task::*,
+};
 use crate::{
     driver::radio::{
         frame::FrameType,
@@ -27,17 +35,6 @@ use crate::{
             select, Either, MatchingResponse, PollingResponseToken, ResponseToken,
         },
     },
-};
-
-use self::{
-    frame::mpdu::MpduFrame,
-    mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    mlme::tsch::{
-        mode::TschModeRequestTask, setlink::SetLinkRequestTask,
-        setslotframe::SetSlotframeRequestTask,
-    },
-    primitives::{MacConfirm, MacIndication, MacRequest},
-    task::*,
 };
 
 // TODO: Make allocator and channel capacities and the number of upper layer
@@ -149,6 +146,7 @@ macro_rules! mac_svc_tasks {
     }
 }
 
+#[cfg(feature = "tsch")]
 mac_svc_tasks!(
     DataRequest,
     DataIndication,
@@ -156,6 +154,8 @@ mac_svc_tasks!(
     SetLinkRequest,
     SetSlotframeRequest
 );
+#[cfg(not(feature = "tsch"))]
+mac_svc_tasks!(DataRequest, DataIndication);
 
 /// Number of mac service tasks which include requests tasks and one indication task
 const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + 1;
@@ -364,12 +364,15 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             }
             MacRequest::MlmeBeacon(_) => todo!(),
             MacRequest::MlmeSet(_) => todo!(),
+            #[cfg(feature = "tsch")]
             MacRequest::MlmeTschMode(mlme_request) => {
                 MacSvcTask::TschModeRequest(TschModeRequestTask::new(mlme_request))
             }
+            #[cfg(feature = "tsch")]
             MacRequest::MlmeSetSlotframe(set_slotframe_request) => {
                 MacSvcTask::SetSlotframeRequest(SetSlotframeRequestTask::new(set_slotframe_request))
             }
+            #[cfg(feature = "tsch")]
             MacRequest::MlmeSetLink(set_link_request) => {
                 MacSvcTask::SetLinkRequest(SetLinkRequestTask::new(set_link_request))
             }
@@ -428,14 +431,17 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                     },
                 );
             }
+            #[cfg(feature = "tsch")]
             MacSvcTaskResult::TschModeRequest(_mode_confirm) => {
                 self.request_receiver
                     .received(response_token, MacConfirm { timestamp: None });
             }
+            #[cfg(feature = "tsch")]
             MacSvcTaskResult::SetLinkRequest(_confirm) => {
                 self.request_receiver
                     .received(response_token, MacConfirm { timestamp: None });
             }
+            #[cfg(feature = "tsch")]
             MacSvcTaskResult::SetSlotframeRequest(_confirm) => {
                 self.request_receiver
                     .received(response_token, MacConfirm { timestamp: None });
