@@ -1,10 +1,13 @@
-use crate::{
-    constants::{
-        MAC, MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES, MAC_MIN_BE, MAC_PAN_ID,
-    },
-    frame::PanId,
+use dot15d4_driver::radio::config::Channel;
+use dot15d4_driver::radio::frame::PanId;
+use heapless::Vec;
+
+use crate::constants::{
+    MAC_HOPPING_SEQUENCE_MAX_LENGTH, MAC_MAX_BE, MAC_MAX_CSMA_BACKOFFS, MAC_MAX_FRAME_RETRIES,
+    MAC_MIN_BE, MAC_PAN_ID,
 };
 
+#[cfg(feature = "tsch")]
 use crate::scheduler::tsch::schedule::TschPib;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
@@ -62,11 +65,12 @@ pub struct Pib {
     /// Beacon frame. Value ranges from 0 to 15. If value is 15, no periodic
     /// Enhanced Beacon frame will be transmitted.
     pub(crate) enhanced_beacon_order: u8,
-    /// Indication of whether the device is joining (or associated to) a TSCH
-    /// network (i.e. not using unslotted CSMA-CA)
-    pub(crate) tsch_mode: bool,
-    /// Indication of whether the device should use CCA during CSMA-CA TSCH
-    pub(crate) tsch_cca: bool,
+    /// Sequence of PHY channels that allows for a different channel to be
+    /// used at a given ASN
+    pub(crate) hopping_sequence: Vec<Channel, { MAC_HOPPING_SEQUENCE_MAX_LENGTH }>,
+    /// MAC constants and PIB attributes for TSCH
+    #[cfg(feature = "tsch")]
+    pub(crate) tsch: TschPib<()>,
 }
 
 impl Default for Pib {
@@ -87,8 +91,9 @@ impl Default for Pib {
             security_enabled: false,
             short_address: 0xffff,
             enhanced_beacon_order: 0,
-            tsch_mode: false,
-            tsch_cca: false,
+            hopping_sequence: Vec::from_slice(&[Channel::_12, Channel::_26]).unwrap(),
+            #[cfg(feature = "tsch")]
+            tsch: TschPib::new(),
         }
     }
 }

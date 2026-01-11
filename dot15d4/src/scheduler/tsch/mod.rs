@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 pub mod asn;
 pub mod beacon;
-mod runner;
+pub mod runner;
 pub mod schedule;
 
 use core::cell::Cell;

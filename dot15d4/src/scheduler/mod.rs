@@ -124,6 +124,8 @@ pub struct SchedulerService<'svc, RadioDriverImpl: DriverConfig> {
     // TODO: feature tsch-coordinator
     beacon_frame: Cell<Option<RadioFrame<RadioFrameSized>>>,
     beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
+    /// PAN Information Base
+    pib: Pib,
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl> {
@@ -144,6 +146,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             beacon_frame: Cell::new(None),
             buffer_allocator,
             beacon_builder: EnhancedBeaconBuilder::new(),
+            pib: Pib::default(),
         }
     }
 

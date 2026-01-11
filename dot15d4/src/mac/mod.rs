@@ -26,7 +26,6 @@ use crate::{
         DriverConfig, MAX_DRIVER_OVERHEAD,
     },
     mac::mcps::data::DataConfirm,
-    pib::Pib,
     scheduler::{SchedulerRequestSender, SCHEDULER_CHANNEL_CAPACITY},
     util::{
         allocator::{BufferAllocator, IntoBuffer},
@@ -212,8 +211,6 @@ pub struct MacService<'svc, RadioDriverImpl: DriverConfig> {
     indication_sender: MacIndicationSender<'svc>,
     /// Channel to communicate with one or several radio drivers.
     scheduler_request_sender: SchedulerRequestSender<'svc>,
-    /// PAN Information Base
-    pib: RefCell<Pib>,
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
@@ -231,7 +228,6 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             request_receiver,
             indication_sender,
             scheduler_request_sender,
-            pib: RefCell::new(Pib::default()),
         }
     }
 

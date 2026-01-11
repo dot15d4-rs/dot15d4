@@ -1,10 +1,20 @@
 #![allow(dead_code)]
-use dot15d4_driver::{radio::config::Channel, timer::NsInstant};
+use dot15d4_driver::{
+    radio::{config::Channel, DriverConfig},
+    timer::NsInstant,
+};
 use heapless::Vec;
 
-use crate::mac::{
-    frame::fields::{TschLinkOption, TschTimeslotTimings},
-    neighbors::MacNeighbor,
+use crate::{
+    constants::{
+        MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_MAX_BE, MAC_TSCH_MAX_LINKS,
+        MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
+    },
+    mac::{
+        frame::fields::{TschLinkOption, TschTimeslotTimings},
+        neighbors::MacNeighbor,
+    },
+    scheduler::SchedulerService,
 };
 
 use super::asn::AbsoluteSlotNumber;
@@ -28,6 +38,8 @@ pub(crate) type TschAsn = u64;
 
 /// A TSCH link is a pairwise assignment of a directed communication between
 /// devices for a given slotframe, in a given timeslot on a given channel offset.
+/// This representation follows specification described in
+/// IEEE802.15.4-2024, Section 10.3.11.3
 #[allow(dead_code)]
 pub struct TschLink<Neighbor> {
     /// Slotframe identifier of the slotframe to which the link is associated.
@@ -63,16 +75,15 @@ impl<Neighbor> Default for TschLink<Neighbor> {
     }
 }
 
-/// Represents a channel hopping sequence
-pub type TschHoppingSequence = [Channel; 2];
-
 /// A TSCH slotframe collection of timeslots repeating in time, analogous to a
 /// superframe in that it defines periods of communication opportunities.
+/// This representation follows specification described in
+/// IEEE802.15.4-2024, Section 10.3.11.2
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct TschSlotframe {
-    // /// Slotframe Identifier
-    // handle: u16,
+    /// Slotframe Identifier
+    handle: u16,
     /// The number of timeslots in a given slotframe, representing of often a
     /// timeslot repeats.
     size: u16,
@@ -216,16 +227,18 @@ impl<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor>
     }
 }
 
-impl<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor> Default
-    for TschSchedule<MAX_SLOTFRAMES, MAX_LINKS, Neighbor>
-{
+impl<Neighbor> Default for TschPib<Neighbor> {
     fn default() -> Self {
+        // Default values listed in IEEE802.15.4-2024 Table 10-16.
         Self {
+            tsch_min_be: MAC_TSCH_MIN_BE,
+            tsch_max_be: MAC_MAX_BE,
             slotframes: heapless::Vec::new(),
             links: heapless::Vec::new(),
-            join_metric: 1,
+            join_metric: MAC_JOIN_METRIC,
+            disconnect_time: MAC_DISCONNECT_TIME,
+            asn: 0,
             timeslot_timings: TschTimeslotTimings::default(),
-            hopping_sequence: [Channel::_12, Channel::_14],
         }
     }
 }
