@@ -113,68 +113,81 @@ impl TschSlotframe {
     }
 }
 
-pub struct TschSchedule<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor> {
-    slotframes: Vec<TschSlotframe, MAX_SLOTFRAMES>,
-    links: Vec<TschLink<Neighbor>, MAX_LINKS>,
-    /// Sequence of PHY channels that allows for a different channel to be
-    /// used at a given ASN
-    hopping_sequence: TschHoppingSequence,
-    /// Metric used when selecting and joining a TSCH network
+/// Representation of TSCH related attributes of MAC PIB, as described in
+/// IEEE802.15.4-2024 Section 10.3.11
+pub struct TschPib<Neighbor> {
+    /// The minimum value of the backoff exponent (BE) in the TSCH-CA algorithm (macTschMinBe)
+    tsch_min_be: u8,
+    /// The maximum value of the BE in the CSMA-CA algorithm, in the TSCHCA algorithm (macTschMaxBe)
+    tsch_max_be: u8,
+    /// Time (in Timeslots) to send out Disassociate frames before disconnecting (macDisconnectTime)
+    disconnect_time: u16,
+    /// Metric used when selecting and joining a TSCH network (macJoinMetric)
     join_metric: u16,
+    /// macSlotframeTable
+    slotframes: Vec<TschSlotframe, MAC_TSCH_MAX_SLOTFRAMES>,
+    /// macLinkTable
+    links: Vec<TschLink<Neighbor>, MAC_TSCH_MAX_LINKS>,
     /// Timings used for communication inside a timeslot
+    /// (macTimeslotTemplate)
     pub(crate) timeslot_timings: TschTimeslotTimings,
+    /// The Absolute Slot Number, i.e., the number of slots that has elapsed since the start of the network.
+    asn: u64,
 }
 
-impl<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor>
-    TschSchedule<MAX_SLOTFRAMES, MAX_LINKS, Neighbor>
-{
-    pub fn new(hopping_sequence: TschHoppingSequence) -> Self {
-        Self {
-            hopping_sequence,
-            ..Default::default()
-        }
+impl<Neighbor> TschPib<Neighbor> {
+    pub fn new() -> Self {
+        Default::default()
     }
+}
 
+impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl> {
     /// Add a given slotframe to the schedule.
     ///
     /// * `slotframe` - Slotframe to add
-    pub(crate) fn create_slotframe(&mut self, size: u16) -> Result<u16, ScheduleError> {
-        if self.slotframes.push(TschSlotframe { size }).is_err() {
+    pub(crate) fn create_slotframe(
+        &mut self,
+        handle: u16,
+        size: u16,
+    ) -> Result<u16, ScheduleError> {
+        if self
+            .pib
+            .tsch
+            .slotframes
+            .push(TschSlotframe { handle, size })
+            .is_err()
+        {
             Err(ScheduleError::CapacityExceeded)
         } else {
-            Ok(self.slotframes.len() as u16 - 1)
+            Ok(self.pib.tsch.slotframes.len() as u16 - 1)
         }
     }
     /// Add the given link to the slotframe
     ///
     /// * `link` - Link to add
-    pub fn add_link(&mut self, link: TschLink<Neighbor>) -> Result<u16, ScheduleError> {
-        if let Some(slotframe) = self.slotframes.get(link.slotframe_handle as usize) {
+    pub fn add_link(&mut self, link: TschLink<()>) -> Result<u16, ScheduleError> {
+        if let Some(slotframe) = self.pib.tsch.slotframes.get(link.slotframe_handle as usize) {
             if link.timeslot >= slotframe.size {
                 Err(ScheduleError::InvalidTimeslot)
-            } else if link.channel_offset as usize >= self.hopping_sequence.len() {
+            } else if link.channel_offset as usize >= self.pib.hopping_sequence.len() {
                 Err(ScheduleError::InvalidChannelOffset)
-            } else if self.links.push(link).is_err() {
+            } else if self.pib.tsch.links.push(link).is_err() {
                 Err(ScheduleError::CapacityExceeded)
             } else {
-                Ok(self.links.len() as u16 - 1)
+                Ok(self.pib.tsch.links.len() as u16 - 1)
             }
         } else {
             Err(ScheduleError::InvalidSlotframe)
         }
     }
 
-    pub fn next_advertisement_link(&self, _asn: TschAsn) -> Option<&TschLink<Neighbor>> {
+    pub fn next_advertisement_link(&self, _asn: TschAsn) -> Option<&TschLink<()>> {
         // TODO: for now we only support a single link
-        self.links.first()
+        self.pib.tsch.links.first()
     }
 
-    pub(crate) fn next_asn_for_link(
-        &self,
-        link: &TschLink<Neighbor>,
-        current_asn: TschAsn,
-    ) -> TschAsn {
-        if let Some(slotframe) = self.slotframes.get(link.slotframe_handle as usize) {
+    pub(crate) fn next_asn_for_link(&self, link: &TschLink<()>, current_asn: TschAsn) -> TschAsn {
+        if let Some(slotframe) = self.pib.tsch.slotframes.get(link.slotframe_handle as usize) {
             slotframe.next_asn(link, current_asn)
         } else {
             // TODO: handle invalid/outdated link
@@ -185,45 +198,42 @@ impl<const MAX_SLOTFRAMES: usize, const MAX_LINKS: usize, Neighbor>
     /// Return the channel offset for a given link at a given ASN
     /// * `asn` - Absolute slot number
     /// * `link_channel_offset` - Channel offset of the link to consider
-    pub(crate) fn channel(&self, asn: TschAsn, link: &TschLink<Neighbor>) -> Channel {
+    pub(crate) fn channel(&self, asn: TschAsn, link: &TschLink<()>) -> Channel {
         let channel_offset =
-            ((asn + link.channel_offset as u64) % self.hopping_sequence.len() as u64) as usize;
+            ((asn + link.channel_offset as u64) % self.pib.hopping_sequence.len() as u64) as usize;
         // Safety: index in range by using modulo
-        self.hopping_sequence[channel_offset]
+        self.pib.hopping_sequence[channel_offset]
     }
 
     /// Get an iterator over slotframes
     pub(crate) fn slotframes(&self) -> impl Iterator<Item = &TschSlotframe> {
-        self.slotframes.iter()
+        self.pib.tsch.slotframes.iter()
     }
 
     /// Get an iterator over links
-    pub fn links(&self) -> impl Iterator<Item = &TschLink<Neighbor>> {
-        self.links.iter()
+    pub fn links(&self) -> impl Iterator<Item = &TschLink<()>> {
+        self.pib.tsch.links.iter()
     }
 
     /// Get slotframe info for beacon IE generation
     /// Returns an iterator of (handle, size) tuples
     pub fn slotframe_info(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
-        self.slotframes
+        self.pib
+            .tsch
+            .slotframes
             .iter()
             .enumerate()
             .map(|(idx, sf)| (idx as u16, sf.size))
     }
 
-    /// Get the hopping sequence
-    pub fn hopping_sequence(&self) -> &TschHoppingSequence {
-        &self.hopping_sequence
-    }
-
     /// Get number of slotframes
     pub fn num_slotframes(&self) -> usize {
-        self.slotframes.len()
+        self.pib.tsch.slotframes.len()
     }
 
     /// Get number of links
     pub fn num_links(&self) -> usize {
-        self.links.len()
+        self.pib.tsch.links.len()
     }
 }
 

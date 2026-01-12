@@ -10,16 +10,20 @@ use core::cell::Cell;
 use dot15d4_driver::radio::frame::{
     RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
 };
-use dot15d4_driver::radio::DriverConfig;
-use dot15d4_driver::timer::NsInstant;
+use dot15d4_driver::{radio::DriverConfig, timer::NsInstant};
 use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::{Channel, HasAddress, Receiver, Sender};
 
 use crate::driver::{DriverEventReceiver, DriverRequestSender};
 use crate::mac::MacBufferAllocator;
+use crate::pib::Pib;
 
 pub use self::command::{SchedulerCommand, SchedulerCommandResult};
-use self::tsch::beacon::EnhancedBeaconBuilder;
+
+#[cfg(feature = "tsch")]
+use self::tsch::{runner::TschDeviceMode, TschState};
+#[cfg(feature = "tsch")]
+use dot15d4_driver::timer::{NsDuration, RadioTimerApi};
 
 pub const SCHEDULER_CHANNEL_CAPACITY: usize = 5;
 pub const SCHEDULER_CHANNEL_BACKLOG: usize = 5;
@@ -121,11 +125,10 @@ pub struct SchedulerService<'svc, RadioDriverImpl: DriverConfig> {
     // Pre-allocated frame for inbound frame
     rx_frame: Cell<Option<RadioFrame<RadioFrameUnsized>>>,
     buffer_allocator: MacBufferAllocator,
-    // TODO: feature tsch-coordinator
-    beacon_frame: Cell<Option<RadioFrame<RadioFrameSized>>>,
-    beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
     /// PAN Information Base
     pib: Pib,
+    #[cfg(feature = "tsch")]
+    tsch_state: TschState<RadioDriverImpl>,
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl> {
@@ -143,10 +146,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             driver_request_sender,
             driver_event_receiver: driver_response_receiver,
             rx_frame: Cell::new(Some(Self::allocate_frame(buffer_allocator))),
-            beacon_frame: Cell::new(None),
             buffer_allocator,
-            beacon_builder: EnhancedBeaconBuilder::new(),
             pib: Pib::default(),
+            #[cfg(feature = "tsch")]
+            tsch_state: TschState::new(),
         }
     }
 
