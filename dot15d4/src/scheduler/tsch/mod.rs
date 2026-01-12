@@ -29,9 +29,11 @@ use crate::{
 
 use self::{
     beacon::EnhancedBeaconBuilder,
-    runner::{TschDeviceMode, TschOperation, TschRunner},
-    schedule::{TschAsn, TschHoppingSequence, TschLink, TschLinkType, TschSchedule},
+    runner::{TschDeviceMode, TschOperation},
+    schedule::{TschAsn, TschLink, TschLinkType},
 };
+
+pub use self::runner::TschState;
 
 use super::{SchedulerCommand, SchedulerService, SchedulerState};
 
