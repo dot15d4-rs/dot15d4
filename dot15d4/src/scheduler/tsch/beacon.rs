@@ -10,7 +10,9 @@ use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
 use dot15d4_frame::{MpduWithAllFields, MpduWithIes};
 use dot15d4_util::allocator::{BufferToken, IntoBuffer};
 
-use super::schedule::{TschAsn, TschSchedule};
+use crate::scheduler::SchedulerService;
+
+use super::schedule::{TschAsn, TschPib};
 
 /// Static storage for Enhanced Beacon IE configuration
 /// This is used because MpduRepr requires 'static lifetimes for const IE lists
@@ -48,10 +50,10 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
     }
 
     /// Build an Enhanced Beacon frame from the schedule
-    pub fn build_enhanced_beacon<const MAX_SF: usize, const MAX_L: usize, Neighbor>(
+    pub fn build_enhanced_beacon(
         &self,
+        service: &SchedulerService<RadioDriverImpl>,
         radio_frame: RadioFrame<RadioFrameUnsized>,
-        schedule: &TschSchedule<MAX_SF, MAX_L, Neighbor>,
         src_address: &Address<[u8; 8]>,
         pan_id: &PanId<[u8; 2]>,
     ) -> Option<RadioFrame<RadioFrameSized>> {
@@ -81,14 +83,14 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 let mut slotframes = slotframe_ie.slotframes_mut();
 
                 // Iterate through schedule's slotframes
-                for (sf_handle, sf_size) in schedule.slotframe_info() {
+                for (sf_handle, sf_size) in service.slotframe_info() {
                     if let Some(mut sf) = slotframes.next() {
                         sf.set_handle(sf_handle as u8);
                         sf.set_size(sf_size);
 
                         // Add links for this slotframe
                         let mut links = sf.links_mut();
-                        for link in schedule
+                        for link in service
                             .links()
                             .filter(|l| l.slotframe_handle == sf_handle && l.link_advertise)
                         {
@@ -104,7 +106,7 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
 
             // Set Timeslot IE from schedule's timing configuration
             if let Some(mut timeslot_ie) = ies.tsch_timeslot_mut() {
-                let timings = &schedule.timeslot_timings;
+                let timings = &service.pib.tsch.timeslot_timings;
                 timeslot_ie.set_timeslot_id(timings.id());
                 timeslot_ie.set_cca_offset(timings.cca_offset());
                 timeslot_ie.set_cca(timings.cca());
