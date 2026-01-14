@@ -49,18 +49,21 @@ const COORD_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_
 impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl> {
     pub(super) async fn run_tsch(
         &mut self,
+        mode: TschDeviceMode,
         mut consumer_token: ConsumerToken,
     ) -> (SchedulerState, ConsumerToken) {
-        let schedule = Self::create_minimal_schedule();
+        let (last_base_time, last_asn, is_coordinator) = match mode {
+            TschDeviceMode::Device(asn, instant) => (instant, asn, false),
+            TschDeviceMode::Coordinator(instant) => (instant, 0, true),
+        };
+        self.tsch_state.last_base_time = last_base_time;
+        self.tsch_state.last_asn = last_asn;
 
-        self.init_beacon_frame(&schedule);
+        if is_coordinator {
+            self.init_beacon_frame();
+        }
 
-        let network_start_time = self.timer.now() - NsDuration::millis(1);
-
-        let mut schedule_runner: TschRunner<_, _, MAX_OPERATIONS, _> =
-            TschRunner::new(schedule, TschDeviceMode::Coordinator(network_start_time));
-
-        let mut next_deadline = schedule_runner.next_deadline();
+        let mut next_deadline = self.next_deadline();
 
         loop {
             match select::select(
@@ -75,7 +78,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                 Either::First(_timer_result) => {
                     // Timer expired, we proceed with scheduling the operation that triggered
                     // the timeout.
-                    let (new_deadline, instant, operation) = schedule_runner.next_operation();
+                    let (new_deadline, instant, operation) = self.next_operation();
                     match operation {
                         TschOperation::TxSlot(mpdu_frame, _, channel, cca, response_token) => {
                             self.tx_slot(
@@ -100,27 +103,24 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                 Either::Second((response_token, request)) => {
                     // We received a TX request before we wake up. We must update next operation in
                     // case the new one is due earlier than the current next operation
-                    next_deadline = schedule_runner.queue_scheduler_request(
-                        request,
-                        response_token,
-                        self.timer.now(),
-                    );
+                    next_deadline =
+                        self.queue_scheduler_request(request, response_token, self.timer.now());
                 }
             }
         }
     }
 
-    fn init_beacon_frame(&mut self, schedule: &TschSchedule<MAX_SLOTFRAMES, MAX_LINKS, ()>) {
+    fn init_beacon_frame(&mut self) {
         let radio_frame = Self::allocate_frame(self.buffer_allocator);
 
-        let beacon_frame = self.beacon_builder.build_enhanced_beacon(
+        let beacon_frame = self.tsch_state.beacon_builder.build_enhanced_beacon(
+            &self,
             radio_frame,
-            schedule,
             &COORD_MAC_ADDR,
-            &MAC_PAN_ID,
+            &self.pib.pan_id,
         );
         if let Some(beacon_frame) = beacon_frame {
-            self.beacon_frame.set(Some(beacon_frame));
+            self.tsch_state.beacon_frame.set(Some(beacon_frame));
         } else {
             panic!("Enhanced beacon could not be initialized");
         }
@@ -201,9 +201,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
     }
 
     async fn advertisement_slot(&self, instant: NsInstant, asn: TschAsn, channel: Channel) {
-        let radio_frame = self.beacon_frame.take().unwrap();
+        let radio_frame = self.tsch_state.beacon_frame.take().unwrap();
 
-        let updated_frame = self.beacon_builder.update_beacon(radio_frame, asn).unwrap();
+        let updated_frame = self
+            .tsch_state
+            .beacon_builder
+            .update_beacon(radio_frame, asn)
+            .unwrap();
 
         self.driver_request_sender
             .send(DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
@@ -221,30 +225,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         match self.driver_event_receiver.receive().await {
             DrvSvcEvent::Sent(beacon_frame, _instant) => {
                 // set back beacon frame
-                self.beacon_frame.set(Some(beacon_frame));
+                self.tsch_state.beacon_frame.set(Some(beacon_frame));
             }
             _ => unreachable!(),
         }
-    }
-
-    fn create_minimal_schedule() -> TschSchedule<MAX_SLOTFRAMES, MAX_LINKS, ()> {
-        let hopping_sequence = [Channel::_12, Channel::_26];
-        let mut schedule = TschSchedule::<MAX_SLOTFRAMES, MAX_LINKS, ()>::new(hopping_sequence);
-
-        let slotframe_handle = schedule.create_slotframe(100).unwrap();
-
-        schedule
-            .add_link(TschLink {
-                slotframe_handle,
-                channel_offset: 0,
-                timeslot: 0,
-                link_options: TschLinkOption::Shared,
-                link_type: TschLinkType::Advertising,
-                ..Default::default()
-            })
-            .unwrap();
-
-        schedule
     }
 
     pub(super) fn handle_tsch_command(&mut self, command: SchedulerCommand) {

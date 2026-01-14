@@ -175,7 +175,16 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         loop {
             (mode, consumer_token) = match mode {
                 SchedulerState::UsingCsmaCa => self.run_csma(consumer_token).await,
-                SchedulerState::UsingTsch => self.run_tsch(consumer_token).await,
+                #[cfg(feature = "tsch")]
+                SchedulerState::UsingTsch => {
+                    // TODO: Handle non-coordinator device
+                    let network_start_time = self.timer.now() - NsDuration::millis(1);
+                    self.run_tsch(
+                        TschDeviceMode::Coordinator(network_start_time),
+                        consumer_token,
+                    )
+                    .await
+                }
             }
         }
     }
