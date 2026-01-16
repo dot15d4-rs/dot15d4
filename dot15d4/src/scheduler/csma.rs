@@ -7,13 +7,10 @@ use dot15d4_util::{
     sync::{select, ConsumerToken, Either, ResponseToken},
 };
 
-#[cfg(feature = "tsch")]
-use super::command::UseTschCommandResult;
 use super::{SchedulerService, SchedulerState};
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
 use crate::scheduler::{
-    command::SchedulerCommand, SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult,
-    TaskDirection,
+    SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
 };
 
 pub enum CsmaSchedulerState {
@@ -257,19 +254,19 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                             };
                         }
                         SchedulerRequest::Command(command) => {
-                            match command {
+                            match self.handle_command(
+                                command,
+                                response_token,
+                                SchedulerState::UsingCsmaCa,
+                            ) {
+                                SchedulerState::UsingCsmaCa => {}
                                 #[cfg(feature = "tsch")]
-                                // TODO: use tsch feature
-                                SchedulerCommand::UseTsch(_tsch_mode, _tsch_cca) => {
-                                    // TODO: handle config change, define pub fn in tsch ? set_mode ?
-                                    return self.terminate(response_token).await;
+                                SchedulerState::UsingTsch => {
+                                    self.terminate().await;
+                                    return CsmaSchedulerState::Terminating(
+                                        SchedulerState::UsingTsch,
+                                    );
                                 }
-                                #[cfg(feature = "tsch")]
-                                SchedulerCommand::SetTschSlotframe(_)
-                                | SchedulerCommand::SetTschLink(_) => {
-                                    self.handle_tsch_command(command);
-                                }
-                                _ => unreachable!(),
                             }
                         }
                         // TODO: support UseCsma Command to enable channel switching

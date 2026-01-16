@@ -6,8 +6,8 @@ use dot15d4_driver::radio::DriverConfig;
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
-        command::SetTschSlotframeResult, SchedulerCommand, SchedulerCommandResult,
-        SchedulerRequest, SchedulerResponse,
+        command::tsch::{SetTschSlotframeResult, TschCommand, TschCommandResult},
+        SchedulerCommand, SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
     },
 };
 
@@ -68,13 +68,17 @@ impl<RadioDriverImpl: DriverConfig> MacTask for SetSlotframeRequestTask<'_, Radi
                 self.state = SetSlotframeRequestState::SendingRequest;
                 MacTaskTransition::SchedulerRequest(
                     self,
-                    SchedulerRequest::Command(SchedulerCommand::SetTschSlotframe(request)),
+                    SchedulerRequest::Command(SchedulerCommand::TschCommand(
+                        TschCommand::SetTschSlotframe(request),
+                    )),
                     None,
                 )
             }
             SetSlotframeRequestState::SendingRequest => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Command(
-                    SchedulerCommandResult::SetTschSlotframe(command_result),
+                    SchedulerCommandResult::TschCommand(TschCommandResult::SetTschSlotframe(
+                        command_result,
+                    )),
                 )) => {
                     // TODO: implement into()
                     let task_result = match command_result {
