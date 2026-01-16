@@ -13,7 +13,7 @@ use crate::constants::MAC_TSCH_MAX_PENDING_OPERATIONS;
 use crate::scheduler::{SchedulerRequest, SchedulerService};
 
 use super::beacon::EnhancedBeaconBuilder;
-use super::schedule::TschAsn;
+use super::pib::TschAsn;
 
 /// Guard time before a timeslot starts, used to wake up early and prepare for the slot.
 const TIMESLOT_GUARD_TIME: NsDuration = NsDuration::micros(2000);

@@ -12,7 +12,7 @@ use dot15d4_util::allocator::{BufferToken, IntoBuffer};
 
 use crate::scheduler::SchedulerService;
 
-use super::schedule::{TschAsn, TschPib};
+use super::pib::{TschAsn, TschPib};
 
 /// Static storage for Enhanced Beacon IE configuration
 /// This is used because MpduRepr requires 'static lifetimes for const IE lists
