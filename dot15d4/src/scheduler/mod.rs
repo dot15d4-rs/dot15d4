@@ -12,7 +12,7 @@ use dot15d4_driver::radio::frame::{
 };
 use dot15d4_driver::{radio::DriverConfig, timer::NsInstant};
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::sync::{Channel, HasAddress, Receiver, Sender};
+use dot15d4_util::sync::{Channel, HasAddress, Receiver, ResponseToken, Sender};
 
 use crate::driver::{DriverEventReceiver, DriverRequestSender};
 use crate::mac::MacBufferAllocator;
@@ -186,6 +186,21 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                     .await
                 }
             }
+        }
+    }
+
+    pub(super) fn handle_command(
+        &mut self,
+        command: SchedulerCommand,
+        response_token: ResponseToken,
+        scheduler_state: SchedulerState,
+    ) -> SchedulerState {
+        match command {
+            #[cfg(feature = "tsch")]
+            SchedulerCommand::TschCommand(tsch_command) => {
+                self.handle_tsch_command(tsch_command, response_token, scheduler_state)
+            }
+            SchedulerCommand::UseCsma => todo!(),
         }
     }
 }

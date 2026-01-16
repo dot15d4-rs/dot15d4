@@ -24,7 +24,10 @@ use dot15d4_util::{
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     mac::mlme::tsch::TschScheduleOperation,
-    scheduler::{SchedulerResponse, SchedulerTransmissionResult, TaskDirection},
+    scheduler::{
+        command::tsch::{TschCommandResult, UseTschCommandResult},
+        SchedulerCommandResult, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
+    },
 };
 
 use self::{
@@ -35,7 +38,7 @@ use self::{
 
 pub use self::operations::TschState;
 
-use super::{SchedulerCommand, SchedulerService, SchedulerState};
+use super::{command::tsch::TschCommand, SchedulerCommand, SchedulerService, SchedulerState};
 
 const MAX_SLOTFRAMES: usize = 1;
 const MAX_LINKS: usize = 1;
@@ -231,14 +234,32 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         }
     }
 
-    pub(super) fn handle_tsch_command(&mut self, command: SchedulerCommand) {
+    pub(super) fn handle_tsch_command(
+        &mut self,
+        command: TschCommand,
+        response_token: ResponseToken,
+        scheduler_state: SchedulerState,
+    ) -> SchedulerState {
         match command {
-            SchedulerCommand::SetTschSlotframe(request) => match request.operation {
-                TschScheduleOperation::Add => {}
+            TschCommand::SetTschSlotframe(request) => match request.operation {
+                TschScheduleOperation::Add => scheduler_state,
                 _ => todo!(),
             },
-            SchedulerCommand::SetTschLink(_set_link_request) => todo!(),
-            _ => unreachable!(),
+            TschCommand::SetTschLink(_set_link_request) => todo!(),
+            TschCommand::UseTsch(tsch_mode, _) => {
+                if tsch_mode {
+                    self.request_receiver.received(
+                        // TODO: implement from/into for SchedulerCommandResult
+                        response_token,
+                        SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
+                            TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
+                        )),
+                    );
+                    SchedulerState::UsingTsch
+                } else {
+                    scheduler_state
+                }
+            }
         }
     }
 }

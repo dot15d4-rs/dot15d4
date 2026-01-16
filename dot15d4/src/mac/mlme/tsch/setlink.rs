@@ -7,8 +7,9 @@ use dot15d4_frame::fields::TschLinkOption;
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
-        command::SetTschLinkResult, tsch::pib::TschLinkType, SchedulerCommand,
-        SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
+        command::tsch::{SetTschLinkResult, TschCommandResult},
+        tsch::pib::TschLinkType,
+        SchedulerCommand, SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
     },
 };
 
@@ -73,13 +74,17 @@ impl<RadioDriverImpl: DriverConfig> MacTask for SetLinkRequestTask<'_, RadioDriv
                 self.state = SetLinkRequestState::SendingRequest;
                 MacTaskTransition::SchedulerRequest(
                     self,
-                    SchedulerRequest::Command(SchedulerCommand::SetTschLink(request)),
+                    SchedulerRequest::Command(SchedulerCommand::TschCommand(
+                        crate::scheduler::command::tsch::TschCommand::SetTschLink(request),
+                    )),
                     None,
                 )
             }
             SetLinkRequestState::SendingRequest => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Command(
-                    SchedulerCommandResult::SetTschLink(command_result),
+                    SchedulerCommandResult::TschCommand(TschCommandResult::SetTschLink(
+                        command_result,
+                    )),
                 )) => {
                     // TODO: implement into()
                     let task_result = match command_result {

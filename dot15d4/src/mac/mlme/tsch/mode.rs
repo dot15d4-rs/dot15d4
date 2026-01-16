@@ -6,15 +6,16 @@ use dot15d4_driver::radio::DriverConfig;
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
-        command::UseTschCommandResult, SchedulerCommand, SchedulerCommandResult, SchedulerRequest,
-        SchedulerResponse,
+        command::tsch::{TschCommand, UseTschCommandResult},
+        SchedulerCommand, SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
     },
 };
 
 pub struct TschModeRequest {
-    /// Used to indicate if the TSCH mode is to be started or stopped
+    /// Indication of whether the device is joining (or associated to) a TSCH
+    /// network (i.e. not using unslotted CSMA-CA)
     pub tsch_mode: bool,
-    /// Used to indicate that CCA is to be used for transmission
+    /// Indication of whether the device should use CCA during CSMA-CA TSCH
     pub tsch_cca: bool,
 }
 
@@ -67,13 +68,17 @@ impl<RadioDriverImpl: DriverConfig> MacTask for TschModeRequestTask<'_, RadioDri
                 self.state = TschModeRequestState::SendingRequest;
                 MacTaskTransition::SchedulerRequest(
                     self,
-                    SchedulerRequest::Command(SchedulerCommand::UseTsch(tsch_mode, tsch_cca)),
+                    SchedulerRequest::Command(SchedulerCommand::TschCommand(TschCommand::UseTsch(
+                        tsch_mode, tsch_cca,
+                    ))),
                     None,
                 )
             }
             TschModeRequestState::SendingRequest => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Command(
-                    SchedulerCommandResult::UseTsch(command_result),
+                    SchedulerCommandResult::TschCommand(
+                        crate::scheduler::command::tsch::TschCommandResult::UseTsch(command_result),
+                    ),
                 )) => {
                     let task_result = match command_result {
                         UseTschCommandResult::StartedTsch => TschModeConfirm::Started,
