@@ -372,94 +372,95 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
     }
 
     async fn initial(&mut self) -> CsmaSchedulerState {
-        match self
-            .request_receiver
-            .try_receive_request(&TaskDirection::Outbound)
-        {
-            Some((sched_response_token, request)) => match request {
-                SchedulerRequest::Transmission(mpdu_frame) => {
+        loop {
+            match self
+                .request_receiver
+                .try_receive_request(&TaskDirection::Outbound)
+            {
+                Some((sched_response_token, request)) => match request {
+                    SchedulerRequest::Transmission(mpdu_frame) => {
+                        self.driver_request_sender
+                            .send(DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
+                                at: Timestamp::BestEffort,
+                                radio_frame: mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
+                                cca: false,
+                                channel: None,
+                                // First try so we expect to retransmit on NACK
+                                fallback_on_nack: true,
+                            }))
+                            .await;
+                        break CsmaSchedulerState::Transmitting(sched_response_token);
+                    }
+                    SchedulerRequest::Command(command) => {
+                        match self.handle_command(
+                            command,
+                            sched_response_token,
+                            SchedulerState::UsingCsmaCa,
+                        ) {
+                            SchedulerState::UsingCsmaCa => {}
+                            #[cfg(feature = "tsch")]
+                            SchedulerState::UsingTsch => {
+                                break CsmaSchedulerState::Terminating(SchedulerState::UsingTsch)
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                },
+                None => {
+                    let inbound_frame = self.rx_frame.take().unwrap();
                     self.driver_request_sender
-                        .send(DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
-                            at: Timestamp::BestEffort,
-                            radio_frame: mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
-                            cca: false,
+                        .send(DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
+                            start: Timestamp::BestEffort,
+                            radio_frame: inbound_frame,
                             channel: None,
-                            // First try so we expect to retransmit on NACK
-                            fallback_on_nack: true,
                         }))
                         .await;
-                    CsmaSchedulerState::Transmitting(sched_response_token)
+                    break CsmaSchedulerState::WaitingForFrame;
                 }
-                #[cfg(feature = "tsch")]
-                SchedulerRequest::Command(SchedulerCommand::UseTsch(_, _)) => {
-                    self.terminate(sched_response_token).await
-                }
-                _ => unreachable!(),
-            },
-            None => {
-                let inbound_frame = self.rx_frame.take().unwrap();
-                self.driver_request_sender
-                    .send(DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
-                        start: Timestamp::BestEffort,
-                        radio_frame: inbound_frame,
-                        channel: None,
-                    }))
-                    .await;
-                CsmaSchedulerState::WaitingForFrame
             }
         }
     }
 
     #[cfg(feature = "tsch")]
-    async fn terminate(&self, command_response_token: ResponseToken) -> CsmaSchedulerState {
-        // // Handle last operation result
-        // self.driver_request_sender
-        //     .send(DrvSvcRequest::CompleteThenGoIdle)
-        //     .await;
-        // // process current RX
-        // match self.driver_event_receiver.receive().await {
-        //     DrvSvcEvent::Received(radio_frame, instant) => unsafe {
-        //         // Safety: we expect the MAC service to always send a
-        //         // RX request
-        //         if let Some((response_token, SchedulerRequest::Reception)) = self
-        //             .request_receiver
-        //             .try_receive_request(&TaskDirection::Inbound)
-        //         {
-        //             self.request_receiver.received(
-        //                 response_token,
-        //                 SchedulerResponse::Reception(radio_frame, instant),
-        //             );
-        //         } else {
-        //             unsafe {
-        //                 self.buffer_allocator
-        //                     .deallocate_buffer(radio_frame.into_buffer());
-        //             }
-        //         }
-        //     },
-        //     DrvSvcEvent::RxWindowEnded(radio_frame) => unsafe {
-        //         unsafe {
-        //             self.buffer_allocator
-        //                 .deallocate_buffer(radio_frame.into_buffer());
-        //         }
-        //     },
-        //     DrvSvcEvent::CrcError(radio_frame, instant) => {
-        //         self.rx_frame.set(Some(radio_frame));
-        //     }
-        //     _ => unreachable!(),
-        // }
-        // if let Some(rx_frame) = self.rx_frame.take() {
-        //     unsafe {
-        //         self.buffer_allocator
-        //             .deallocate_buffer(rx_frame.into_buffer());
-        //     }
-        // }
-        self.request_receiver.received(
-            // TODO: implement from/into for SchedulerCommandResult
-            command_response_token,
-            SchedulerResponse::Command(super::SchedulerCommandResult::UseTsch(
-                UseTschCommandResult::StartedTsch,
-            )),
-        );
-        CsmaSchedulerState::Terminating(SchedulerState::UsingTsch)
+    pub async fn terminate(&self) {
+        // Handle last operation result
+        self.driver_request_sender
+            .send(DrvSvcRequest::CompleteThenGoIdle)
+            .await;
+        // process current RX
+        match self.driver_event_receiver.receive().await {
+            DrvSvcEvent::Received(radio_frame, instant) => {
+                // Safety: we expect the MAC service to always send a
+                // RX request
+                if let Some((response_token, SchedulerRequest::Reception)) = self
+                    .request_receiver
+                    .try_receive_request(&TaskDirection::Inbound)
+                {
+                    self.request_receiver.received(
+                        response_token,
+                        SchedulerResponse::Reception(radio_frame, instant),
+                    );
+                } else {
+                    unsafe {
+                        self.buffer_allocator
+                            .deallocate_buffer(radio_frame.into_buffer());
+                    }
+                }
+            }
+            DrvSvcEvent::RxWindowEnded(radio_frame) => unsafe {
+                self.buffer_allocator
+                    .deallocate_buffer(radio_frame.into_buffer());
+            },
+            DrvSvcEvent::CrcError(radio_frame, _instant) => {
+                self.rx_frame.set(Some(radio_frame));
+            }
+            _ => unreachable!(),
+        }
+        if let Some(rx_frame) = self.rx_frame.take() {
+            unsafe {
+                self.buffer_allocator
+                    .deallocate_buffer(rx_frame.into_buffer());
+            }
+        }
     }
 }
