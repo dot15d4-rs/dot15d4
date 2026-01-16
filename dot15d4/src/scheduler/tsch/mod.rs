@@ -1,8 +1,8 @@
 #![allow(unused_imports)]
 pub mod asn;
 pub mod beacon;
-pub mod runner;
-pub mod schedule;
+pub mod operations;
+pub mod pib;
 
 use core::cell::Cell;
 use heapless::Vec;
@@ -29,11 +29,11 @@ use crate::{
 
 use self::{
     beacon::EnhancedBeaconBuilder,
-    runner::{TschDeviceMode, TschOperation},
-    schedule::{TschAsn, TschLink, TschLinkType},
+    operations::{TschDeviceMode, TschOperation},
+    pib::{TschAsn, TschLink, TschLinkType},
 };
 
-pub use self::runner::TschState;
+pub use self::operations::TschState;
 
 use super::{SchedulerCommand, SchedulerService, SchedulerState};
 

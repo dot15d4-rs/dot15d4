@@ -21,7 +21,7 @@ use crate::pib::Pib;
 pub use self::command::{SchedulerCommand, SchedulerCommandResult};
 
 #[cfg(feature = "tsch")]
-use self::tsch::{runner::TschDeviceMode, TschState};
+use self::tsch::{operations::TschDeviceMode, TschState};
 #[cfg(feature = "tsch")]
 use dot15d4_driver::timer::{NsDuration, RadioTimerApi};
 

@@ -8,7 +8,7 @@ use crate::constants::{
 };
 
 #[cfg(feature = "tsch")]
-use crate::scheduler::tsch::schedule::TschPib;
+use crate::scheduler::tsch::pib::TschPib;
 
 /// PAN Information Base (PIB) specified by MAC sublayer
 #[allow(dead_code)]

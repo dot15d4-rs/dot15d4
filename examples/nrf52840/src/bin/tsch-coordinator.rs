@@ -26,7 +26,7 @@ use dot15d4::{
         mode::TschModeRequest, setlink::SetLinkRequest, setslotframe::SetSlotframeRequest,
         TschScheduleOperation,
     },
-    scheduler::tsch::schedule::TschLinkType,
+    scheduler::tsch::pib::TschLinkType,
 };
 #[cfg(feature = "executor-trace")]
 use dot15d4_examples_nrf52840::gpio_trace::PIN_EXECUTOR;

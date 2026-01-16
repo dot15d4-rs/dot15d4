@@ -7,7 +7,7 @@ use dot15d4_frame::fields::TschLinkOption;
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
-        command::SetTschLinkResult, tsch::schedule::TschLinkType, SchedulerCommand,
+        command::SetTschLinkResult, tsch::pib::TschLinkType, SchedulerCommand,
         SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
     },
 };
