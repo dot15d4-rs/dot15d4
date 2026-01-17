@@ -1,15 +1,30 @@
+use dot15d4_driver::radio::config::Channel;
+
 #[cfg(feature = "tsch")]
 use self::tsch::{TschCommand, TschCommandResult};
 
 pub enum SchedulerCommand {
     #[cfg(feature = "tsch")]
     TschCommand(TschCommand),
-    UseCsma,
+    CsmaCommand(CsmaCommand),
 }
 
 pub enum SchedulerCommandResult {
     #[cfg(feature = "tsch")]
     TschCommand(TschCommandResult),
+    CsmaCommand(CsmaCommandResult),
+}
+
+pub enum CsmaCommand {
+    UseCsma(Channel),
+}
+
+pub enum UseCsmaResult {
+    Success,
+}
+
+pub enum CsmaCommandResult {
+    UseCsma(UseCsmaResult),
 }
 
 #[cfg(feature = "tsch")]
