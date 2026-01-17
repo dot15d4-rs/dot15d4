@@ -14,7 +14,7 @@ use super::{
 };
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
 use crate::scheduler::{
-    SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
+    MessageType, SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult,
 };
 
 pub enum CsmaSchedulerState {
@@ -185,6 +185,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
 
                             // If there is a pending TX request, use it, otherwise we want
                             // to wait for a frame
+                            //FIXME: we suppose that request is either TX or RX request but this is
+                            //now wrong, it can be command request. We do not support that yet,
+                            //resulting in command being ignored for longer thant necessary when we
+                            //have consecutive TX requests.
                             let (request, is_tx) = self.next_driver_request(pending_tx_frame);
 
                             if is_tx {
@@ -226,7 +230,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             // schedule next
             match select(
                 self.request_receiver
-                    .receive_request_async(consumer_token, &TaskDirection::Outbound),
+                    .receive_request_async(consumer_token, &MessageType::TxOrCommand),
                 self.driver_event_receiver.receive(),
             )
             .await
@@ -294,9 +298,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                         DrvSvcEvent::Received(radio_frame, instant) => {
                             // Safety: we expect the MAC service to always send a
                             // RX request
-                            if let Some((response_token, SchedulerRequest::Reception)) = self
-                                .request_receiver
-                                .try_receive_request(&TaskDirection::Inbound)
+                            if let Some((response_token, SchedulerRequest::Reception)) =
+                                self.request_receiver.try_receive_request(&MessageType::Rx)
                             {
                                 self.request_receiver.received(
                                     response_token,
@@ -328,10 +331,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         pending_response_token: Option<ResponseToken>,
     ) -> (Option<RadioFrame<RadioFrameSized>>, Option<ResponseToken>) {
         if pending_tx_frame.is_none() {
-            match self
-                .request_receiver
-                .try_receive_request(&TaskDirection::Outbound)
-            {
+            match self.request_receiver.try_receive_request(&MessageType::Tx) {
                 Some((token, SchedulerRequest::Transmission(mpdu))) => (
                     Some(mpdu.into_radio_frame::<RadioDriverImpl>()),
                     Some(token),
@@ -378,7 +378,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         loop {
             match self
                 .request_receiver
-                .try_receive_request(&TaskDirection::Outbound)
+                .try_receive_request(&MessageType::TxOrCommand)
             {
                 Some((sched_response_token, request)) => match request {
                     SchedulerRequest::Transmission(mpdu_frame) => {
@@ -435,9 +435,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             DrvSvcEvent::Received(radio_frame, instant) => {
                 // Safety: we expect the MAC service to always send a
                 // RX request
-                if let Some((response_token, SchedulerRequest::Reception)) = self
-                    .request_receiver
-                    .try_receive_request(&TaskDirection::Inbound)
+                if let Some((response_token, SchedulerRequest::Reception)) =
+                    self.request_receiver.try_receive_request(&MessageType::Rx)
                 {
                     self.request_receiver.received(
                         response_token,

@@ -26,7 +26,7 @@ use crate::{
     mac::mlme::tsch::TschScheduleOperation,
     scheduler::{
         command::tsch::{TschCommandResult, UseTschCommandResult},
-        SchedulerCommandResult, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
+        MessageType, SchedulerCommandResult, SchedulerResponse, SchedulerTransmissionResult,
     },
 };
 
@@ -74,7 +74,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                 unsafe { self.timer.wait_until(next_deadline) },
                 // Waiting for next Scheduler Transmission request
                 self.request_receiver
-                    .receive_request_async(&mut consumer_token, &TaskDirection::Outbound),
+                    .receive_request_async(&mut consumer_token, &MessageType::TxOrCommand),
             )
             .await
             {
