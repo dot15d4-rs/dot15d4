@@ -1,4 +1,5 @@
 use dot15d4_driver::radio::{
+    config::Channel,
     frame::{RadioFrame, RadioFrameSized},
     DriverConfig,
 };
@@ -7,14 +8,17 @@ use dot15d4_util::{
     sync::{select, ConsumerToken, Either, ResponseToken},
 };
 
-use super::{SchedulerService, SchedulerState};
+use super::{
+    command::{CsmaCommand, CsmaCommandResult, UseCsmaResult},
+    SchedulerCommandResult, SchedulerService, SchedulerState,
+};
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp};
 use crate::scheduler::{
     SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult, TaskDirection,
 };
 
 pub enum CsmaSchedulerState {
-    Initial,
+    Initial(Channel),
     Transmitting(ResponseToken),
     WaitingForFrame,
     Terminating(SchedulerState),
@@ -28,11 +32,11 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         &mut self,
         mut consumer_token: ConsumerToken,
     ) -> (SchedulerState, ConsumerToken) {
-        let mut state = CsmaSchedulerState::Initial;
+        let mut state = CsmaSchedulerState::Initial(Channel::_12);
 
         loop {
             state = match state {
-                CsmaSchedulerState::Initial => self.initial().await,
+                CsmaSchedulerState::Initial(channel) => self.initial(channel).await,
                 CsmaSchedulerState::Transmitting(sched_response_token) => {
                     self.complete_csma_ca_tx(sched_response_token).await
                 }
@@ -269,7 +273,6 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                                 }
                             }
                         }
-                        // TODO: support UseCsma Command to enable channel switching
                         _ => unreachable!(),
                     }
                 }
@@ -371,7 +374,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         })
     }
 
-    async fn initial(&mut self) -> CsmaSchedulerState {
+    async fn initial(&mut self, channel: Channel) -> CsmaSchedulerState {
         loop {
             match self
                 .request_receiver
@@ -384,7 +387,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                                 at: Timestamp::BestEffort,
                                 radio_frame: mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
                                 cca: false,
-                                channel: None,
+                                channel: Some(channel),
                                 // First try so we expect to retransmit on NACK
                                 fallback_on_nack: true,
                             }))
@@ -412,7 +415,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                         .send(DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
                             start: Timestamp::BestEffort,
                             radio_frame: inbound_frame,
-                            channel: None,
+                            channel: Some(channel),
                         }))
                         .await;
                     break CsmaSchedulerState::WaitingForFrame;
@@ -461,6 +464,30 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
                 self.buffer_allocator
                     .deallocate_buffer(rx_frame.into_buffer());
             }
+        }
+    }
+
+    pub(super) fn handle_csma_command(
+        &mut self,
+        command: CsmaCommand,
+        response_token: ResponseToken,
+        scheduler_state: SchedulerState,
+    ) -> SchedulerState {
+        match scheduler_state {
+            SchedulerState::UsingCsmaCa => match command {
+                CsmaCommand::UseCsma(channel) => {
+                    self.request_receiver.received(
+                        // TODO: implement from/into for SchedulerCommandResult
+                        response_token,
+                        SchedulerResponse::Command(SchedulerCommandResult::CsmaCommand(
+                            CsmaCommandResult::UseCsma(UseCsmaResult::Success),
+                        )),
+                    );
+                    SchedulerState::UsingCsmaCa
+                }
+            },
+            // TODO: handle switching from TSCH to CSMA/CA again
+            SchedulerState::UsingTsch => todo!(),
         }
     }
 }

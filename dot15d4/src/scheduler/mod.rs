@@ -200,7 +200,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             SchedulerCommand::TschCommand(tsch_command) => {
                 self.handle_tsch_command(tsch_command, response_token, scheduler_state)
             }
-            SchedulerCommand::UseCsma => todo!(),
+            SchedulerCommand::CsmaCommand(csma_command) => todo!(),
         }
     }
 }
