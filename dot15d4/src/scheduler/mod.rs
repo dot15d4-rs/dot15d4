@@ -32,14 +32,15 @@ pub const SCHEDULER_CHANNEL_BACKLOG: usize = 5;
 /// We therefore route these two classes of tasks into separate virtual
 /// channels.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum TaskDirection {
-    Outbound,
-    Inbound,
-    Any,
+pub enum MessageType {
+    Tx,
+    Rx,
+    Command,
+    TxOrCommand,
 }
 
 pub type SchedulerRequestChannel = Channel<
-    TaskDirection,
+    MessageType,
     SchedulerRequest,
     SchedulerResponse,
     SCHEDULER_CHANNEL_CAPACITY,
@@ -48,7 +49,7 @@ pub type SchedulerRequestChannel = Channel<
 >;
 pub type SchedulerRequestReceiver<'channel> = Receiver<
     'channel,
-    TaskDirection,
+    MessageType,
     SchedulerRequest,
     SchedulerResponse,
     SCHEDULER_CHANNEL_CAPACITY,
@@ -57,7 +58,7 @@ pub type SchedulerRequestReceiver<'channel> = Receiver<
 >;
 pub type SchedulerRequestSender<'channel> = Sender<
     'channel,
-    TaskDirection,
+    MessageType,
     SchedulerRequest,
     SchedulerResponse,
     SCHEDULER_CHANNEL_CAPACITY,
@@ -96,16 +97,17 @@ pub enum SchedulerResponse {
     Command(SchedulerCommandResult),
 }
 
-impl HasAddress<TaskDirection> for SchedulerRequest {
-    fn matches(&self, address: &TaskDirection) -> bool {
-        if matches!(*address, TaskDirection::Any) {
-            return true;
-        }
-
+impl HasAddress<MessageType> for SchedulerRequest {
+    fn matches(&self, address: &MessageType) -> bool {
         match self {
-            SchedulerRequest::Transmission(_) => matches!(*address, TaskDirection::Outbound),
-            SchedulerRequest::Reception => matches!(*address, TaskDirection::Inbound),
-            SchedulerRequest::Command(_) => matches!(*address, TaskDirection::Outbound),
+            SchedulerRequest::Transmission(_) => {
+                matches!(*address, MessageType::TxOrCommand) || matches!(*address, MessageType::Tx)
+            }
+            SchedulerRequest::Reception => matches!(*address, MessageType::Rx),
+            SchedulerRequest::Command(_) => {
+                matches!(*address, MessageType::TxOrCommand)
+                    || matches!(*address, MessageType::Command)
+            }
         }
     }
 }
