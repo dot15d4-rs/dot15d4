@@ -6,7 +6,7 @@ use dot15d4::{
         DriverConfig, RadioDriver,
     },
     mac::{MacBufferAllocator, MacIndicationChannel, MacRequestChannel},
-    Device,
+    Device, RngCore,
 };
 use embassy_net_driver::HardwareAddress;
 
@@ -26,22 +26,24 @@ macro_rules! mac_buffer_allocator {
     }};
 }
 
-pub struct Ieee802154Stack<RadioDriverImpl: DriverConfig> {
+pub struct Ieee802154Stack<RadioDriverImpl: DriverConfig, Rng: RngCore> {
     buffer_allocator: MacBufferAllocator,
     request_channel: MacRequestChannel,
     indication_channel: MacIndicationChannel,
     radio: Cell<Option<RadioDriver<RadioDriverImpl, TaskOff>>>,
     hardware_addr: HardwareAddress,
     driver: PhantomData<RadioDriverImpl>,
+    rng: Rng,
 }
 
-impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
+impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Ieee802154Stack<RadioDriverImpl, Rng>
 where
     RadioDriver<RadioDriverImpl, TaskOff>: RadioDriverApi<RadioDriverImpl, TaskOff>,
 {
     pub fn new(
         radio: RadioDriver<RadioDriverImpl, TaskOff>,
         buffer_allocator: MacBufferAllocator,
+        rng: Rng,
     ) -> Self {
         let hardware_addr = HardwareAddress::Ieee802154(radio.ieee802154_address());
         Self {
@@ -51,6 +53,7 @@ where
             radio: Cell::new(Some(radio)),
             hardware_addr,
             driver: PhantomData,
+            rng,
         }
     }
 
@@ -64,13 +67,13 @@ where
     }
 }
 
-impl<RadioDriverImpl: DriverConfig> Ieee802154Stack<RadioDriverImpl>
+impl<RadioDriverImpl: DriverConfig, Rng: RngCore> Ieee802154Stack<RadioDriverImpl, Rng>
 where
     RadioDriver<RadioDriverImpl, TaskOff>: OffState<RadioDriverImpl>,
     RadioDriver<RadioDriverImpl, TaskRx>: ListeningRxState<RadioDriverImpl>,
     RadioDriver<RadioDriverImpl, TaskTx>: TxState<RadioDriverImpl>,
 {
-    pub async fn run(&self) -> ! {
+    pub async fn run(&mut self) -> ! {
         let radio = self.radio.take().expect("already running");
         let timer = radio.sleep_timer();
         let device = Device::new(radio);
@@ -80,6 +83,7 @@ where
                 self.request_channel.receiver(),
                 self.indication_channel.sender(),
                 timer,
+                &mut self.rng,
             )
             .await
     }
