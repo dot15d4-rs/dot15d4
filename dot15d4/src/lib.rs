@@ -6,7 +6,9 @@ pub mod pib;
 pub mod scheduler;
 mod utils;
 
+use dot15d4_driver::radio::tasks::RadioDriverApi;
 pub use dot15d4_util as util;
+pub use rand_core::{Error as RngError, RngCore};
 
 use self::{
     driver::{
