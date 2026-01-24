@@ -1,5 +1,5 @@
 use dot15d4_driver::radio::config::Channel;
-use dot15d4_driver::radio::frame::PanId;
+use dot15d4_driver::radio::frame::{Address, PanId};
 use heapless::Vec;
 
 use crate::constants::{
@@ -14,7 +14,12 @@ use crate::scheduler::tsch::pib::TschPib;
 #[allow(dead_code)]
 pub struct Pib {
     /// The extended address assigned to the device.
-    pub(crate) extended_address: Option<[u8; 8]>,
+    pub(crate) extended_address: Address<[u8; 8]>,
+    /// The address that the device uses to communicate in the PAN. If the
+    /// device is the PAN coordinator, this value shall be chosen before a PAN
+    /// is started. Otherwise, the short address is allocated by a coordinator
+    /// during association.
+    pub(crate) short_address: u16,
     /// Indication of whether the device is associated to the PAN through the
     /// PAN coordinator. A value of `true` indicates the device has associated
     /// through the PAN coordinator. Otherwise, the value is set to `false`.
@@ -56,11 +61,6 @@ pub struct Pib {
     /// of `true` indicates that security is enabled, while a value of `false`
     /// indicates that security is disabled.
     pub(crate) security_enabled: bool,
-    /// The address that the device uses to communicate in the PAN. If the
-    /// device is the PAN coordinator, this value shall be chosen before a PAN
-    /// is started. Otherwise, the short address is allocated by a coordinator
-    /// during association.
-    pub(crate) short_address: u16,
     /// Specification of how often the coordinator transmits an Enhanced
     /// Beacon frame. Value ranges from 0 to 15. If value is 15, no periodic
     /// Enhanced Beacon frame will be transmitted.
@@ -73,10 +73,10 @@ pub struct Pib {
     pub(crate) tsch: TschPib<()>,
 }
 
-impl Default for Pib {
-    fn default() -> Self {
+impl Pib {
+    pub fn new(address: &[u8; 8]) -> Self {
         Self {
-            extended_address: None,
+            extended_address: Address::from_le_bytes(address),
             associated_pan_coord: false,
             association_permit: false,
             coord_extended_address: None,
@@ -91,6 +91,7 @@ impl Default for Pib {
             security_enabled: false,
             short_address: 0xffff,
             enhanced_beacon_order: 0,
+            // TODO: configurable hopping sequence
             hopping_sequence: Vec::from_slice(&[Channel::_12, Channel::_26]).unwrap(),
             #[cfg(feature = "tsch")]
             tsch: TschPib::new(),
