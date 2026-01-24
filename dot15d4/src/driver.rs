@@ -944,7 +944,27 @@ where
                                 }
                             }
                         }
-                        // We do not expect anything other than a TX request
+                        DrvSvcRequest::CompleteThenGoIdle => {
+                            match listening_rx_driver.stop_listening(None.into()).await {
+                                Ok(result) => match result {
+                                    StopListeningResult::FrameStarted(_instant, _) => todo!(),
+                                    StopListeningResult::RxWindowEnded(radio_transition_result) => {
+                                        match radio_transition_result.prev_task_result {
+                                            RxResult::RxWindowEnded(radio_frame) => {
+                                                self.event_sender
+                                                    .send(DrvSvcEvent::RxWindowEnded(radio_frame))
+                                                    .await;
+                                            }
+                                            _ => unreachable!(),
+                                        }
+                                        return DriverState::Idle(
+                                            radio_transition_result.this_state,
+                                        );
+                                    }
+                                },
+                                Err((_, _)) => unreachable!(),
+                            }
+                        }
                         _ => unreachable!(),
                     }
                 }
