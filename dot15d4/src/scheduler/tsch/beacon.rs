@@ -1,30 +1,33 @@
+//! Enhanced Beacon frame builder for TSCH.
 use core::marker::PhantomData;
 
 use dot15d4_driver::radio::frame::{
     Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr, IeRepr,
-    IeReprList, PanId, PanIdCompressionRepr, RadioFrame, RadioFrameSized, RadioFrameUnsized,
+    IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameSized, RadioFrameUnsized,
 };
 use dot15d4_driver::radio::DriverConfig;
-use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
-use dot15d4_frame::{MpduWithAllFields, MpduWithIes};
-use dot15d4_util::allocator::{BufferToken, IntoBuffer};
 
-use crate::scheduler::SchedulerService;
+use dot15d4_frame::MpduWithIes;
+use dot15d4_util::allocator::IntoBuffer;
 
-use super::pib::{TschAsn, TschPib};
+use super::pib::TschAsn;
+use crate::pib::Pib;
 
-/// Static storage for Enhanced Beacon IE configuration
-/// This is used because MpduRepr requires 'static lifetimes for const IE lists
+/// Builder for Enhanced Beacon frames.
+///
+/// This struct holds the MPDU representation with pre-configured IE structure
+/// for TSCH beacons. The static IE configuration allows for efficient beacon
+/// generation without runtime allocation.
 pub struct EnhancedBeaconBuilder<'buffer, RadioDriverImpl: DriverConfig> {
     mpdu_repr: MpduRepr<'buffer, MpduWithIes>,
     _phantom: PhantomData<RadioDriverImpl>,
 }
 
 impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, RadioDriverImpl> {
+    /// Create a new Enhanced Beacon builder.
     pub const fn new() -> Self {
-        // Build the MPDU representation
-        static SLOTFRAMES: [u8; 1] = [1]; // 1 slotframe with 1 link
+        static SLOTFRAMES: [u8; 1] = [1];
         static IES: [IeRepr; 3] = [
             IeRepr::TschSynchronizationNestedIe,
             IeRepr::FullTschTimeslotNestedIe,
@@ -43,21 +46,20 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
             ))
             .without_security()
             .with_ies(IE_LIST);
+
         Self {
             mpdu_repr: MPDU_REPR,
             _phantom: PhantomData,
         }
     }
 
-    /// Build an Enhanced Beacon frame from the schedule
     pub fn build_enhanced_beacon(
         &self,
-        service: &SchedulerService<RadioDriverImpl>,
+        pib: &Pib,
         radio_frame: RadioFrame<RadioFrameUnsized>,
-        src_address: &Address<[u8; 8]>,
-        pan_id: &PanId<[u8; 2]>,
     ) -> Option<RadioFrame<RadioFrameSized>> {
         let buffer = radio_frame.into_buffer();
+
         // Create the frame writer
         let mut mpdu_writer = self
             .mpdu_repr
@@ -67,11 +69,11 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
         // Set addressing fields
         {
             let mut addressing = mpdu_writer.addressing_fields_mut();
-            addressing.src_address_mut().set(src_address);
+            addressing.src_address_mut().set(&pib.extended_address);
             addressing
                 .dst_address_mut()
                 .set(&Address::<&[u8]>::BROADCAST_ADDR);
-            addressing.dst_pan_id_mut().set(pan_id);
+            addressing.dst_pan_id_mut().set(&pib.pan_id);
         }
 
         // Set IE content from schedule
@@ -83,14 +85,15 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 let mut slotframes = slotframe_ie.slotframes_mut();
 
                 // Iterate through schedule's slotframes
-                for (sf_handle, sf_size) in service.slotframe_info() {
+                for (sf_handle, sf_size) in pib.tsch.slotframe_info() {
                     if let Some(mut sf) = slotframes.next() {
                         sf.set_handle(sf_handle as u8);
                         sf.set_size(sf_size);
 
                         // Add links for this slotframe
                         let mut links = sf.links_mut();
-                        for link in service
+                        for link in pib
+                            .tsch
                             .links()
                             .filter(|l| l.slotframe_handle == sf_handle && l.link_advertise)
                         {
@@ -106,7 +109,7 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
 
             // Set Timeslot IE from schedule's timing configuration
             if let Some(mut timeslot_ie) = ies.tsch_timeslot_mut() {
-                let timings = &service.pib.tsch.timeslot_timings;
+                let timings = &pib.tsch.timeslot_timings;
                 timeslot_ie.set_timeslot_id(timings.id());
                 timeslot_ie.set_cca_offset(timings.cca_offset());
                 timeslot_ie.set_cca(timings.cca());
@@ -138,12 +141,19 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
             .ok()?;
 
         let mut ies = mpdu_writer.ies_fields_mut();
-        // Update TSCH Synchronization IE
-        let mut tsch_sync = ies.tsch_sync_mut().unwrap();
+
+        // Update TSCH Synchronization IE with new ASN
+        let mut tsch_sync = ies.tsch_sync_mut()?;
         tsch_sync.set_asn(asn);
         //TODO: support join metric
         tsch_sync.set_join_metric(0);
 
         Some(mpdu_writer.into_radio_frame::<RadioDriverImpl>())
+    }
+}
+
+impl<'buffer, R: DriverConfig> Default for EnhancedBeaconBuilder<'buffer, R> {
+    fn default() -> Self {
+        Self::new()
     }
 }
