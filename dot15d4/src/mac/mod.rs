@@ -16,6 +16,8 @@ use self::mlme::tsch::{
 use self::{
     frame::mpdu::MpduFrame,
     mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
+    mlme::reset::ResetRequestTask,
+    mlme::set::SetRequestTask,
     primitives::{MacConfirm, MacIndication, MacRequest},
     task::*,
 };
@@ -151,10 +153,12 @@ mac_svc_tasks!(
     DataIndication,
     TschModeRequest,
     SetLinkRequest,
-    SetSlotframeRequest
+    SetSlotframeRequest,
+    SetRequest,
+    ResetRequest
 );
 #[cfg(not(feature = "tsch"))]
-mac_svc_tasks!(DataRequest, DataIndication);
+mac_svc_tasks!(DataRequest, DataIndication, SetRequest, ResetRequest);
 
 /// Number of mac service tasks which include requests tasks and one indication task
 const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + 1;
@@ -359,7 +363,12 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 MacSvcTask::DataRequest(DataRequestTask::new(data_request))
             }
             MacRequest::MlmeBeacon(_) => todo!(),
-            MacRequest::MlmeSet(_) => todo!(),
+            MacRequest::MlmeSet(set_request) => {
+                MacSvcTask::SetRequest(SetRequestTask::new(set_request))
+            }
+            MacRequest::MlmeReset(reset_request) => {
+                MacSvcTask::ResetRequest(ResetRequestTask::new(reset_request))
+            }
             #[cfg(feature = "tsch")]
             MacRequest::MlmeTschMode(mlme_request) => {
                 MacSvcTask::TschModeRequest(TschModeRequestTask::new(mlme_request))
@@ -426,6 +435,14 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                         timestamp: Some(instant),
                     },
                 );
+            }
+            MacSvcTaskResult::SetRequest(_set_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: None });
+            }
+            MacSvcTaskResult::ResetRequest(_reset_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: None });
             }
             #[cfg(feature = "tsch")]
             MacSvcTaskResult::TschModeRequest(_mode_confirm) => {

@@ -1,4 +1,18 @@
-use crate::{driver::radio::DriverConfig, mac::MacService};
+#![allow(dead_code)]
+use core::marker::PhantomData;
+
+use dot15d4_driver::radio::DriverConfig;
+
+use crate::{
+    mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
+    scheduler::{
+        command::pib::{PibCommand, PibCommandResult, SetPibResult},
+        SchedulerCommand, SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
+    },
+};
+
+#[cfg(feature = "rtos-trace")]
+use crate::trace::MAC_REQUEST;
 
 pub enum SetError {
     #[allow(dead_code)]
@@ -14,29 +28,75 @@ pub enum SetRequestAttribute {
     MacShortAddress(u16),
 }
 
-#[allow(dead_code)]
-impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
-    /// Used by the next higher layer to attempt to write the given value to
-    /// the indicated MAC PIB attribute.
-    ///
-    /// * `attribute` - Attribute to write
-    pub(crate) async fn mlme_set_request(
-        &self,
-        attribute: &SetRequestAttribute,
-    ) -> Result<(), SetError> {
-        let mut pib = self.pib.borrow_mut();
-        match attribute {
-            SetRequestAttribute::MacPanId(pan_id) => pib.pan_id.set_u16(*pan_id),
-            SetRequestAttribute::MacShortAddress(short_address) => {
-                pib.short_address = *short_address
-            }
-            SetRequestAttribute::MacExtendedAddress(extended_address) => {
-                pib.extended_address = Some(*extended_address)
-            }
-            SetRequestAttribute::MacAssociationPermit(association_permit) => {
-                pib.association_permit = *association_permit
-            }
+/// MLME-SET.request primitive
+pub struct SetRequest {
+    pub attribute: SetRequestAttribute,
+}
+
+impl SetRequest {
+    pub fn new(attribute: SetRequestAttribute) -> Self {
+        Self { attribute }
+    }
+}
+
+/// MLME-SET.confirm primitive
+pub enum SetConfirm {
+    Success,
+    InvalidParameter,
+}
+
+pub(crate) struct SetRequestTask<'task, RadioDriverImpl: DriverConfig> {
+    state: SetRequestState,
+    task_marker: PhantomData<&'task u8>,
+    radio_marker: PhantomData<RadioDriverImpl>,
+}
+
+pub(crate) enum SetRequestState {
+    Initial(SetRequestAttribute),
+    SendingRequest,
+}
+
+impl<'task, RadioDriverImpl: DriverConfig> SetRequestTask<'task, RadioDriverImpl> {
+    pub fn new(request: SetRequest) -> Self {
+        Self {
+            state: SetRequestState::Initial(request.attribute),
+            task_marker: PhantomData,
+            radio_marker: PhantomData,
         }
-        Ok(())
+    }
+}
+
+impl<RadioDriverImpl: DriverConfig> MacTask for SetRequestTask<'_, RadioDriverImpl> {
+    type Result = SetConfirm;
+
+    fn step(mut self, event: MacTaskEvent) -> MacTaskTransition<Self> {
+        #[cfg(feature = "rtos-trace")]
+        rtos_trace::trace::task_exec_begin(MAC_REQUEST);
+
+        match self.state {
+            SetRequestState::Initial(attribute) => {
+                debug_assert!(matches!(event, MacTaskEvent::Entry));
+                self.state = SetRequestState::SendingRequest;
+                MacTaskTransition::SchedulerRequest(
+                    self,
+                    SchedulerRequest::Command(SchedulerCommand::PibCommand(PibCommand::Set(
+                        attribute,
+                    ))),
+                    None,
+                )
+            }
+            SetRequestState::SendingRequest => match event {
+                MacTaskEvent::SchedulerResponse(SchedulerResponse::Command(
+                    SchedulerCommandResult::PibCommand(PibCommandResult::Set(result)),
+                )) => {
+                    let confirm = match result {
+                        SetPibResult::Success => SetConfirm::Success,
+                        SetPibResult::InvalidParameter => SetConfirm::InvalidParameter,
+                    };
+                    MacTaskTransition::Terminated(confirm)
+                }
+                _ => unreachable!(),
+            },
+        }
     }
 }

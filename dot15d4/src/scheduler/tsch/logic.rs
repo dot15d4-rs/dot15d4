@@ -461,6 +461,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // CSMA commands not handled in TSCH mode
                 todo!()
             }
+            SchedulerCommand::PibCommand(_cmd) => {
+                // PIB commands should be forwarded to the root scheduler or handled here
+                // For now, we handle them similarly to CSMA mode
+                todo!("PibCommand not yet implemented in TSCH mode")
+            }
         }
     }
     fn wait_for_timeout_or_request(
