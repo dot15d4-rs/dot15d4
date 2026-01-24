@@ -3,7 +3,7 @@
 use dot15d4_driver::{
     radio::{
         config,
-        frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
+        frame::{Address, PanId, RadioFrame, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
     timer::{NsInstant, RadioTimerApi},
@@ -12,12 +12,6 @@ use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::UseTschCommandResult;
-use crate::scheduler::{
-    action::SchedulerAction,
-    task::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
-    SchedulerCommandResult, SchedulerContext, SchedulerRequest, SchedulerResponse,
-    SchedulerTransmissionResult,
-};
 #[cfg(feature = "tsch")]
 use crate::scheduler::{
     command::tsch::{TschCommand, TschCommandResult},
@@ -25,7 +19,18 @@ use crate::scheduler::{
 };
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
+    mac::mlme::set::SetRequestAttribute,
     scheduler::task::SchedulerTaskCompletion,
+};
+use crate::{
+    pib::Pib,
+    scheduler::{
+        action::SchedulerAction,
+        command::pib::*,
+        task::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
+        SchedulerCommandResult, SchedulerContext, SchedulerRequest, SchedulerResponse,
+        SchedulerTransmissionResult,
+    },
 };
 
 use super::task::{CsmaState, CsmaTask, PipelinedInfo};
@@ -460,9 +465,65 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.transition_with_response(context, token, resp)
             }
 
+            SchedulerCommand::PibCommand(cmd) => self.on_pib_cmd(token, cmd, context),
+
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(cmd) => {
                 self.on_tsch_cmd(token, cmd, &mut context.pib.tsch)
+            }
+        }
+    }
+
+    fn on_pib_cmd(
+        &mut self,
+        token: ResponseToken,
+        cmd: PibCommand,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match cmd {
+            PibCommand::Set(attribute) => {
+                let result = match attribute {
+                    SetRequestAttribute::MacExtendedAddress(addr) => {
+                        context.pib.extended_address = Address::from_le_bytes(&addr);
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacAssociationPermit(permit) => {
+                        context.pib.association_permit = permit;
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacPanId(pan_id) => {
+                        context.pib.pan_id = PanId::new_owned(pan_id.to_le_bytes());
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacShortAddress(short_addr) => {
+                        context.pib.short_address = short_addr;
+                        SetPibResult::Success
+                    }
+                };
+                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
+                    PibCommandResult::Set(result),
+                ));
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::SelectDriverEventOrRequest,
+                    Some((token, resp)),
+                )
+            }
+            PibCommand::Reset => {
+                let addr_bytes: [u8; 8] = match &context.pib.extended_address {
+                    Address::Extended(ext) => ext
+                        .as_ref()
+                        .try_into()
+                        .expect("extended address is 8 bytes"),
+                    _ => [0u8; 8], // fallback to zero address if somehow not extended
+                };
+                context.pib = Pib::new(&addr_bytes);
+                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
+                    PibCommandResult::Reset(ResetPibResult::Success),
+                ));
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::SelectDriverEventOrRequest,
+                    Some((token, resp)),
+                )
             }
         }
     }

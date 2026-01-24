@@ -2,7 +2,8 @@ use dot15d4_driver::timer::NsInstant;
 
 use crate::util::sync::HasAddress;
 
-use super::mlme::set::SetRequestAttribute;
+use super::mlme::reset::ResetRequest;
+use super::mlme::set::SetRequest;
 #[cfg(feature = "tsch")]
 pub use super::mlme::tsch::mode::TschModeRequest;
 #[cfg(feature = "tsch")]
@@ -24,8 +25,10 @@ pub enum MacRequest {
     /// IEEE 802.15.4-2024, section 10.3.10.4
     #[cfg(feature = "tsch")]
     MlmeSetLink(SetLinkRequest),
-    /// IEEE 802.15.4-2020, section 8.2.6.4
-    MlmeSet(SetRequestAttribute),
+    /// IEEE 802.15.4-2024, section 8.2.5.4
+    MlmeSet(SetRequest),
+    /// IEEE 802.15.4-2024, section 8.2.6.2
+    MlmeReset(ResetRequest),
     /// IEEE 802.15.4-2020, section 8.2.18.1
     MlmeBeacon(BeaconRequest),
     /// IEEE 802.15.4-2020, section 8.3.2
