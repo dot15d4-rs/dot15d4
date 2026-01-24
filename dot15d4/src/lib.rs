@@ -48,6 +48,7 @@ where
         request_receiver: MacRequestReceiver<'upper_layer>,
         indication_sender: MacIndicationSender<'upper_layer>,
         timer: RadioDriverImpl::Timer,
+        mut rng: &'upper_layer mut dyn RngCore,
     ) -> ! {
         #[cfg(feature = "rtos-trace")]
         self::trace::instrument();
@@ -55,6 +56,8 @@ where
         let driver_request_channel = DriverRequestChannel::new();
         let driver_response_channel = DriverEventChannel::new();
         let scheduler_service_channel = SchedulerRequestChannel::new();
+
+        let ieee802154_address = self.radio.ieee802154_address();
 
         let driver_service = DriverService::new(
             self.radio,
@@ -69,6 +72,8 @@ where
             driver_request_channel.sender(),
             driver_response_channel.receiver(),
             buffer_allocator,
+            &mut rng,
+            &ieee802154_address,
         );
 
         let mut mac_service = MacService::<'_, RadioDriverImpl>::new(
