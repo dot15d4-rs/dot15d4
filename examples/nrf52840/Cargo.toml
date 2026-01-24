@@ -79,6 +79,7 @@ rtos-trace = [
 _gpio-trace = []
 
 tsch = ["dot15d4/tsch"]
+tsch-coordinator = ["tsch", "dot15d4/tsch-coordinator"]
 
 # Enables multi-device tests.
 #
