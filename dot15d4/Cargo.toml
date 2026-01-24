@@ -51,6 +51,9 @@ ies = ["dot15d4-frame/ies"]
 # Support for TSCH
 tsch = ["ies"]
 
+# Support for TSCH coordinator features (beacon transmission, etc.)
+tsch-coordinator = ["tsch"]
+
 # Tracing
 executor-trace = ["dot15d4-driver/executor-trace"]
 timer-trace = ["dot15d4-driver/timer-trace"]
