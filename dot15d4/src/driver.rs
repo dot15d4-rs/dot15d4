@@ -5,14 +5,12 @@
 
 use core::cell::Cell;
 
-use crate::{
-    mac::{
-        frame::mpdu::{imm_ack_frame, ACK_MPDU_SIZE_WO_FCS},
-        MacBufferAllocator,
-    },
-    util::frame::Frame,
-    utils::is_frame_valid_and_for_us,
-};
+#[cfg(not(feature = "tsch"))]
+use crate::mac::frame::mpdu::ACK_MPDU_SIZE_WO_FCS;
+use crate::{mac::MacBufferAllocator, utils::is_frame_valid_and_for_us};
+
+#[cfg(feature = "tsch")]
+use crate::mac::frame::mpdu::{enh_ack_frame, ENH_ACK_MPDU_SIZE_WO_FCS};
 
 use self::{
     radio::{
@@ -32,13 +30,14 @@ pub use dot15d4_driver::*;
 use dot15d4_driver::{
     radio::{
         config::Channel as PhyChannel,
+        frame::FrameVersion,
         tasks::{RadioDriverApi, ReceivingRxState, RxError, RxResult, StopListeningResult},
         PhyOf,
     },
     timer::{NsDuration, OptionalNsInstant},
 };
-use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::sync::select;
+use dot15d4_frame::mpdu::{imm_ack_frame, MpduFrame};
+use dot15d4_util::{allocator::IntoBuffer, sync::select};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender},
@@ -257,20 +256,43 @@ where
     ///         that incoming ACKs cannot corrupt the pre-populated outbound ACK
     ///         buffer. This allows us to re-use the outbound ACK buffer w/o
     ///         validation.
+    ///
+    /// When the `tsch` feature is enabled, this allocates an Enhanced ACK frame
+    /// with Time Correction IE. Otherwise, it allocates a standard ImmAck frame.
     fn allocate_outbound_ack_frame(
         buffer_allocator: MacBufferAllocator,
     ) -> RadioFrame<RadioFrameSized> {
         let radio_frame_repr = RadioFrameRepr::<RadioDriverImpl, RadioFrameUnsized>::new();
-        let outbound_ack_buffer_size = ACK_MPDU_SIZE_WO_FCS as usize
-            + (radio_frame_repr.fcs_length() + radio_frame_repr.driver_overhead()) as usize;
 
-        imm_ack_frame::<RadioDriverImpl>(
-            0,
-            buffer_allocator
-                .try_allocate_buffer(outbound_ack_buffer_size)
-                .expect("no capacity"),
-        )
-        .into_radio_frame::<RadioDriverImpl>()
+        #[cfg(feature = "tsch")]
+        {
+            // Enhanced ACK with Time Correction IE
+            let outbound_ack_buffer_size = ENH_ACK_MPDU_SIZE_WO_FCS as usize
+                + (radio_frame_repr.fcs_length() + radio_frame_repr.driver_overhead()) as usize;
+
+            enh_ack_frame::<RadioDriverImpl>(
+                0,
+                buffer_allocator
+                    .try_allocate_buffer(outbound_ack_buffer_size)
+                    .expect("no capacity"),
+            )
+            .into_radio_frame::<RadioDriverImpl>()
+        }
+
+        #[cfg(not(feature = "tsch"))]
+        {
+            // Standard ImmAck
+            let outbound_ack_buffer_size = ACK_MPDU_SIZE_WO_FCS as usize
+                + (radio_frame_repr.fcs_length() + radio_frame_repr.driver_overhead()) as usize;
+
+            imm_ack_frame::<RadioDriverImpl>(
+                0,
+                buffer_allocator
+                    .try_allocate_buffer(outbound_ack_buffer_size)
+                    .expect("no capacity"),
+            )
+            .into_radio_frame::<RadioDriverImpl>()
+        }
     }
 
     /// Pre-allocates a re-usable rx frame for ACK or invalid frame buffering.
@@ -582,27 +604,31 @@ where
                     // Expect rx ACK frame
                     let (event, recovered_ack_frame) = match rx_task_result {
                         RxResult::Frame(rx_ack_frame, _) => {
-                            // TODO: Support enhanced ACK.
-                            const ACK_FC_MASK: u16 = !0x1000; // Frame version 2003 or 2006
-                            const ACK_FC: u16 = 0x0002; // Frame type ACK, other flags all zero
-                            let ack = if rx_ack_frame.sdu_wo_fcs_length().get() == 3 {
-                                let sdu = rx_ack_frame.sdu_ref();
-                                let fc = u16::from_le_bytes([sdu[0], sdu[1]]) & ACK_FC_MASK;
-                                fc == ACK_FC && sdu[2] == seq_nb
-                            } else {
-                                false
-                            };
-                            let tx_result = if ack {
-                                DrvSvcEvent::Sent(tx_radio_frame, tx_timestamp)
-                            } else {
-                                let pending_request = if fallback_on_nack {
-                                    this.pending_request.take()
-                                } else {
-                                    None
-                                };
-                                DrvSvcEvent::Nack(tx_radio_frame, tx_timestamp, pending_request)
-                            };
-                            (tx_result, rx_ack_frame.forget_size::<RadioDriverImpl>())
+                            match validate_ack_frame::<RadioDriverImpl>(
+                                rx_ack_frame,
+                                seq_nb,
+                                // &tx_radio_frame,
+                            ) {
+                                Ok(validated_ack_frame) => (
+                                    DrvSvcEvent::Sent(tx_radio_frame, tx_timestamp),
+                                    validated_ack_frame,
+                                ),
+                                Err(invalid_ack_frame) => {
+                                    let pending_request = if fallback_on_nack {
+                                        this.pending_request.take()
+                                    } else {
+                                        None
+                                    };
+                                    (
+                                        DrvSvcEvent::Nack(
+                                            tx_radio_frame,
+                                            tx_timestamp,
+                                            pending_request,
+                                        ),
+                                        invalid_ack_frame,
+                                    )
+                                }
+                            }
                         }
                         RxResult::CrcError(recovered_rx_frame, _) => {
                             let pending_request = if fallback_on_nack {
@@ -806,19 +832,45 @@ where
     ///
     /// If the radio was turned off: Returns the driver in the off state and no
     /// response token.
+    ///
+    /// When the `tsch` feature is enabled, this sends an Enhanced ACK with Time
+    /// Correction IE. The Time Correction IE contains timing synchronization
+    /// information for TSCH operations.
     async fn complete_reception_with_ack(
         &self,
         receiving_rx_driver: impl ReceivingRxState<RadioDriverImpl>,
         seq_nb: u8,
+        frame_version: FrameVersion,
         ifs: Ifs<PhyOf<RadioDriverImpl>>,
     ) -> DriverState<RadioDriverImpl> {
         // Safety: We use the tx ACK frame sequentially and exclusively from
         //         this method.
         let outbound_ack_frame = self.outbound_ack_frame.take().unwrap();
 
-        let mut outbound_ack_mpdu = MpduFrame::from_radio_frame(outbound_ack_frame);
-        let _ = outbound_ack_mpdu.try_set_sequence_number(seq_nb);
-        let outbound_ack_frame = outbound_ack_mpdu.into_radio_frame::<RadioDriverImpl>();
+        let outbound_ack_buffer = outbound_ack_frame.into_buffer();
+
+        let writer = match frame_version {
+            FrameVersion::Ieee802154_2003 | FrameVersion::Ieee802154_2006 => {
+                imm_ack_frame::<RadioDriverImpl>(seq_nb, outbound_ack_buffer)
+            }
+            #[cfg(feature = "tsch")]
+            FrameVersion::Ieee802154 => {
+                let mut writer = enh_ack_frame::<RadioDriverImpl>(seq_nb, outbound_ack_buffer);
+
+                // For TSCH mode, update the Time Correction IE in the enhanced ACK
+                if let Some(mut tc) = writer.ies_fields_mut().time_correction_mut() {
+                    // TODO: Calculate actual time correction based on:
+                    // expected_rx_time - actual_rx_time
+                    // This should be provided by the TSCH scheduler.
+                    tc.set_time_sync(0);
+                    tc.set_nack(false);
+                }
+                writer
+            }
+            _ => unreachable!(),
+        };
+
+        let outbound_ack_frame = writer.into_radio_frame::<RadioDriverImpl>();
 
         let outbound_ack_task = RadioTaskTx {
             radio_frame: outbound_ack_frame,
@@ -990,12 +1042,19 @@ where
         if frame_is_valid {
             self.event_sender.send(DrvSvcEvent::FrameStarted).await;
             // Safety: Valid frames always have a frame control field.
-            let ack_request = preliminary_frame_info.frame_control.unwrap().ack_request();
+            let fc = preliminary_frame_info.frame_control.unwrap();
+            let ack_request = fc.ack_request();
             let seq_nb = preliminary_frame_info.seq_nr;
+            let frame_version = fc.frame_version();
             match seq_nb {
                 Some(seq_nb) if ack_request => {
-                    self.complete_reception_with_ack(receiving_rx_driver, seq_nb, next_ifs)
-                        .await
+                    self.complete_reception_with_ack(
+                        receiving_rx_driver,
+                        seq_nb,
+                        frame_version,
+                        next_ifs,
+                    )
+                    .await
                 }
                 _ => {
                     self.complete_reception(receiving_rx_driver, ReceptionType::Frame, next_ifs)
@@ -1223,5 +1282,76 @@ where
             }
             DrvSvcRequest::CompleteThenGoIdle => unreachable!(),
         }
+    }
+}
+
+/// Validates an incoming ACK frame and checks if it matches the expected sequence number.
+///
+/// This function supports both:
+/// - Immediate ACK
+/// - Enhanced ACK
+fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
+    rx_ack_frame: RadioFrame<RadioFrameSized>,
+    expected_seq_nb: u8,
+) -> Result<RadioFrame<RadioFrameUnsized>, RadioFrame<RadioFrameUnsized>> {
+    use dot15d4_driver::radio::frame::{FrameType, FrameVersion};
+
+    let frame = MpduFrame::from_radio_frame(rx_ack_frame);
+    let reader = frame.reader();
+
+    let fc = reader.frame_control();
+
+    // Frame type must be ACK
+    let is_valid = if fc.frame_type() != FrameType::Ack
+        || fc.sequence_number_suppression()
+        || reader.sequence_number() != Some(expected_seq_nb)
+    {
+        false
+    } else {
+        // Check frame version and handle accordingly
+        match fc.frame_version() {
+            // IEEE 802.15.4-2003 or 2006: Immediate ACK
+            FrameVersion::Ieee802154_2003 | FrameVersion::Ieee802154_2006 => true,
+            // IEEE 802.15.4-2015+: Could be Enhanced ACK
+            FrameVersion::Ieee802154 => {
+                #[cfg(feature = "tsch")]
+                {
+                    let reader = reader.parse_addressing();
+                    if let Ok(reader) = reader {
+                        let reader = reader.parse_security().parse_ies::<RadioDriverImpl>();
+                        if let Ok(reader) = reader {
+                            let ies = reader.ies_fields();
+                            if let Some(tc) = ies.time_correction() {
+                                // If NACK bit is set, this is a negative acknowledgement
+                                !tc.nack()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                #[cfg(not(feature = "tsch"))]
+                {
+                    // TODO: Is it too permissive to accept valid Enhanced
+                    // Ack if we are not supposed to support TSCH ?
+                    true
+                }
+            }
+            // Unknown frame version
+            _ => false,
+        }
+    };
+    if is_valid {
+        Ok(frame
+            .into_radio_frame::<RadioDriverImpl>()
+            .forget_size::<RadioDriverImpl>())
+    } else {
+        Err(frame
+            .into_radio_frame::<RadioDriverImpl>()
+            .forget_size::<RadioDriverImpl>())
     }
 }
