@@ -50,8 +50,8 @@ mod test {
         radio::{
             frame::{
                 Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
-                IeListRepr, IeRepr, IeReprList, PanId, PanIdCompressionRepr, RadioFrameRepr,
-                RadioFrameSized, RadioFrameUnsized,
+                IeListRepr, IeRepr, IeReprList, PanId, PanIdCompressionRepr, RadioFrame,
+                RadioFrameRepr, RadioFrameSized, RadioFrameUnsized,
             },
             phy::{OQpsk250KBit, Phy},
             DriverConfig, FcsTwoBytes,
@@ -67,7 +67,7 @@ mod test {
     #[cfg(feature = "security")]
     use crate::repr::{KeyIdRepr, SecurityLevelRepr, SecurityRepr};
     use crate::{
-        mpdu::imm_ack_frame,
+        mpdu::{enh_ack_frame, imm_ack_frame, MpduFrame},
         repr::{MpduRepr, SeqNrRepr},
         MpduWithIes,
     };
@@ -330,6 +330,74 @@ mod test {
         ];
         let frame_buffer = frame.into_buffer();
         assert_eq!(frame_buffer.as_ref(), &expected_buffer);
+
+        unsafe {
+            frame_buffer.consume();
+        }
+    }
+
+    #[test]
+    fn test_enh_ack_frame() {
+        const ENH_ACK_LEN: u8 = 7;
+
+        const ENH_ACK_FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameSized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new()
+                .with_sdu(NonZeroU16::new(ENH_ACK_LEN as u16).unwrap());
+        const ENH_ACK_BUF_LEN: usize = ENH_ACK_FRAME_REPR.pdu_length() as usize;
+
+        static mut BUFFER: [u8; ENH_ACK_BUF_LEN] = [0; ENH_ACK_BUF_LEN];
+        #[allow(static_mut_refs)]
+        let buffer = BufferToken::new(unsafe { &mut BUFFER });
+
+        const TEST_SEQ_NUM: u8 = 55;
+        let mut frame = enh_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, buffer);
+        let mut ies = frame.ies_fields_mut();
+        let mut time_correction_ie = ies.time_correction_mut().unwrap();
+        time_correction_ie.set_time_sync(42);
+        time_correction_ie.set_nack(true);
+
+        assert_eq!(
+            ENH_ACK_BUF_LEN as u8,
+            ENH_ACK_FRAME_REPR.driver_overhead() + ENH_ACK_LEN + ENH_ACK_FRAME_REPR.fcs_length()
+        );
+
+        let expected_buffer = [
+            0,
+            FrameType::Ack as u8,
+            2 | (FrameVersion::Ieee802154 as u8) << 4, // IE Present + Enhanced
+            TEST_SEQ_NUM,
+            2,      // Header IE Time sync
+            15,     // Header IE Time sync
+            42,     // time sync value
+            1 << 7, // Header IE Time sync + Nack
+            0,
+            0,
+            0,
+            0,
+        ];
+        let frame_buffer = frame.into_buffer();
+        assert_eq!(frame_buffer.as_ref(), &expected_buffer);
+
+        // Now we try to parse the buffer
+
+        let radio_frame = RadioFrame::new::<FakeDriverConfig>(frame_buffer)
+            .with_size(NonZeroU16::new(ENH_ACK_LEN as u16).unwrap());
+        let mpdu = MpduFrame::from_radio_frame(radio_frame);
+
+        let reader = mpdu
+            .into_parser()
+            .parse_addressing()
+            .unwrap()
+            .parse_security()
+            .parse_ies::<FakeDriverConfig>()
+            .unwrap();
+
+        let ies = reader.ies_fields();
+        let time_correction_ie = ies.time_correction().unwrap();
+        assert!(time_correction_ie.time_sync() == 42);
+        assert!(time_correction_ie.nack());
+
+        let frame_buffer = reader.into_buffer();
 
         unsafe {
             frame_buffer.consume();
