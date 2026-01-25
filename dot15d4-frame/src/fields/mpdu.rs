@@ -1,9 +1,12 @@
+use dot15d4_driver::radio::frame::compute_ies_length_from_buffer;
+#[cfg(feature = "ies")]
+use dot15d4_driver::radio::frame::IeListRepr;
 #[cfg(feature = "ies")]
 use dot15d4_driver::radio::frame::IesFields;
 use dot15d4_driver::radio::{
     frame::{
         AddressingFields, AddressingMode, AddressingRepr, FrameControl, FrameType, FrameVersion,
-        IeListRepr, RadioFrame, RadioFrameRepr, RadioFrameSized,
+        RadioFrame, RadioFrameRepr, RadioFrameSized,
     },
     DriverConfig,
 };
@@ -13,13 +16,13 @@ use dot15d4_util::{
     Error, Result as SimplifiedResult,
 };
 
-#[cfg(feature = "ies")]
 use crate::{
-    mpdu::MpduFrame,
-    repr::{MpduRepr, SeqNrRepr},
-    MpduParsedUpToAddressing, MpduParsedUpToSecurity, MpduWithAddressing, MpduWithAllFields,
-    MpduWithFrameControl, MpduWithIes, MpduWithSecurity,
+    mpdu::MpduFrame, repr::SeqNrRepr, MpduParsedUpToAddressing, MpduParsedUpToSecurity,
+    MpduWithAddressing, MpduWithAllFields, MpduWithFrameControl, MpduWithSecurity,
 };
+
+#[cfg(feature = "ies")]
+use crate::{repr::MpduRepr, MpduWithIes};
 
 use super::field_ranges::MpduFieldRanges;
 
@@ -271,6 +274,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
                         init_ie_headers(ie_buf, ie_list.as_slice(), has_frame_payload);
                     }
                     IeListRepr::WithTerminationIes(_) => {
+                        //TODO: init headers
                         // Parsing case - termination IEs already present
                     }
                 }
@@ -438,17 +442,41 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithSecurity> 
     pub fn parse_ies<Config: DriverConfig>(
         self,
     ) -> SimplifiedResult<MpduParser<ReadOnlyMpdu, MpduWithAllFields>> {
-        // TODO: implement
-        debug_assert!(!self.frame_control().information_elements_present());
-
+        let fc = self.frame_control();
         let mpdu_length_wo_fcs = self.mpdu.as_ref().pdu_length_wo_fcs();
-        let mpdu_field_ranges = match self
+
+        if !fc.information_elements_present() {
+            // No IEs present - use without IEs path
+            let mpdu_field_ranges = self
+                .mpdu_field_ranges
+                .try_without_ies_with_mpdu_length::<Config>(mpdu_length_wo_fcs)?;
+            return Ok(MpduParser {
+                mpdu_field_ranges,
+                mpdu: self.mpdu,
+            });
+        }
+
+        // IEs are present - need to parse them to determine their length
+        // Compute lengths from buffer
+        let mpdu_less_ies_and_payload =
+            self.mpdu_field_ranges.last_offset() - self.mpdu.as_ref().offset as u16;
+        if mpdu_less_ies_and_payload > mpdu_length_wo_fcs {
+            return Err(Error);
+        }
+        let mpdu_ies_and_payload = mpdu_length_wo_fcs - mpdu_less_ies_and_payload;
+
+        // Get IE buffer slice - starts after header fields (at offset_ies)
+        let ies_start = self.mpdu_field_ranges.ies_offset() as usize;
+        let ies_end = self.mpdu.as_ref().offset as usize + mpdu_length_wo_fcs as usize;
+        let ies_buffer = &self.mpdu.as_ref().buffer[ies_start..ies_end];
+
+        // Compute IE length by parsing the buffer
+        let (ies_length, frame_payload_length) =
+            compute_ies_length_from_buffer(ies_buffer, mpdu_ies_and_payload)?;
+
+        let mpdu_field_ranges = self
             .mpdu_field_ranges
-            .try_without_ies_with_mpdu_length::<Config>(mpdu_length_wo_fcs)
-        {
-            Ok(result) => result,
-            Err(_) => return Err(Error),
-        };
+            .with_parsed_ies_length::<Config>(ies_length, frame_payload_length);
 
         Ok(MpduParser {
             mpdu_field_ranges,

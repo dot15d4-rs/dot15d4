@@ -331,6 +331,66 @@ pub fn init_ie_headers(buf: &mut [u8], ies: &[IeRepr<'_>], has_frame_payload: bo
     offset
 }
 
+/// Compute IE length from buffer by parsing header and payload IEs.
+/// Returns `(ies_length, frame_payload_length)`.
+pub fn compute_ies_length_from_buffer(
+    buf: &[u8],
+    total_ies_and_payload_len: u16,
+) -> Result<(u16, u16)> {
+    let mut offset = 0usize;
+    let mut termination_type: Option<u8> = None;
+
+    // Parse header IEs
+    let mut iter = HeaderIeIter::new(buf);
+    while let Some(ie) = iter.next() {
+        offset = iter.offset();
+
+        if ie.is_termination() {
+            termination_type = Some(ie.element_id());
+            break;
+        }
+    }
+
+    // Determine if there are payload IEs and frame payload
+    let ies_length = match termination_type {
+        None => {
+            // No termination IE - only header IEs, no payload IEs, no frame payload
+            // Per IEEE 802.15.4-2024 section 7.4.1: Header IEs only with no termination
+            // means no frame payload follows
+            offset as u16
+        }
+        Some(header_ie_id::HT1) => {
+            // HT1 - payload IEs follow
+            // Parse payload IEs to find their total length
+            while offset + PayloadIeHeader::<&[u8]>::LENGTH <= buf.len() {
+                let Some(header) = PayloadIeHeader::new(&buf[offset..]) else {
+                    break;
+                };
+                let content_len = header.length() as usize;
+                offset += PayloadIeHeader::<&[u8]>::LENGTH + content_len;
+
+                if header.is_termination() {
+                    break;
+                }
+            }
+            offset as u16
+        }
+        Some(header_ie_id::HT2) => {
+            // HT2 - no payload IEs but frame payload follows
+            offset as u16
+        }
+        Some(_) => return Err(Error),
+    };
+
+    if ies_length > total_ies_and_payload_len {
+        return Err(Error);
+    }
+
+    let frame_payload_length = total_ies_and_payload_len - ies_length;
+
+    Ok((ies_length, frame_payload_length))
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum IeRepr<'ie> {
     TimeCorrectionHeaderIe,

@@ -235,6 +235,19 @@ impl MpduFieldRanges<MpduWithSecurity> {
         Ok(self.next_state::<Config>(ies_length, frame_payload_length))
     }
 
+    /// Call this method to configure information elements when the IE length
+    /// and frame payload length have been computed directly from parsing the
+    /// buffer. This is useful when parsing incoming radio frames without
+    /// building an IeListRepr.
+    #[cfg(feature = "ies")]
+    pub(crate) fn with_parsed_ies_length<Config: DriverConfig>(
+        &self,
+        ies_length: u16,
+        frame_payload_length: u16,
+    ) -> MpduFieldRanges<MpduWithAllFields> {
+        self.next_state::<Config>(ies_length, frame_payload_length)
+    }
+
     /// Call this method to finalize the frame without IEs when the frame
     /// payload length is known. This is usually the case when building frames
     /// from scratch.
@@ -266,7 +279,15 @@ impl MpduFieldRanges<MpduWithSecurity> {
         Ok(self.next_state::<Config>(0, frame_payload_length))
     }
 
-    const fn last_offset(&self) -> u16 {
+    /// Returns the offset where IEs start in the buffer.
+    #[cfg(feature = "ies")]
+    pub(crate) fn ies_offset(&self) -> u8 {
+        self.offset_ies.unwrap().get()
+    }
+
+    /// Returns the offset after all parsed fields (used for computing
+    /// remaining lengths).
+    pub(crate) const fn last_offset(&self) -> u16 {
         #[cfg(feature = "ies")]
         let last_offset = self.offset_ies.unwrap().get();
         #[cfg(all(feature = "security", not(feature = "ies")))]
