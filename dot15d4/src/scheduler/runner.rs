@@ -64,18 +64,11 @@ where
     Task: SchedulerTask<RadioDriverImpl>,
 {
     match action {
-        SchedulerAction::SendDriverRequest(req) => {
-            context.driver_request_sender.send(req).await;
-            let event = context.driver_event_receiver.receive().await;
-            task.step(SchedulerTaskEvent::DriverEvent(event), context)
-        }
-
         SchedulerAction::SendDriverRequestThenWait(req) => {
             context.driver_request_sender.send(req).await;
             let event = context.driver_event_receiver.receive().await;
             task.step(SchedulerTaskEvent::DriverEvent(event), context)
         }
-
         SchedulerAction::SendDriverRequestThenSelect(req) => {
             context.driver_request_sender.send(req).await;
             // After sending the request, select on driver event OR scheduler request
@@ -94,12 +87,10 @@ where
                 ),
             }
         }
-
         SchedulerAction::WaitForDriverEvent => {
             let event = context.driver_event_receiver.receive().await;
             task.step(SchedulerTaskEvent::DriverEvent(event), context)
         }
-
         SchedulerAction::WaitForSchedulerRequest => {
             let (token, request) = context
                 .request_receiver
@@ -110,7 +101,6 @@ where
                 context,
             )
         }
-
         SchedulerAction::SelectDriverEventOrRequest => {
             match select::select(
                 context.driver_event_receiver.receive(),
@@ -127,7 +117,6 @@ where
                 ),
             }
         }
-
         #[cfg(feature = "tsch")]
         SchedulerAction::WaitForTimeoutOrSchedulerRequest { deadline } => {
             match select::select(

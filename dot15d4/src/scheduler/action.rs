@@ -11,8 +11,9 @@ use crate::driver::DrvSvcRequest;
 ///
 /// Returned by sync logic methods to direct the async runner.
 pub enum SchedulerAction {
-    /// Send a request to the driver service.
-    SendDriverRequest(DrvSvcRequest),
+    /// Send driver request, then immediately wait for driver event.
+    /// Optimization to avoid extra round-trip through logic.
+    SendDriverRequestThenWait(DrvSvcRequest),
     /// Wait for an event from the driver service.
     WaitForDriverEvent,
     /// Wait for a request from the MAC layer (scheduler channel).
@@ -24,9 +25,6 @@ pub enum SchedulerAction {
     /// Used in TSCH to wake up for next slot or receive new requests.
     #[cfg(feature = "tsch")]
     WaitForTimeoutOrSchedulerRequest { deadline: NsInstant },
-    /// Send driver request, then immediately wait for driver event.
-    /// Optimization to avoid extra round-trip through logic.
-    SendDriverRequestThenWait(DrvSvcRequest),
     /// Send driver request, then select: wait for driver event OR scheduler request.
     /// Used when starting RX - we want to receive frames but also handle TX requests.
     SendDriverRequestThenSelect(DrvSvcRequest),

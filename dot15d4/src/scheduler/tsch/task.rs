@@ -66,27 +66,29 @@ impl TschOperation {
     }
 }
 
-/// TSCH scheduler mode.
+/// TSCH scheduler state.
 #[derive(Debug)]
 pub enum TschState {
     /// Idle - waiting for next deadline or scheduler request.
-    Idle { next_deadline: NsInstant },
+    WaitingForDeadlineOrRequest { next_deadline: NsInstant },
     /// TX slot - driver request sent, waiting for TxStarted.
-    TxSlotWaitingForStart { response_token: ResponseToken },
+    WaitingForTxStartInTxSlot { response_token: ResponseToken },
     /// TX slot - TxStarted received, waiting for Sent/Nack.
-    TxSlotWaitingForResult { response_token: ResponseToken },
+    TransmittingInTxSlot { response_token: ResponseToken },
     /// RX slot - driver request sent, waiting for FrameStarted/RxWindowEnded.
-    RxSlotWaitingForFrame {
+    WaitingForFrameInRxSlot {
         response_token: Option<ResponseToken>,
     },
     /// RX slot - FrameStarted received, waiting for Received/CrcError.
-    RxSlotReceivingFrame {
+    ReceivingFrameInRxSlot {
         response_token: Option<ResponseToken>,
     },
     /// Advertisement - driver request sent, waiting for TxStarted.
-    AdvertisementWaitingForStart,
+    WaitingForTxStartInAdvertisementSlot,
     /// Advertisement - TxStarted received, waiting for Sent.
-    AdvertisementWaitingForResult,
+    TransmittingInAdvertisementSlot,
+    /// Placeholder
+    Placeholder,
 }
 
 /// Configuration for periodic beacon advertisement.
@@ -133,7 +135,7 @@ impl BeaconConfig {
 
 /// Complete TSCH scheduler state.
 pub struct TschTask<RadioDriverImpl: DriverConfig> {
-    /// Current operating mode.
+    /// Current operating state.
     pub state: TschState,
     /// Queue of pending operations (sorted by ASN, earliest last for pop).
     pub pending_operations: Vec<TschOperation, MAC_TSCH_MAX_PENDING_OPERATIONS>,
@@ -162,7 +164,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn new(context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         let rx_frame = context.allocate_frame();
         Self {
-            state: TschState::Idle {
+            state: TschState::WaitingForDeadlineOrRequest {
                 next_deadline: INFINITE_DEADLINE,
             },
             pending_operations: Vec::new(),
@@ -184,7 +186,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
         self.last_beacon_time = None;
-        self.state = TschState::Idle {
+        self.state = TschState::WaitingForDeadlineOrRequest {
             next_deadline: INFINITE_DEADLINE,
         };
     }
@@ -250,20 +252,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     }
 
     /// Update base time and ASN after executing an operation.
-    pub fn update_timing(&mut self, asn: TschAsn, timeslot_length_us: u64) {
+    pub fn update_timing(&mut self, asn: TschAsn, context: &SchedulerContext<RadioDriverImpl>) {
+        let timeslot_length_us = context.pib.tsch.timeslot_length_us();
         self.last_base_time = self.expected_slot_start(asn, timeslot_length_us);
         self.last_asn = asn;
     }
 
     /// Check if in idle state.
     pub fn is_idle(&self) -> bool {
-        matches!(self.state, TschState::Idle { .. })
+        matches!(self.state, TschState::WaitingForDeadlineOrRequest { .. })
     }
 
     /// Get the current deadline if idle.
     pub fn idle_deadline(&self) -> Option<NsInstant> {
         match self.state {
-            TschState::Idle { next_deadline } => Some(next_deadline),
+            TschState::WaitingForDeadlineOrRequest { next_deadline } => Some(next_deadline),
             _ => None,
         }
     }
@@ -315,7 +318,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             BeaconConfig::disabled()
         };
         self.last_beacon_time = None;
-        self.state = TschState::Idle {
+        self.state = TschState::WaitingForDeadlineOrRequest {
             next_deadline: INFINITE_DEADLINE,
         };
         self.init_beacon_frame(context);
