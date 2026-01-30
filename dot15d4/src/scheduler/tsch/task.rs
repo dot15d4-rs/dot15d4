@@ -7,11 +7,12 @@ use core::cell::Cell;
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
+        frame::{RadioFrame, RadioFrameUnsized},
         DriverConfig,
     },
     timer::{NsDuration, NsInstant},
 };
+use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::ResponseToken;
 use heapless::Vec;
 
@@ -31,7 +32,7 @@ pub const INFINITE_DEADLINE: NsInstant = NsInstant::from_ticks(u64::MAX);
 pub enum TschOperation {
     /// Transmission slot (data).
     TxSlot {
-        radio_frame: RadioFrame<RadioFrameSized>,
+        mpdu: MpduFrame,
         asn: TschAsn,
         channel: Channel,
         cca: bool,
@@ -148,7 +149,7 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     /// Whether this device is coordinator.
     pub is_coordinator: bool,
     /// Beacon frame (for coordinator).
-    pub beacon_frame: Cell<Option<RadioFrame<RadioFrameSized>>>,
+    pub beacon_mpdu: Cell<Option<MpduFrame>>,
     /// Beacon builder.
     pub beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
     /// Beacon configuration (period and enabled state).
@@ -172,7 +173,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             last_asn: 0,
             rx_frame: Cell::new(Some(rx_frame)),
             is_coordinator: false,
-            beacon_frame: Cell::new(None),
+            beacon_mpdu: Cell::new(None),
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
             last_beacon_time: None,
@@ -326,11 +327,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     fn init_beacon_frame(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         let radio_frame = context.allocate_frame();
-        let beacon_frame = self
+        let beacon_mpdu = self
             .beacon_builder
             .build_enhanced_beacon(&context.pib, radio_frame);
-        if let Some(beacon_frame) = beacon_frame {
-            self.beacon_frame.set(Some(beacon_frame));
+        if let Some(beacon_frame) = beacon_mpdu {
+            self.beacon_mpdu.set(Some(beacon_frame));
         } else {
             panic!("Enhanced beacon could not be initialized");
         }
