@@ -175,7 +175,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let state = mem::replace(&mut self.state, TschState::Placeholder);
 
         match state {
-            TschState::WaitingForFrameInRxSlot { response_token } => {
+            TschState::ListeningInRxSlot { response_token } => {
                 self.state = TschState::ReceivingFrameInRxSlot { response_token };
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
@@ -219,7 +219,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let state = mem::replace(&mut self.state, TschState::Placeholder);
 
         match state {
-            TschState::WaitingForFrameInRxSlot { response_token } => {
+            TschState::ListeningInRxSlot { response_token } => {
                 // No frame received in this slot
                 self.put_rx_frame(rx_frame);
                 SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
@@ -461,7 +461,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 self.update_timing(asn, context);
                 let frame = self.take_rx_frame().expect("no rx_frame for TSCH RX slot");
 
-                self.state = TschState::WaitingForFrameInRxSlot { response_token };
+                self.state = TschState::ListeningInRxSlot { response_token };
 
                 // Calculate RX start time: timeslot start + macTsRxOffset
                 let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
@@ -508,7 +508,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 let request = DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
                     at: Timestamp::Scheduled(tx_instant),
-                    radio_frame: updated_frame,
+                    mpdu: updated_frame,
                     cca: false,
                     channel: Some(channel),
                     fallback_on_nack: false,

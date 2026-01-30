@@ -77,7 +77,7 @@ pub enum TschState {
     /// TX slot - TxStarted received, waiting for Sent/Nack.
     TransmittingInTxSlot { response_token: ResponseToken },
     /// RX slot - driver request sent, waiting for FrameStarted/RxWindowEnded.
-    WaitingForFrameInRxSlot {
+    ListeningInRxSlot {
         response_token: Option<ResponseToken>,
     },
     /// RX slot - FrameStarted received, waiting for Received/CrcError.
