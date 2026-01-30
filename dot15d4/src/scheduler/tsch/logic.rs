@@ -273,7 +273,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             }
             TschState::TransmittingInAdvertisementSlot => {
                 // Put beacon frame back for next advertisement
-                self.beacon_frame.set(Some(tx_frame));
+                self.beacon_mpdu
+                    .set(Some(MpduFrame::from_radio_frame(tx_frame)));
 
                 // Record beacon transmission time for period calculation
                 self.on_beacon_sent(instant);
@@ -339,7 +340,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 // Create and queue the operation
                 let operation = TschOperation::TxSlot {
-                    radio_frame: mpdu.into_radio_frame::<RadioDriverImpl>(),
+                    mpdu,
                     asn: next_asn,
                     channel,
                     cca: false, // TSCH typically doesn't use CCA
@@ -417,7 +418,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
             TschOperation::TxSlot {
-                radio_frame,
+                mpdu,
                 asn,
                 channel,
                 cca,
@@ -433,7 +434,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 let request = DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
                     at: Timestamp::Scheduled(tx_instant),
-                    radio_frame,
+                    mpdu,
                     cca,
                     channel: Some(channel),
                     fallback_on_nack: false,
@@ -490,7 +491,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 self.update_timing(asn, context);
                 // Take beacon frame and update ASN
                 let beacon_frame = self
-                    .beacon_frame
+                    .beacon_mpdu
                     .take()
                     .expect("no beacon frame for advertisement");
 

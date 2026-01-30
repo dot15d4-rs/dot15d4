@@ -1,11 +1,14 @@
 //! Enhanced Beacon frame builder for TSCH.
 use core::marker::PhantomData;
 
-use dot15d4_driver::radio::frame::{
-    Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr, IeRepr,
-    IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameSized, RadioFrameUnsized,
+use dot15d4_driver::radio::{
+    frame::{
+        Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr, IeRepr,
+        IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameUnsized,
+    },
+    DriverConfig,
 };
-use dot15d4_driver::radio::DriverConfig;
+use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
 
 use dot15d4_frame::MpduWithIes;
@@ -57,7 +60,7 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
         &self,
         pib: &Pib,
         radio_frame: RadioFrame<RadioFrameUnsized>,
-    ) -> Option<RadioFrame<RadioFrameSized>> {
+    ) -> Option<MpduFrame> {
         let buffer = radio_frame.into_buffer();
 
         // Create the frame writer
@@ -126,15 +129,11 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
             }
         }
 
-        Some(mpdu_writer.into_radio_frame::<RadioDriverImpl>())
+        Some(mpdu_writer.into_mpdu_frame())
     }
 
-    pub fn update_beacon(
-        &self,
-        radio_frame: RadioFrame<RadioFrameSized>,
-        asn: TschAsn,
-    ) -> Option<RadioFrame<RadioFrameSized>> {
-        let buffer = radio_frame.into_buffer();
+    pub fn update_beacon(&self, mpdu: MpduFrame, asn: TschAsn) -> Option<MpduFrame> {
+        let buffer = mpdu.into_buffer();
         let mut mpdu_writer = self
             .mpdu_repr
             .into_writer::<RadioDriverImpl>(FrameVersion::Ieee802154, FrameType::Beacon, 0, buffer)
@@ -148,7 +147,7 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
         //TODO: support join metric
         tsch_sync.set_join_metric(0);
 
-        Some(mpdu_writer.into_radio_frame::<RadioDriverImpl>())
+        Some(mpdu_writer.into_mpdu_frame())
     }
 }
 

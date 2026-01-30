@@ -81,8 +81,8 @@ pub struct DrvSvcTaskTx {
     /// antenna.
     pub at: Timestamp,
 
-    /// radio frame to be sent
-    pub radio_frame: RadioFrame<RadioFrameSized>,
+    /// MPDU frame to be sent
+    pub mpdu: MpduFrame,
 
     /// whether CCA is to be performed as a precondition to send out the frame
     pub cca: bool,
@@ -389,12 +389,13 @@ where
 
         match next_request {
             DrvSvcRequest::CompleteThenStartTx(task_tx) => {
-                let next_ifs = Ifs::from_mpdu_length(task_tx.radio_frame.sdu_length().get());
-                let next_ack_seq_nr = task_tx.radio_frame.ack_seq_num();
+                let next_ifs = Ifs::from_mpdu_length(task_tx.mpdu.pdu_length::<RadioDriverImpl>());
+                let next_ack_seq_nr = task_tx.mpdu.sequence_number();
+                let ack_request = task_tx.mpdu.frame_control().ack_request();
                 match tx_driver
                     .schedule_tx(
                         RadioTaskTx {
-                            radio_frame: task_tx.radio_frame,
+                            radio_frame: task_tx.mpdu.into_radio_frame::<RadioDriverImpl>(),
                             cca: task_tx.cca,
                         },
                         ifs,
@@ -416,13 +417,13 @@ where
                             .await;
 
                         match next_ack_seq_nr {
-                            Some(seq_nb) => DriverState::SendingFrameWithAck(
+                            Some(seq_nb) if ack_request => DriverState::SendingFrameWithAck(
                                 this_state,
                                 next_ifs,
                                 seq_nb,
                                 task_tx.fallback_on_nack,
                             ),
-                            None => DriverState::SendingFrame(this_state, next_ifs),
+                            _ => DriverState::SendingFrame(this_state, next_ifs),
                         }
                     }
                     CompletedRadioTransition::Fallback(
@@ -604,11 +605,7 @@ where
                     // Expect rx ACK frame
                     let (event, recovered_ack_frame) = match rx_task_result {
                         RxResult::Frame(rx_ack_frame, _) => {
-                            match validate_ack_frame::<RadioDriverImpl>(
-                                rx_ack_frame,
-                                seq_nb,
-                                // &tx_radio_frame,
-                            ) {
+                            match validate_ack_frame::<RadioDriverImpl>(rx_ack_frame, seq_nb) {
                                 Ok(validated_ack_frame) => (
                                     DrvSvcEvent::Sent(tx_radio_frame, tx_timestamp),
                                     validated_ack_frame,
@@ -676,11 +673,13 @@ where
 
         match next_request {
             DrvSvcRequest::CompleteThenStartTx(tx_task) => {
-                let seq_nb = tx_task.radio_frame.ack_seq_num();
-                let tx_task_ifs = Ifs::from_mpdu_length(tx_task.radio_frame.sdu_length().get());
+                let seq_nb = tx_task.mpdu.sequence_number();
+                let ack_request = tx_task.mpdu.frame_control().ack_request();
+                let tx_task_ifs =
+                    Ifs::from_mpdu_length(tx_task.mpdu.pdu_length::<RadioDriverImpl>());
                 let DrvSvcTaskTx {
                     at,
-                    radio_frame,
+                    mpdu,
                     cca,
                     channel,
                     fallback_on_nack,
@@ -689,7 +688,10 @@ where
                 assert!(channel.is_none());
                 match receiving_rx_driver
                     .schedule_tx(
-                        RadioTaskTx { radio_frame, cca },
+                        RadioTaskTx {
+                            radio_frame: mpdu.into_radio_frame::<RadioDriverImpl>(),
+                            cca,
+                        },
                         at.into(),
                         Some(next_ifs),
                         false,
@@ -711,13 +713,13 @@ where
                             .await;
 
                         match seq_nb {
-                            Some(seq_nb) => DriverState::SendingFrameWithAck(
+                            Some(seq_nb) if ack_request => DriverState::SendingFrameWithAck(
                                 tx_driver,
                                 tx_task_ifs,
                                 seq_nb,
                                 fallback_on_nack,
                             ),
-                            None => DriverState::SendingFrame(tx_driver, tx_task_ifs),
+                            _ => DriverState::SendingFrame(tx_driver, tx_task_ifs),
                         }
                     }
                     CompletedRadioTransition::Fallback(
@@ -1185,14 +1187,15 @@ where
     ) -> Result<DriverState<RadioDriverImpl>, RadioDriver<RadioDriverImpl, RadioTaskOff>> {
         match request {
             DrvSvcRequest::CompleteThenStartTx(task_tx) => {
-                let seq_nb = task_tx.radio_frame.ack_seq_num();
+                let seq_nb = task_tx.mpdu.sequence_number();
+                let ack_request = task_tx.mpdu.frame_control().ack_request();
                 let tx_task_ifs = Ifs::<PhyOf<RadioDriverImpl>>::from_mpdu_length(
-                    task_tx.radio_frame.sdu_length().get(),
+                    task_tx.mpdu.pdu_length::<RadioDriverImpl>(),
                 );
                 match off_driver
                     .schedule_tx(
                         RadioTaskTx {
-                            radio_frame: task_tx.radio_frame,
+                            radio_frame: task_tx.mpdu.into_radio_frame::<RadioDriverImpl>(),
                             cca: task_tx.cca,
                         },
                         OptionalNsInstant::from(task_tx.at),
@@ -1210,13 +1213,13 @@ where
                             .send(DrvSvcEvent::TxStarted(measured_entry))
                             .await;
                         Ok(match seq_nb {
-                            Some(seq_nb) => DriverState::SendingFrameWithAck(
+                            Some(seq_nb) if ack_request => DriverState::SendingFrameWithAck(
                                 tx_driver,
                                 tx_task_ifs,
                                 seq_nb,
                                 task_tx.fallback_on_nack,
                             ),
-                            None => DriverState::SendingFrame(tx_driver, tx_task_ifs),
+                            _ => DriverState::SendingFrame(tx_driver, tx_task_ifs),
                         })
                     }
                     CompletedRadioTransition::Fallback(
