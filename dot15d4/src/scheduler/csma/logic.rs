@@ -6,8 +6,9 @@ use dot15d4_driver::{
         frame::{Address, PanId, RadioFrame, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
-    timer::{NsInstant, RadioTimerApi},
+    timer::RadioTimerApi,
 };
+use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
@@ -33,7 +34,7 @@ use crate::{
     },
 };
 
-use super::task::{CsmaState, CsmaTask, PipelinedInfo};
+use super::task::{CsmaState, CsmaTask, Pipelined};
 
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for CsmaTask<RadioDriverImpl> {
     fn step(
@@ -41,377 +42,74 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for CsmaTask<
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        match event {
-            SchedulerTaskEvent::Entry => self.on_entry(context),
-            SchedulerTaskEvent::DriverEvent(e) => self.on_driver_event(e, context),
-            SchedulerTaskEvent::SchedulerRequest { token, request } => {
-                self.on_scheduler_request(token, request, context)
-            }
-            #[cfg(feature = "tsch")]
-            SchedulerTaskEvent::TimerExpired => unreachable!(),
-        }
-    }
-}
-
-// ============================================================================
-// Entry & Dispatch
-// ============================================================================
-
-impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    fn on_entry(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match &self.state {
-            CsmaState::Idle => self.decide_next_action(context),
-            CsmaState::Listening => {
-                SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
-            }
-            _ => SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None),
-        }
-    }
-
-    fn on_driver_event(
-        &mut self,
-        event: DrvSvcEvent,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
         match self.state {
-            CsmaState::Cca => self.on_cca(event, context),
-            CsmaState::WaitingForTxResult => self.on_tx_result(event, context),
-            CsmaState::Listening => self.on_listening(event, context),
-            CsmaState::Receiving => self.on_receiving(event, context),
-            CsmaState::Idle => {
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
-            }
+            CsmaState::Idle => self.execute_idle(event, context),
+            CsmaState::WaitingForTxStart => self.execute_waiting_for_tx_start(event, context),
+            CsmaState::Transmitting => self.execute_transmitting(event, context),
+            CsmaState::Listening => self.execute_listening(event, context),
+            CsmaState::Receiving => self.execute_receiving(event, context),
             #[cfg(feature = "tsch")]
-            CsmaState::Terminating => self.on_terminating(event, context),
-        }
-    }
-
-    fn on_scheduler_request(
-        &mut self,
-        token: ResponseToken,
-        request: SchedulerRequest,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match request {
-            SchedulerRequest::Transmission(mpdu) => {
-                self.start_tx(token, mpdu.into_radio_frame::<RadioDriverImpl>(), context)
-            }
-            SchedulerRequest::Command(cmd) => self.on_command(token, cmd, context),
-            _ => unreachable!(),
+            CsmaState::Terminating => self.execute_terminating(event, context),
         }
     }
 }
 
 // ============================================================================
-// TX Initiation & Decision
+// States Execution
 // ============================================================================
-
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    /// Decide what to do next: pending TX, channel TX, or start RX.
-    fn decide_next_action(
+    fn execute_idle(
         &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        if let Some((token, frame)) = self.next_tx_request(context) {
-            return self.start_tx(token, frame, context);
-        } else {
-            self.start_rx()
-        }
-    }
-
-    /// Start TX with an already-prepared radio frame.
-    fn start_tx(
-        &mut self,
-        token: ResponseToken,
-        frame: RadioFrame<RadioFrameSized>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        self.base_time = context.timer.now();
-        self.prepare_tx(token, context.pib.min_be);
-
-        // FIXME: fix scheduled timings
-        let at = Timestamp::BestEffort;
-        let fallback = self.can_retry(context.pib.max_frame_retries);
-        let req = self.build_tx_request(frame, at, Some(self.channel), fallback);
-
-        self.send_driver_request_and_wait(req)
-    }
-}
-
-// ============================================================================
-// CCA Handling
-// ============================================================================
-
-impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    fn on_cca(
-        &mut self,
-        event: DrvSvcEvent,
+        event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            DrvSvcEvent::TxStarted(instant) => {
-                self.base_time = instant;
-                self.pipeline_next_operation(context)
-            }
-            DrvSvcEvent::CcaBusy(frame, instant) => {
-                self.base_time = instant;
-                self.handle_cca_busy(frame, context)
-            }
-            DrvSvcEvent::RxWindowEnded(radio_frame) => {
-                // RX window ended during TX transition - save frame for later
-                self.rx_frame = Some(radio_frame);
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            SchedulerTaskEvent::Entry => {
+                // Decide what to do next: pending TX, channel TX, or start RX.
+                SchedulerTaskTransition::Execute(self.next_action(context), None)
             }
             _ => unreachable!(),
         }
     }
 
-    fn handle_cca_busy(
+    fn execute_listening(
         &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        // Try another backoff
-        if self
-            .backoff
-            .on_failure(context.pib.max_csma_backoffs, context.pib.max_be)
-        {
-            let at = Timestamp::Scheduled(self.backoff_time(context.rng));
-            let fallback = self.can_retry(context.pib.max_frame_retries);
-            let req = self.build_tx_request(frame, at, Some(self.channel), fallback);
-            return self.send_driver_request_and_wait(req);
-        }
-
-        // Try retransmission
-        if self.can_retry(context.pib.max_frame_retries) {
-            return self.do_retransmit(frame, context);
-        }
-
-        // Complete failure
-        self.complete_tx_failure(frame, context)
-    }
-}
-
-// ============================================================================
-// TX Result Handling
-// ============================================================================
-
-impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    fn on_tx_result(
-        &mut self,
-        event: DrvSvcEvent,
+        event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            DrvSvcEvent::Sent(frame, instant) => {
-                self.base_time = instant;
-                self.complete_tx_success(frame, instant)
-            }
-            DrvSvcEvent::Nack(frame, instant, recovered) => {
-                self.base_time = instant;
-                self.handle_nack(frame, instant, recovered, context)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn handle_nack(
-        &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
-        recovered: Option<DrvSvcRequest>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match recovered {
-            Some(DrvSvcRequest::CompleteThenStartTx(recovered_task)) => {
-                // Store recovered TX for after retry
-                if let Some(PipelinedInfo::Tx(token)) = self.pipelined_info.take() {
-                    self.pending_tx = Some((token, recovered_task.radio_frame));
+            // A Scheduler Request arrived while listening for frame
+            SchedulerTaskEvent::SchedulerRequest { token, request } => match request {
+                SchedulerRequest::Transmission(mpdu) => {
+                    SchedulerTaskTransition::Execute(self.schedule_tx(token, mpdu, context), None)
                 }
-                self.retry_or_fail(frame, context)
-            }
-            Some(DrvSvcRequest::CompleteThenStartRx(task)) => {
-                self.rx_frame = Some(task.radio_frame);
-                self.pipelined_info = None;
-                self.retry_or_fail(frame, context)
-            }
-            None => {
-                // No recovery - next op already started, report failure
-                let token = self.take_tx_token();
-                let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
-                    frame, instant,
-                ));
-                self.continue_after_tx(Some((token, resp)))
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn retry_or_fail(
-        &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        if self.can_retry(context.pib.max_frame_retries) {
-            self.do_retransmit(frame, context)
-        } else {
-            let token = self.take_tx_token();
-            let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
-                frame,
-                self.base_time,
-            ));
-            self.state = CsmaState::Idle;
-            self.transition_with_response(context, token, resp)
-        }
-    }
-
-    fn do_retransmit(
-        &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        self.prepare_retransmit(context.pib.min_be);
-        self.base_time = context.timer.now();
-
-        let at = Timestamp::Scheduled(self.backoff_time(context.rng));
-        let fallback = self.can_retry(context.pib.max_frame_retries);
-        let req = self.build_tx_request(frame, at, Some(self.channel), fallback);
-
-        self.send_driver_request_and_wait(req)
-    }
-
-    fn complete_tx_success(
-        &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
-    ) -> SchedulerTaskTransition {
-        let token = self.take_tx_token();
-        let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
-            frame.forget_size::<RadioDriverImpl>(),
-            instant,
-        ));
-        self.continue_after_tx(Some((token, resp)))
-    }
-
-    fn complete_tx_failure(
-        &mut self,
-        frame: RadioFrame<RadioFrameSized>,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        let token = self.take_tx_token();
-        let resp = SchedulerResponse::Transmission(
-            SchedulerTransmissionResult::ChannelAccessFailure(frame),
-        );
-        self.state = CsmaState::Idle;
-        self.transition_with_response(context, token, resp)
-    }
-}
-
-// ============================================================================
-// Pipelining
-// ============================================================================
-
-impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    /// Pipeline the next operation after TX started.
-    fn pipeline_next_operation(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        let fallback = context.pib.max_frame_retries > 0;
-
-        let request = if let Some((token, frame)) = self.next_tx_request(context) {
-            self.pipelined_info = Some(PipelinedInfo::Tx(token));
-            self.build_tx_request(frame, Timestamp::BestEffort, None, fallback)
-        } else {
-            let frame = self.rx_frame.take().expect("no rx frame");
-            self.pipelined_info = Some(PipelinedInfo::Rx);
-            self.build_rx_request(frame, None)
-        };
-
-        self.state = CsmaState::WaitingForTxResult;
-        self.send_driver_request_and_wait(request)
-    }
-
-    /// Continue with next pipelined operation after TX completes.
-    fn continue_after_tx(
-        &mut self,
-        response: Option<(ResponseToken, SchedulerResponse)>,
-    ) -> SchedulerTaskTransition {
-        match self.pipelined_info.take() {
-            Some(PipelinedInfo::Tx(token)) => {
-                self.tx_token = Some(token);
-                self.tx_retries = 0;
-                self.state = CsmaState::Cca;
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, response)
-            }
-            _ => {
-                self.state = CsmaState::Listening;
-                SchedulerTaskTransition::Execute(
-                    SchedulerAction::SelectDriverEventOrRequest,
-                    response,
-                )
-            }
-        }
-    }
-}
-
-// ============================================================================
-// RX Operations
-// ============================================================================
-
-impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    fn start_rx(&mut self) -> SchedulerTaskTransition {
-        let frame = match self.rx_frame.take() {
-            Some(f) => f,
-            None => {
-                self.state = CsmaState::Idle;
-                return SchedulerTaskTransition::Execute(
-                    SchedulerAction::WaitForSchedulerRequest,
-                    None,
-                );
-            }
-        };
-
-        self.state = CsmaState::Listening;
-        let req = self.build_rx_request(frame, Some(self.channel));
-        self.send_driver_request_and_select(req)
-    }
-
-    fn on_listening(
-        &mut self,
-        event: DrvSvcEvent,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match event {
-            DrvSvcEvent::FrameStarted => {
+                SchedulerRequest::Command(cmd) => {
+                    self.on_scheduler_command_request(token, cmd, context)
+                }
+                _ => unreachable!(),
+            },
+            // Incoming frame detected
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
+                self.state = CsmaState::Receiving;
                 // Frame arriving - pipeline next RX
                 let frame = self
                     .rx_frame
                     .take()
                     .unwrap_or_else(|| context.allocate_frame());
-                self.state = CsmaState::Receiving;
                 let req = self.build_rx_request(frame, None);
                 self.send_driver_request_and_wait(req)
-            }
-            DrvSvcEvent::RxWindowEnded(frame) => {
-                self.rx_frame = Some(frame);
-                self.state = CsmaState::Idle;
-                SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
             }
             _ => unreachable!(),
         }
     }
 
-    fn on_receiving(
+    fn execute_receiving(
         &mut self,
-        event: DrvSvcEvent,
+        event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            DrvSvcEvent::Received(frame, instant) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(frame, instant)) => {
                 self.base_time = instant;
                 self.state = CsmaState::Listening;
 
@@ -431,7 +129,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                     )
                 }
             }
-            DrvSvcEvent::CrcError(frame, instant) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(frame, instant)) => {
                 self.base_time = instant;
                 self.rx_frame = Some(frame);
                 self.state = CsmaState::Listening;
@@ -440,6 +138,182 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             _ => unreachable!(),
         }
     }
+
+    fn execute_waiting_for_tx_start(
+        &mut self,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(instant)) => {
+                self.base_time = instant;
+                self.pipeline_next_operation(context)
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(frame, instant)) => {
+                self.base_time = instant;
+                self.backoff_or_fail(frame, context)
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
+                // RX window ended during TX transition - save frame for later
+                self.rx_frame = Some(radio_frame);
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn execute_transmitting(
+        &mut self,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(frame, instant)) => {
+                self.base_time = instant;
+
+                let token = self.take_tx_token();
+                let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
+                    frame.forget_size::<RadioDriverImpl>(),
+                    instant,
+                ));
+                self.continue_with_pipelined((token, resp))
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(frame, instant, recovered)) => {
+                self.base_time = instant;
+
+                match recovered {
+                    Some(DrvSvcRequest::CompleteThenStartTx(recovered_task)) => {
+                        // Store recovered TX for after retry
+                        if let Some(Pipelined::Tx(token)) = self.pipelined.take() {
+                            self.pending_tx = Some((token, recovered_task.mpdu));
+                        }
+                        self.retransmit_or_fail(frame, context)
+                    }
+                    Some(DrvSvcRequest::CompleteThenStartRx(task)) => {
+                        self.rx_frame = Some(task.radio_frame);
+                        self.pipelined = None;
+                        self.retransmit_or_fail(frame, context)
+                    }
+                    None => {
+                        // No recovery - next op already started, report failure
+                        let token = self.take_tx_token();
+                        let resp = SchedulerResponse::Transmission(
+                            SchedulerTransmissionResult::NoAck(frame, instant),
+                        );
+                        self.continue_with_pipelined((token, resp))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(feature = "tsch")]
+    fn execute_terminating(
+        &mut self,
+        event: SchedulerTaskEvent,
+        context: &SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
+                unsafe {
+                    context
+                        .buffer_allocator
+                        .deallocate_buffer(radio_frame.into_buffer());
+                }
+                let response = SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
+                    TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
+                ));
+                SchedulerTaskTransition::Completed(
+                    SchedulerTaskCompletion::SwitchToTsch,
+                    Some((self.take_tx_token(), response)),
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+// ============================================================================
+// Handling Driver Service events from TX request
+// ============================================================================
+
+impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    fn retransmit_or_fail(
+        &mut self,
+        frame: RadioFrame<RadioFrameSized>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        if self.tx_retries < context.pib.max_frame_retries {
+            self.state = CsmaState::WaitingForTxStart;
+            self.base_time = context.timer.now();
+            self.tx_retries += 1;
+            self.backoff.reset(context.pib.min_be);
+
+            let at = Timestamp::Scheduled(self.backoff_time(context.rng));
+            let fallback = self.tx_retries < context.pib.max_frame_retries;
+            let mpdu = MpduFrame::from_radio_frame(frame);
+            let req = self.build_tx_request(mpdu, at, Some(self.channel), fallback);
+
+            self.send_driver_request_and_wait(req)
+        } else {
+            let token = self.take_tx_token();
+            let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
+                frame,
+                self.base_time,
+            ));
+            self.state = CsmaState::Idle;
+            SchedulerTaskTransition::Execute(self.next_action(context), Some((token, resp)))
+        }
+    }
+
+    fn backoff_or_fail(
+        &mut self,
+        frame: RadioFrame<RadioFrameSized>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        // Try another backoff
+        if self
+            .backoff
+            .on_failure(context.pib.max_csma_backoffs, context.pib.max_be)
+        {
+            let at = Timestamp::Scheduled(self.backoff_time(context.rng));
+            let fallback = self.tx_retries < context.pib.max_frame_retries;
+            let mpdu = MpduFrame::from_radio_frame(frame);
+            let req = self.build_tx_request(mpdu, at, Some(self.channel), fallback);
+            return self.send_driver_request_and_wait(req);
+        }
+
+        // Transmission attempt ended with Channel Access failure
+        let token = self.take_tx_token();
+        let resp = SchedulerResponse::Transmission(
+            SchedulerTransmissionResult::ChannelAccessFailure(frame),
+        );
+        self.state = CsmaState::Idle;
+        SchedulerTaskTransition::Execute(self.next_action(context), Some((token, resp)))
+    }
+
+    /// Pipeline the next operation after TX started.
+    fn pipeline_next_operation(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        let fallback = context.pib.max_frame_retries > 0;
+
+        let request = if let Some((token, mpdu)) = self.next_tx_request(context) {
+            self.pipelined = Some(Pipelined::Tx(token));
+            //TODO: should be scheduled timestamp, but OK for best effort for now
+            self.build_tx_request(mpdu, Timestamp::BestEffort, None, fallback)
+        } else {
+            let frame = self.rx_frame.take().expect("no rx frame");
+            self.pipelined = Some(Pipelined::Rx);
+            self.build_rx_request(frame, None)
+        };
+
+        self.state = CsmaState::Transmitting;
+        self.send_driver_request_and_wait(request)
+    }
 }
 
 // ============================================================================
@@ -447,7 +321,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    fn on_command(
+    fn on_scheduler_command_request(
         &mut self,
         token: ResponseToken,
         cmd: crate::scheduler::command::SchedulerCommand,
@@ -462,7 +336,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                     CsmaCommandResult::UseCsma(UseCsmaResult::Success),
                 ));
                 self.state = CsmaState::Idle;
-                self.transition_with_response(context, token, resp)
+                SchedulerTaskTransition::Execute(self.next_action(context), Some((token, resp)))
             }
 
             SchedulerCommand::PibCommand(cmd) => self.on_pib_cmd(token, cmd, context),
@@ -628,31 +502,6 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             }
         }
     }
-
-    #[cfg(feature = "tsch")]
-    fn on_terminating(
-        &mut self,
-        event: DrvSvcEvent,
-        context: &SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match event {
-            DrvSvcEvent::RxWindowEnded(radio_frame) => {
-                unsafe {
-                    context
-                        .buffer_allocator
-                        .deallocate_buffer(radio_frame.into_buffer());
-                }
-                let response = SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
-                    TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
-                ));
-                SchedulerTaskTransition::Completed(
-                    SchedulerTaskCompletion::SwitchToTsch,
-                    Some((self.take_tx_token(), response)),
-                )
-            }
-            _ => unreachable!(),
-        }
-    }
 }
 
 // ============================================================================
@@ -666,29 +515,61 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         SchedulerTaskTransition::Execute(SchedulerAction::SendDriverRequestThenWait(req), None)
     }
 
-    /// Send driver request and select on driver event OR scheduler request.
-    #[inline]
-    fn send_driver_request_and_select(&self, req: DrvSvcRequest) -> SchedulerTaskTransition {
-        SchedulerTaskTransition::Execute(SchedulerAction::SendDriverRequestThenSelect(req), None)
+    fn next_action(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> SchedulerAction {
+        // If a TX request is available in channel (or pending)
+        if let Some((tx_token, mpdu)) = self.next_tx_request(context) {
+            self.schedule_tx(tx_token, mpdu, context)
+        } else {
+            let frame = self.rx_frame.take().unwrap();
+            self.state = CsmaState::Listening;
+            let req = self.build_rx_request(frame, Some(self.channel));
+            SchedulerAction::SendDriverRequestThenSelect(req)
+        }
     }
 
-    /// Transition with response after state change.
-    fn transition_with_response(
+    fn schedule_tx(
         &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
         token: ResponseToken,
-        resp: SchedulerResponse,
+        mpdu: MpduFrame,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerAction {
+        self.state = CsmaState::WaitingForTxStart;
+
+        self.base_time = context.timer.now();
+        self.backoff.reset(context.pib.min_be);
+        self.tx_token = Some(token);
+        self.tx_retries = 0;
+
+        // FIXME: fix scheduled timings
+        let at = Timestamp::BestEffort;
+        let fallback = self.tx_retries < context.pib.max_frame_retries;
+        let req = self.build_tx_request(mpdu, at, Some(self.channel), fallback);
+
+        SchedulerAction::SendDriverRequestThenWait(req)
+    }
+
+    /// Continue with next pipelined operation after TX completes.
+    fn continue_with_pipelined(
+        &mut self,
+        response: (ResponseToken, SchedulerResponse),
     ) -> SchedulerTaskTransition {
-        let transition = if let Some((tx_token, frame)) = self.next_tx_request(context) {
-            self.start_tx(tx_token, frame, context)
-        } else {
-            self.start_rx()
-        };
-        match transition {
-            SchedulerTaskTransition::Execute(action, _) => {
-                SchedulerTaskTransition::Execute(action, Some((token, resp)))
+        match self.pipelined.take() {
+            Some(Pipelined::Tx(token)) => {
+                self.state = CsmaState::WaitingForTxStart;
+                self.tx_token = Some(token);
+                self.tx_retries = 0;
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::WaitForDriverEvent,
+                    Some(response),
+                )
             }
-            other => other,
+            _ => {
+                self.state = CsmaState::Listening;
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::SelectDriverEventOrRequest,
+                    Some(response),
+                )
+            }
         }
     }
 
@@ -696,14 +577,14 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     fn next_tx_request(
         &mut self,
         context: &SchedulerContext<RadioDriverImpl>,
-    ) -> Option<(ResponseToken, RadioFrame<RadioFrameSized>)> {
+    ) -> Option<(ResponseToken, MpduFrame)> {
         // Priorities:
         // 1. Pending TX from NACK recovery
         // 2. Tx request from channel
         if let Some(pending) = self.pending_tx.take() {
             Some(pending)
         } else if let Some((tx_token, mpdu)) = context.try_receive_tx_request() {
-            Some((tx_token, mpdu.into_radio_frame::<RadioDriverImpl>()))
+            Some((tx_token, mpdu))
         } else {
             None
         }
@@ -718,14 +599,14 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     #[inline]
     fn build_tx_request(
         &self,
-        frame: RadioFrame<RadioFrameSized>,
+        mpdu: MpduFrame,
         at: Timestamp,
         channel: Option<config::Channel>,
         fallback: bool,
     ) -> DrvSvcRequest {
         DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
             at,
-            radio_frame: frame,
+            mpdu,
             cca: true,
             channel,
             fallback_on_nack: fallback,
@@ -735,12 +616,12 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     #[inline]
     fn build_rx_request(
         &self,
-        frame: RadioFrame<RadioFrameUnsized>,
+        radio_frame: RadioFrame<RadioFrameUnsized>,
         channel: Option<config::Channel>,
     ) -> DrvSvcRequest {
         DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
             start: Timestamp::BestEffort,
-            radio_frame: frame,
+            radio_frame,
             channel,
         })
     }

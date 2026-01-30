@@ -179,6 +179,11 @@ pub(crate) enum DataConfirm {
         /// RMARKER Timestamp
         NsInstant,
     ),
+    /// CSMA-CA algorithm failed.
+    ChannelAccessFailure(
+        /// recovered Tx radio frame
+        RadioFrame<RadioFrameSized>,
+    ),
 }
 
 impl<RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'_, RadioDriverImpl> {
@@ -207,7 +212,11 @@ impl<RadioDriverImpl: DriverConfig> MacTask for DataRequestTask<'_, RadioDriverI
                         SchedulerTransmissionResult::NoAck(radio_frame, instant) => {
                             MacTaskTransition::Terminated(DataConfirm::Nack(radio_frame, instant))
                         }
-                        SchedulerTransmissionResult::ChannelAccessFailure(_radio_frame) => todo!(),
+                        SchedulerTransmissionResult::ChannelAccessFailure(radio_frame) => {
+                            MacTaskTransition::Terminated(DataConfirm::ChannelAccessFailure(
+                                radio_frame,
+                            ))
+                        }
                     }
                 }
                 _ => unreachable!(),

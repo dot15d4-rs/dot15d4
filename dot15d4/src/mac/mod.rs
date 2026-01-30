@@ -408,10 +408,14 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacSvcTaskResult::DataRequest(data_confirm) => {
                 let (recovered_radio_frame, instant) = match data_confirm {
                     DataConfirm::Sent(recovered_radio_frame, instant) => {
-                        (recovered_radio_frame, instant)
+                        (recovered_radio_frame, Some(instant))
                     }
-                    DataConfirm::Nack(unsent_radio_frame, instant) => {
-                        (unsent_radio_frame.forget_size::<RadioDriverImpl>(), instant)
+                    DataConfirm::Nack(unsent_radio_frame, instant) => (
+                        unsent_radio_frame.forget_size::<RadioDriverImpl>(),
+                        Some(instant),
+                    ),
+                    DataConfirm::ChannelAccessFailure(unsent_radio_frame) => {
+                        (unsent_radio_frame.forget_size::<RadioDriverImpl>(), None)
                     }
                 };
 
@@ -429,12 +433,8 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 //         have to be re-allocated. We just don't do that
                 //         currently as the smoltcp driver is synchronous and
                 //         cannot handle any response.
-                self.request_receiver.received(
-                    response_token,
-                    MacConfirm {
-                        timestamp: Some(instant),
-                    },
-                );
+                self.request_receiver
+                    .received(response_token, MacConfirm { timestamp: instant });
             }
             MacSvcTaskResult::SetRequest(_set_confirm) => {
                 self.request_receiver

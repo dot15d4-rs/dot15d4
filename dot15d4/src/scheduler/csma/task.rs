@@ -5,12 +5,13 @@ use core::marker::PhantomData;
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
+        frame::{RadioFrame, RadioFrameUnsized},
         phy::PhyConfig,
         DriverConfig, PhyOf,
     },
     timer::{NsDuration, NsInstant},
 };
+use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::ResponseToken;
 use rand_core::RngCore;
 
@@ -23,36 +24,36 @@ pub enum CsmaState {
     /// No operation pending.
     Idle,
     /// Performing CCA before TX.
-    Cca,
-    /// Waiting for TX result (Sent/Nack).
-    WaitingForTxResult,
+    WaitingForTxStart,
+    /// Transmitting, waiting for TX completion (Sent/Nack).
+    Transmitting,
     /// Listening for incoming frames.
     Listening,
     /// Actively receiving a frame.
     Receiving,
-    /// Terminating CSMA to switch to TSCH.
+    /// Terminating CSMA (e.g. to switch to TSCH).
     #[cfg(feature = "tsch")]
     Terminating,
 }
 
 /// Information about what operation has been pipelined.
 #[derive(Debug)]
-pub enum PipelinedInfo {
+pub enum Pipelined {
     /// Next is RX (frame stored in rx_frame).
     Rx,
     /// Next is TX with this token (frame already sent to driver).
     Tx(ResponseToken),
 }
 
-impl PipelinedInfo {
+impl Pipelined {
     #[inline]
     pub fn is_tx(&self) -> bool {
-        matches!(self, PipelinedInfo::Tx(_))
+        matches!(self, Pipelined::Tx(_))
     }
 }
 
 /// Pending TX from NACK recovery.
-pub type TxRequest = (ResponseToken, RadioFrame<RadioFrameSized>);
+pub type TxRequest = (ResponseToken, MpduFrame);
 
 /// CSMA-CA backoff state.
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +149,7 @@ pub struct CsmaTask<RadioDriverImpl: DriverConfig> {
     /// Current TX token
     pub tx_token: Option<ResponseToken>,
     /// Next operation info
-    pub pipelined_info: Option<PipelinedInfo>,
+    pub pipelined: Option<Pipelined>,
 
     /// Pending TX from NACK recovery
     pub pending_tx: Option<TxRequest>,
@@ -169,7 +170,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             channel,
             base_time: NsInstant::from_ticks(0),
             tx_token: None,
-            pipelined_info: None,
+            pipelined: None,
             pending_tx: None,
             rx_frame: Some(context.allocate_frame()),
             _marker: PhantomData,
@@ -186,28 +187,5 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     #[inline]
     pub fn backoff_time(&mut self, rng: &mut dyn RngCore) -> NsInstant {
         self.base_time + self.backoff.delay::<RadioDriverImpl>(rng)
-    }
-
-    /// Check if can retry transmission.
-    #[inline]
-    pub fn can_retry(&self, max_retries: u8) -> bool {
-        self.tx_retries < max_retries
-    }
-
-    /// Prepare for new TX attempt.
-    #[inline]
-    pub fn prepare_tx(&mut self, token: ResponseToken, min_be: u8) {
-        self.backoff.reset(min_be);
-        self.tx_token = Some(token);
-        self.tx_retries = 0;
-        self.state = CsmaState::Cca;
-    }
-
-    /// Prepare for retransmission.
-    #[inline]
-    pub fn prepare_retransmit(&mut self, min_be: u8) {
-        self.tx_retries += 1;
-        self.backoff.reset(min_be);
-        self.state = CsmaState::Cca;
     }
 }
