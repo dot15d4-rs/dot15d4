@@ -4,11 +4,10 @@ use core::mem;
 
 use dot15d4_driver::{
     radio::{
-        config::Channel,
-        frame::{FrameType, RadioFrame, RadioFrameSized, RadioFrameUnsized},
+        frame::{FrameType, RadioFrame, RadioFrameUnsized},
         DriverConfig,
     },
-    timer::{NsDuration, NsInstant, RadioTimerApi},
+    timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::ResponseToken;
@@ -35,165 +34,156 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        match event {
-            SchedulerTaskEvent::Entry => self.on_entry(context),
-            SchedulerTaskEvent::DriverEvent(event) => self.on_driver_event(event, context),
-            SchedulerTaskEvent::SchedulerRequest { token, request } => {
-                self.on_scheduler_request(token, request, context)
+        match mem::replace(&mut self.state, TschState::Placeholder) {
+            TschState::Idle { next_deadline } => self.execute_idle(event, context),
+            TschState::WaitingForTxStart { response_token } => {
+                self.execute_waiting_for_tx_start(response_token, event, context)
             }
-            SchedulerTaskEvent::TimerExpired => self.on_timer_expired_event(context),
-        }
-    }
-}
-
-// ============================================================================
-// Entry & Dispatch
-// ============================================================================
-impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
-    pub fn on_entry(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        #[cfg(feature = "tsch-coordinator")]
-        {
-            let current_time = context.timer.now();
-            self.init_coordinator(context, current_time, Some(3));
-            self.schedule_beacon(context);
-        }
-        assert!(matches!(
-            self.state,
-            TschState::WaitingForDeadlineOrRequest { .. }
-        ));
-        SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
-    }
-
-    /// Handle a scheduler request.
-    pub fn on_scheduler_request(
-        &mut self,
-        token: ResponseToken,
-        request: SchedulerRequest,
-        context: &SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match request {
-            SchedulerRequest::Transmission(mpdu) => {
-                self.on_scheduler_tx_request(token, mpdu, context)
+            TschState::Transmitting { response_token } => {
+                self.execute_transmitting(response_token, event, context)
             }
-            SchedulerRequest::Command(command) => self.on_scheduler_command(token, command),
-            SchedulerRequest::Reception => todo!(),
-        }
-    }
-
-    /// Handle a driver event.
-    pub fn on_driver_event(
-        &mut self,
-        event: DrvSvcEvent,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        match event {
-            DrvSvcEvent::CcaBusy(tx_frame, instant) => self.on_cca_busy_event(tx_frame, instant),
-            DrvSvcEvent::TxStarted(instant) => self.on_tx_started_event(instant),
-            DrvSvcEvent::Sent(tx_frame, instant) => self.on_sent_event(context, tx_frame, instant),
-            DrvSvcEvent::Nack(tx_frame, instant, drv_svc_request) => {
-                self.on_nack_event(context, tx_frame, instant, drv_svc_request)
+            TschState::Listening { response_token } => {
+                self.execute_listening(response_token, event, context)
             }
-            DrvSvcEvent::FrameStarted => self.on_frame_started_event(),
-            DrvSvcEvent::Received(rx_frame, instant) => {
-                self.on_frame_received_event(context, rx_frame, instant)
-            }
-            DrvSvcEvent::RxWindowEnded(rx_frame) => {
-                self.on_rx_window_ended_event(context, rx_frame)
-            }
-            DrvSvcEvent::CrcError(rx_frame, instant) => {
-                self.on_crc_error_event(context, rx_frame, instant)
-            }
-            DrvSvcEvent::SchedulingFailed(_tx_frame) => todo!(),
-        }
-    }
-
-    /// Handle timer expiry - time to execute next operation.
-    pub fn on_timer_expired_event(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        assert!(matches!(
-            self.state,
-            TschState::WaitingForDeadlineOrRequest { .. }
-        ));
-        // peek next operation to execute in the upcoming timeslot
-        match self.pending_operations.last() {
-            Some(TschOperation::TxSlot { .. }) => self.schedule_tx_operation(context),
-            Some(TschOperation::RxSlot { .. }) => self.schedule_rx_operation(context),
-            #[cfg(feature = "tsch-coordinator")]
-            Some(TschOperation::AdvertisementSlot { .. }) => {
-                self.schedule_advertisement_operation(context)
+            TschState::Receiving { response_token } => {
+                self.execute_receiving(response_token, event, context)
             }
             _ => unreachable!(),
         }
     }
 }
-
 // ============================================================================
-// Driver Events handling
+// States Execution
 // ============================================================================
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
-    pub fn on_tx_started_event(&mut self, instant: NsInstant) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::WaitingForTxStartInTxSlot { response_token } => {
-                self.state = TschState::TransmittingInTxSlot { response_token };
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
-            }
-            TschState::WaitingForTxStartInAdvertisementSlot => {
-                self.state = TschState::TransmittingInAdvertisementSlot;
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_cca_busy_event(
+    fn execute_idle(
         &mut self,
-        tx_frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
-    ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        //TODO: support tsch csma/retransmission
-        match state {
-            TschState::WaitingForTxStartInTxSlot { response_token } => {
-                todo!()
-            }
-            TschState::WaitingForTxStartInAdvertisementSlot => {
-                todo!()
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_frame_started_event(&mut self) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::ListeningInRxSlot { response_token } => {
-                self.state = TschState::ReceivingFrameInRxSlot { response_token };
-                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_frame_received_event(
-        &mut self,
+        event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
-        rx_frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
     ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
+        match event {
+            SchedulerTaskEvent::Entry => {
+                #[cfg(feature = "tsch-coordinator")]
+                {
+                    let current_time = context.timer.now();
+                    self.init_coordinator(context, current_time, Some(3));
+                    self.schedule_beacon(context);
+                }
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
+            // Incoming Scheduler Tx/Command Request from upper layer
+            SchedulerTaskEvent::SchedulerRequest { token, request } => match request {
+                SchedulerRequest::Transmission(mpdu) => {
+                    self.on_scheduler_tx_request(token, mpdu, context)
+                }
+                SchedulerRequest::Command(command) => self.on_scheduler_command(token, command),
+                SchedulerRequest::Reception => todo!(),
+            },
+            // Timer expired: time to execute next operation in the upcoming timeslot
+            SchedulerTaskEvent::TimerExpired => match self.pending_operations.last() {
+                Some(TschOperation::TxSlot { .. }) => self.schedule_tx_operation(context),
+                Some(TschOperation::RxSlot { .. }) => self.schedule_rx_operation(context),
+                #[cfg(feature = "tsch-coordinator")]
+                Some(TschOperation::AdvertisementSlot { .. }) => {
+                    self.schedule_advertisement_operation(context)
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
 
-        match state {
-            TschState::ReceivingFrameInRxSlot { response_token } => {
-                let action = self.wait_for_timeout_or_request(context);
+    fn execute_waiting_for_tx_start(
+        &mut self,
+        response_token: Option<ResponseToken>,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(instant)) => {
+                self.state = TschState::Transmitting { response_token };
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(radio_frame, instant)) => todo!(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn execute_transmitting(
+        &mut self,
+        response_token: Option<ResponseToken>,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant)) => {
+                if let Some(response_token) = response_token {
+                    let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
+                        tx_frame.forget_size::<RadioDriverImpl>(),
+                        instant,
+                    ));
+                    let action = self.go_idle(context);
+                    SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
+                } else {
+                    // Put beacon frame back for next advertisement
+                    self.beacon_mpdu
+                        .set(Some(MpduFrame::from_radio_frame(tx_frame)));
+
+                    // Record beacon transmission time for period calculation
+                    self.on_beacon_sent(instant);
+                    self.schedule_beacon(context);
+
+                    // Return to idle - next beacon will be scheduled automatically
+                    // in get_initial_action when the period expires
+                    SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                }
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(tx_frame, instant, request)) => {
+                if let Some(response_token) = response_token {
+                    // TODO: reschedule retransmission
+                    let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
+                        tx_frame, instant,
+                    ));
+                    let action = self.go_idle(context);
+                    SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
+                } else {
+                    // TODO: Unicast Beacon ?
+                    todo!()
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn execute_listening(
+        &mut self,
+        response_token: Option<ResponseToken>,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
+                self.state = TschState::Receiving { response_token };
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(rx_frame)) => {
+                // No frame received in this slot
+                self.put_rx_frame(rx_frame);
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn execute_receiving(
+        &mut self,
+        response_token: Option<ResponseToken>,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, instant)) => {
+                let action = self.go_idle(context);
 
                 if let Some(token) = response_token {
                     // Allocate new frame for next RX
@@ -207,99 +197,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     SchedulerTaskTransition::Execute(action, None)
                 }
             }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_rx_window_ended_event(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-        rx_frame: RadioFrame<RadioFrameUnsized>,
-    ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::ListeningInRxSlot { response_token } => {
-                // No frame received in this slot
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(rx_frame, instant)) => {
                 self.put_rx_frame(rx_frame);
-                SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_nack_event(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-        tx_frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
-        drv_svc_request: Option<DrvSvcRequest>,
-    ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::TransmittingInTxSlot { response_token } => {
-                // TODO: reschedule retransmission
-                let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
-                    tx_frame, instant,
-                ));
-                let action = self.wait_for_timeout_or_request(context);
-                SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
-            }
-            TschState::TransmittingInAdvertisementSlot => {
-                // TODO: check retransmission handling if unicast
-                todo!()
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_sent_event(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-        tx_frame: RadioFrame<RadioFrameSized>,
-        instant: NsInstant,
-    ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::TransmittingInTxSlot { response_token } => {
-                let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
-                    tx_frame.forget_size::<RadioDriverImpl>(),
-                    instant,
-                ));
-                let action = self.wait_for_timeout_or_request(context);
-                SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
-            }
-            TschState::TransmittingInAdvertisementSlot => {
-                // Put beacon frame back for next advertisement
-                self.beacon_mpdu
-                    .set(Some(MpduFrame::from_radio_frame(tx_frame)));
-
-                // Record beacon transmission time for period calculation
-                self.on_beacon_sent(instant);
-                self.schedule_beacon(context);
-
-                // Return to idle - next beacon will be scheduled automatically
-                // in get_initial_action when the period expires
-                SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn on_crc_error_event(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-        rx_frame: RadioFrame<RadioFrameUnsized>,
-        instant: NsInstant,
-    ) -> SchedulerTaskTransition {
-        let state = mem::replace(&mut self.state, TschState::Placeholder);
-
-        match state {
-            TschState::ReceivingFrameInRxSlot { response_token } => {
-                self.put_rx_frame(rx_frame);
-                SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
             _ => unreachable!(),
         }
@@ -349,7 +249,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 let _ = self.push_operation(operation);
 
-                SchedulerTaskTransition::Execute(self.wait_for_timeout_or_request(context), None)
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
             } else {
                 todo!()
             }
@@ -424,7 +324,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 cca,
                 response_token,
             } => {
-                self.state = TschState::WaitingForTxStartInTxSlot { response_token };
+                self.state = TschState::WaitingForTxStart {
+                    response_token: Some(response_token),
+                };
 
                 self.update_timing(asn, context);
 
@@ -461,7 +363,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 self.update_timing(asn, context);
                 let frame = self.take_rx_frame().expect("no rx_frame for TSCH RX slot");
 
-                self.state = TschState::ListeningInRxSlot { response_token };
+                self.state = TschState::Listening { response_token };
 
                 // Calculate RX start time: timeslot start + macTsRxOffset
                 let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
@@ -500,7 +402,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     .update_beacon(beacon_frame, asn)
                     .expect("failed to update beacon ASN");
 
-                self.state = TschState::WaitingForTxStartInAdvertisementSlot;
+                self.state = TschState::WaitingForTxStart {
+                    response_token: None,
+                };
 
                 // Calculate TX start time: timeslot start + macTsTxOffset
                 let tx_offset_us = context.pib.tsch.timeslot_timings.tx_offset() as u64;
@@ -528,12 +432,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 // Helpers
 // ============================================================================
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
-    fn wait_for_timeout_or_request(
-        &mut self,
-        context: &SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerAction {
+    fn go_idle(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> SchedulerAction {
         let deadline = self.peek_deadline(context);
-        self.state = TschState::WaitingForDeadlineOrRequest {
+        self.state = TschState::Idle {
             next_deadline: deadline,
         };
 

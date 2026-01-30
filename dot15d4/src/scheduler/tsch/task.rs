@@ -71,23 +71,23 @@ impl TschOperation {
 #[derive(Debug)]
 pub enum TschState {
     /// Idle - waiting for next deadline or scheduler request.
-    WaitingForDeadlineOrRequest { next_deadline: NsInstant },
+    Idle { next_deadline: NsInstant },
     /// TX slot - driver request sent, waiting for TxStarted.
-    WaitingForTxStartInTxSlot { response_token: ResponseToken },
+    WaitingForTxStart {
+        response_token: Option<ResponseToken>,
+    },
     /// TX slot - TxStarted received, waiting for Sent/Nack.
-    TransmittingInTxSlot { response_token: ResponseToken },
+    Transmitting {
+        response_token: Option<ResponseToken>,
+    },
     /// RX slot - driver request sent, waiting for FrameStarted/RxWindowEnded.
-    ListeningInRxSlot {
+    Listening {
         response_token: Option<ResponseToken>,
     },
     /// RX slot - FrameStarted received, waiting for Received/CrcError.
-    ReceivingFrameInRxSlot {
+    Receiving {
         response_token: Option<ResponseToken>,
     },
-    /// Advertisement - driver request sent, waiting for TxStarted.
-    WaitingForTxStartInAdvertisementSlot,
-    /// Advertisement - TxStarted received, waiting for Sent.
-    TransmittingInAdvertisementSlot,
     /// Placeholder
     Placeholder,
 }
@@ -165,7 +165,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn new(context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         let rx_frame = context.allocate_frame();
         Self {
-            state: TschState::WaitingForDeadlineOrRequest {
+            state: TschState::Idle {
                 next_deadline: INFINITE_DEADLINE,
             },
             pending_operations: Vec::new(),
@@ -187,7 +187,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
         self.last_beacon_time = None;
-        self.state = TschState::WaitingForDeadlineOrRequest {
+        self.state = TschState::Idle {
             next_deadline: INFINITE_DEADLINE,
         };
     }
@@ -261,13 +261,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Check if in idle state.
     pub fn is_idle(&self) -> bool {
-        matches!(self.state, TschState::WaitingForDeadlineOrRequest { .. })
+        matches!(self.state, TschState::Idle { .. })
     }
 
     /// Get the current deadline if idle.
     pub fn idle_deadline(&self) -> Option<NsInstant> {
         match self.state {
-            TschState::WaitingForDeadlineOrRequest { next_deadline } => Some(next_deadline),
+            TschState::Idle { next_deadline } => Some(next_deadline),
             _ => None,
         }
     }
@@ -319,7 +319,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             BeaconConfig::disabled()
         };
         self.last_beacon_time = None;
-        self.state = TschState::WaitingForDeadlineOrRequest {
+        self.state = TschState::Idle {
             next_deadline: INFINITE_DEADLINE,
         };
         self.init_beacon_frame(context);
