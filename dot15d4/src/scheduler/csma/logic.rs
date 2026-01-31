@@ -21,16 +21,13 @@ use crate::scheduler::{
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     mac::mlme::set::SetRequestAttribute,
-    scheduler::task::SchedulerTaskCompletion,
+    scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
 };
 use crate::{
     pib::Pib,
     scheduler::{
-        action::SchedulerAction,
-        command::pib::*,
-        task::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
-        SchedulerCommandResult, SchedulerContext, SchedulerRequest, SchedulerResponse,
-        SchedulerTransmissionResult,
+        command::pib::*, SchedulerCommandResult, SchedulerContext, SchedulerRequest,
+        SchedulerResponse, SchedulerTransmissionResult,
     },
 };
 
@@ -217,6 +214,8 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
+                use crate::scheduler::SchedulerTaskCompletion;
+
                 unsafe {
                     context
                         .buffer_allocator

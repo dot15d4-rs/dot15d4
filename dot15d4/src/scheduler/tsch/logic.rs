@@ -3,10 +3,7 @@
 use core::mem;
 
 use dot15d4_driver::{
-    radio::{
-        frame::{FrameType, RadioFrame, RadioFrameUnsized},
-        DriverConfig,
-    },
+    radio::{frame::FrameType, DriverConfig},
     timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
@@ -14,17 +11,16 @@ use dot15d4_util::sync::ResponseToken;
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
-use crate::scheduler::task::{SchedulerTaskEvent, SchedulerTaskTransition};
 use crate::scheduler::{
-    action::SchedulerAction, command::SchedulerCommand, SchedulerContext, SchedulerRequest,
+    command::SchedulerCommand, SchedulerAction, SchedulerContext, SchedulerRequest,
     SchedulerResponse, SchedulerTransmissionResult,
 };
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
-    scheduler::task::SchedulerTask,
+    scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
 };
 
-use super::task::{TschOperation, TschState, TschTask, INFINITE_DEADLINE};
+use super::task::{TschOperation, TschState, TschTask};
 #[cfg(feature = "tsch-coordinator")]
 use super::TschAsn;
 
@@ -268,8 +264,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(tsch_cmd) => match tsch_cmd {
                 UseTsch(enabled, _cca) => {
-                    use crate::scheduler::command::tsch::TschCommandResult::UseTsch;
-                    use crate::scheduler::task::SchedulerTaskCompletion;
+                    use crate::scheduler::{
+                        command::tsch::TschCommandResult::UseTsch, SchedulerTaskCompletion,
+                    };
 
                     let result = if enabled {
                         tsch::UseTschCommandResult::StartedTsch

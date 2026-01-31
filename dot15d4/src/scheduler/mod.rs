@@ -5,11 +5,9 @@
 
 #![allow(dead_code)]
 
-pub mod action;
 pub mod command;
 pub mod csma;
 mod runner;
-pub mod state;
 pub mod task;
 #[cfg(feature = "tsch")]
 pub mod tsch;
@@ -23,17 +21,16 @@ use dot15d4_driver::{
     timer::NsInstant,
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::sync::{Channel, HasAddress, Receiver, Sender};
+use dot15d4_util::sync::{Channel, HasAddress, Receiver, ResponseToken, Sender};
 use rand_core::RngCore;
 
-use crate::driver::{DriverEventReceiver, DriverRequestSender};
+use crate::driver::{DriverEventReceiver, DriverRequestSender, DrvSvcEvent, DrvSvcRequest};
 use crate::mac::MacBufferAllocator;
 use crate::pib::Pib;
 
 pub use self::command::{SchedulerCommand, SchedulerCommandResult};
 
-use self::runner::run_task;
-pub use self::state::{ActiveScheduler, RootSchedulerTask};
+use self::{runner::run_task, task::RootSchedulerTask};
 
 pub const SCHEDULER_CHANNEL_CAPACITY: usize = 5;
 pub const SCHEDULER_CHANNEL_BACKLOG: usize = 5;
@@ -222,4 +219,78 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
         let mut task = RootSchedulerTask::new(PhyChannel::_12, &mut self.context);
         run_task(&mut task, &mut self.context, &mut consumer_token).await
     }
+}
+
+/// Trait for scheduler tasks.
+///
+/// Tasks are pure state machines that receive events and produce transitions.
+pub trait SchedulerTask<RadioDriverImpl: DriverConfig> {
+    /// Process an event and return the next transition.
+    fn step(
+        &mut self,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition;
+}
+
+/// Events that can be delivered to a scheduler task.
+pub enum SchedulerTaskEvent {
+    /// Task is being entered (initial entry).
+    Entry,
+    /// A driver event was received.
+    DriverEvent(DrvSvcEvent),
+    /// A scheduler request was received from MAC layer.
+    SchedulerRequest {
+        token: ResponseToken,
+        request: SchedulerRequest,
+    },
+    /// Timer expired (e.g. for TSCH slot timing).
+    #[cfg(feature = "tsch")]
+    TimerExpired,
+}
+
+/// Actions provided in task transitions to direct the execution of the
+/// task's state machine.
+pub enum SchedulerAction {
+    /// Send driver request, then immediately wait for driver event.
+    /// Optimization to avoid extra round-trip through logic.
+    SendDriverRequestThenWait(DrvSvcRequest),
+    /// Wait for an event from the driver service.
+    WaitForDriverEvent,
+    /// Wait for a request from the MAC layer (scheduler channel).
+    WaitForSchedulerRequest,
+    /// Select: wait for driver event OR scheduler request.
+    /// Used in CSMA when waiting for frames but may receive TX request.
+    SelectDriverEventOrRequest,
+    /// Select: wait for timer expiry OR scheduler request.
+    /// Used in TSCH to wake up for next slot or receive new requests.
+    #[cfg(feature = "tsch")]
+    WaitForTimeoutOrSchedulerRequest { deadline: NsInstant },
+    /// Send driver request, then select: wait for driver event OR scheduler request.
+    /// Used when starting RX - we want to receive frames but also handle TX requests.
+    SendDriverRequestThenSelect(DrvSvcRequest),
+}
+
+/// Transitions returned by scheduler tasks.
+pub enum SchedulerTaskTransition {
+    /// Execute an action and optionally send a response.
+    Execute(
+        /// The action for the runner to execute.
+        SchedulerAction,
+        /// An optional response to send immediately.
+        Option<(ResponseToken, SchedulerResponse)>,
+    ),
+
+    /// Task cycle completed
+    Completed(
+        SchedulerTaskCompletion,
+        Option<(ResponseToken, SchedulerResponse)>,
+    ),
+}
+
+/// Result from a scheduler task that completed
+pub enum SchedulerTaskCompletion {
+    SwitchToCsma,
+    #[cfg(feature = "tsch")]
+    SwitchToTsch,
 }
