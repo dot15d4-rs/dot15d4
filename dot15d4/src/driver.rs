@@ -99,11 +99,6 @@ pub struct DrvSvcTaskRx {
     /// The earliest time at which a frame with this RMARKER passing the local
     /// antenna SHALL be recognized. The receiver SHALL be switched on as late
     /// as possible to minimize energy consumption.
-    ///
-    /// Note: We do not define rx window duration at the radio driver level.
-    ///       Schedule a subsequent timed [`RadioTaskOff`] or [`RadioTaskTx`]
-    ///       instead to end an rx window. It's the responsibility of the driver
-    ///       service to compensate for clock drift and insert guard times.
     pub start: Timestamp,
 
     /// radio frame allocated to receive incoming frames
@@ -111,6 +106,12 @@ pub struct DrvSvcTaskRx {
 
     /// channel
     pub channel: Option<PhyChannel>,
+
+    /// Optional RX window duration. If set, the receiver will automatically
+    /// stop listening after this duration from the start of the RX task.
+    /// If not set, the receiver will listen indefinitely until a frame is
+    /// received or a subsequent TX/idle request is sent.
+    pub rx_window: Option<NsDuration>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -222,6 +223,10 @@ pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
     // Pending Request in case a Tx request handling gets delayed by RX frame
     // arriving just before transitioning from Rx to Tx.
     pending_request: Cell<Option<DrvSvcRequest>>,
+
+    // RX window end time. When set, the receiver will stop listening at this
+    // instant if no frame has started.
+    rx_window_end: Cell<Option<NsInstant>>,
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> DriverService<'svc, RadioDriverImpl>
@@ -247,6 +252,7 @@ where
             ))),
             temp_inbound_frame: Cell::new(Some(Self::allocate_inbound_frame(buffer_allocator))),
             pending_request: Cell::new(None),
+            rx_window_end: Cell::new(None),
         }
     }
 
@@ -459,6 +465,7 @@ where
             DrvSvcRequest::CompleteThenStartRx(task_rx) => {
                 // TODO: get from previous TX (store in state ?)
                 let ifs = Ifs::long();
+                let rx_window = task_rx.rx_window;
                 match tx_driver
                     .schedule_rx(
                         RadioTaskRx {
@@ -472,11 +479,16 @@ where
                     CompletedRadioTransition::Entered(RadioTransitionResult {
                         prev_task_result,
                         this_state,
+                        measured_entry,
                         ..
                     }) => {
                         let event =
                             handle_tx_task_result(self, prev_task_result, transmission_type);
                         self.event_sender.send(event).await;
+
+                        // Set the RX window end time if specified
+                        self.rx_window_end
+                            .set(rx_window.map(|w| measured_entry + w));
 
                         DriverState::WaitingForFrame(this_state)
                     }
@@ -762,6 +774,7 @@ where
                     start,
                     radio_frame,
                     channel,
+                    rx_window,
                 } = rx_task;
 
                 // Frames may only be received back-to-back with best-effort
@@ -779,11 +792,16 @@ where
                     CompletedRadioTransition::Entered(RadioTransitionResult {
                         prev_task_result: rx_task_result,
                         this_state: listening_rx_driver,
+                        measured_entry,
                         ..
                     }) => {
                         let event = handle_rx_task_result(self, rx_task_result, reception_type);
 
                         self.event_sender.send(event).await;
+
+                        // Set the RX window end time if specified
+                        self.rx_window_end
+                            .set(rx_window.map(|w| measured_entry + w));
 
                         DriverState::WaitingForFrame(listening_rx_driver)
                     }
@@ -924,6 +942,54 @@ where
         mut listening_rx_driver: RadioDriver<RadioDriverImpl, RadioTaskRx>,
     ) -> DriverState<RadioDriverImpl> {
         loop {
+            // Check if there's an RX window timeout set
+            if let Some(rx_window_end) = self.rx_window_end.get() {
+                // Calculate the latest frame start based on the window end
+                let latest_frame_start =
+                    listening_rx_driver.latest_rx_frame_start_before_off(rx_window_end, None);
+
+                let hardware_address = listening_rx_driver.ieee802154_address();
+                let stop_listening_result = match listening_rx_driver
+                    .stop_listening(latest_frame_start.into())
+                    .await
+                {
+                    Ok(result) => result,
+                    Err((_, recovered_rx_driver)) => {
+                        // The stop_listening call failed (e.g., already past the deadline)
+                        // Clear the window and try to stop immediately
+                        self.rx_window_end.set(None);
+                        listening_rx_driver = recovered_rx_driver;
+                        match listening_rx_driver.stop_listening(None.into()).await {
+                            Ok(result) => result,
+                            Err(_) => unreachable!(),
+                        }
+                    }
+                };
+
+                match stop_listening_result {
+                    StopListeningResult::FrameStarted(_, receiving_rx_driver) => {
+                        // Frame started within the window, process it
+                        return self
+                            .validate_and_receive_frame(receiving_rx_driver, &hardware_address)
+                            .await;
+                    }
+                    StopListeningResult::RxWindowEnded(result) => {
+                        // Window expired without a frame arriving
+                        self.rx_window_end.set(None);
+                        let rx_frame = match result.prev_task_result {
+                            RxResult::RxWindowEnded(frame) => frame,
+                            RxResult::Frame(frame, _) => frame.forget_size::<RadioDriverImpl>(),
+                            RxResult::CrcError(frame, _) => frame,
+                        };
+                        self.event_sender
+                            .send(DrvSvcEvent::RxWindowEnded(rx_frame))
+                            .await;
+                        return DriverState::Idle(result.this_state);
+                    }
+                }
+            }
+
+            // No RX window set, use the original select-based approach
             match select(
                 listening_rx_driver.wait_for_frame_start(),
                 self.request_receiver.receive(),
@@ -949,6 +1015,9 @@ where
                 select::Either::Second(request) => {
                     match &request {
                         DrvSvcRequest::CompleteThenStartTx(task_tx) => {
+                            // Clear the RX window since we're transitioning to TX
+                            self.rx_window_end.set(None);
+
                             let latest_frame_start = if let Timestamp::Scheduled(tx_at) = task_tx.at
                             {
                                 listening_rx_driver
@@ -999,6 +1068,9 @@ where
                             }
                         }
                         DrvSvcRequest::CompleteThenGoIdle => {
+                            // Clear the RX window since we're going idle
+                            self.rx_window_end.set(None);
+
                             match listening_rx_driver.stop_listening(None.into()).await {
                                 Ok(result) => match result {
                                     StopListeningResult::FrameStarted(_instant, _) => todo!(),
@@ -1257,6 +1329,7 @@ where
                 // if prev_request_result.is_some() {
                 //     assert!(matches!(task_rx.start, Timestamp::BestEffort));
                 // }
+                let rx_window = task_rx.rx_window;
                 match off_driver
                     .schedule_rx(
                         RadioTaskRx {
@@ -1269,8 +1342,13 @@ where
                     .await
                 {
                     CompletedRadioTransition::Entered(RadioTransitionResult {
-                        this_state, ..
+                        this_state,
+                        measured_entry,
+                        ..
                     }) => {
+                        // Set the RX window end time if specified
+                        self.rx_window_end
+                            .set(rx_window.map(|w| measured_entry + w));
                         // TODO: valid event ?
                         // self.event_sender
                         //     .send(DrvSvcEvent::RxStarted(measured_entry))

@@ -623,6 +623,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             start: Timestamp::BestEffort,
             radio_frame,
             channel,
+            rx_window: None,
         })
     }
 }

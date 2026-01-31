@@ -373,6 +373,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     start: Timestamp::Scheduled(rx_instant),
                     radio_frame: frame,
                     channel: Some(channel),
+                    rx_window: None,
                 });
 
                 SchedulerTaskTransition::Execute(
