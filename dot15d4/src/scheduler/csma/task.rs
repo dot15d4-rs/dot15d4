@@ -1,4 +1,7 @@
-//! CSMA scheduler state
+//! CSMA-CA scheduler task state and structures.
+//!
+//! This module defines the state machine structures for the CSMA-CA scheduler,
+//! including the task state, backoff algorithm implementation, and pipelining.
 
 use core::marker::PhantomData;
 
@@ -17,68 +20,97 @@ use rand_core::RngCore;
 
 use crate::scheduler::SchedulerContext;
 
-/// CSMA scheduler state.
+/// CSMA-CA scheduler state machine states.
+///
+/// Represents the current state of the CSMA scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CsmaState {
-    /// No operation pending.
+    /// No operation pending, scheduler is inactive.
     Idle,
-    /// Performing CCA before TX.
+    /// TX request submitted to driver, waiting for CCA and TX start.
     WaitingForTxStart,
-    /// Transmitting, waiting for TX completion (Sent/Nack).
+    /// Frame transmission in progress, waiting for completion (Sent/Nack).
     Transmitting,
-    /// Listening for incoming frames.
+    /// Receiver enabled, waiting for incoming frames.
     Listening,
-    /// Actively receiving a frame.
+    /// Frame reception in progress (SFD detected).
     Receiving,
-    /// Terminating CSMA (e.g. to switch to TSCH).
+    /// Terminating CSMA operation to switch to another mode (e.g., TSCH).
     #[cfg(feature = "tsch")]
     Terminating,
 }
 
-/// Information about what operation has been pipelined.
+/// Information about a pipelined operation.
+///
+/// Pipelining allows the scheduler to prepare the next operation while
+/// the current one is still completing, reducing latency.
 #[derive(Debug)]
 pub enum Pipelined {
-    /// Next is RX (frame stored in rx_frame).
+    /// Next operation is RX (frame buffer stored in `rx_frame`).
     Rx,
-    /// Next is TX with this token (frame already sent to driver).
+    /// Next operation is TX with the given response token.
     Tx(ResponseToken),
 }
 
 impl Pipelined {
+    /// Check if the pipelined operation is a transmission.
     #[inline]
     pub fn is_tx(&self) -> bool {
         matches!(self, Pipelined::Tx(_))
     }
 }
 
-/// Pending TX from NACK recovery.
+/// Pending TX request from NACK recovery.
+///
+/// Contains the response token and MPDU for retransmission.
 pub type TxRequest = (ResponseToken, MpduFrame);
 
-/// CSMA-CA backoff state.
+/// CSMA-CA backoff algorithm state.
 #[derive(Debug, Clone, Copy)]
 pub struct Backoff {
-    /// Number of backoffs (NB).
+    /// Number of backoffs attempted (NB).
     pub nb: u8,
-    /// Backoff exponent (BE).
+    /// Current backoff exponent (BE).
     pub be: u8,
 }
 
 impl Backoff {
-    /// Create new backoff state with given minimum BE.
+    /// Create new backoff state initialized with the given minimum BE.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_be` - Initial backoff exponent (typically macMinBE from PIB)
     #[inline]
     pub const fn new(min_be: u8) -> Self {
         Self { nb: 0, be: min_be }
     }
 
     /// Reset backoff state for a new transmission attempt.
+    ///
+    /// Called when starting a new transmission or after successful TX.
+    ///
+    /// # Arguments
+    ///
+    /// * `min_be` - Minimum backoff exponent to reset to
     #[inline]
     pub fn reset(&mut self, min_be: u8) {
         self.nb = 0;
         self.be = min_be;
     }
 
-    /// Handle CCA failure. Returns true if can retry, false if limit exceeded.
+    /// Handle CCA failure and update backoff parameters.
+    ///
+    /// Increments NB and increases BE (up to max_be).
+    ///
+    /// # Arguments
+    ///
+    /// * `max_backoffs` - Maximum number of backoff allowed (usually macMaxCSMABackoffs)
+    /// * `max_be` - Maximum backoff exponent (usually macMaxBE)
+    ///
+    /// # Returns
+    ///
+    /// `true` if another retry is allowed, `false` if limit exceeded.
     #[inline]
     pub fn on_failure(&mut self, max_backoffs: u8, max_be: u8) -> bool {
         self.nb += 1;
@@ -86,7 +118,17 @@ impl Backoff {
         self.nb <= max_backoffs
     }
 
-    /// Calculate backoff delay based on current BE and RNG.
+    /// Calculate the random backoff delay.
+    ///
+    /// Computes: random(0, 2^BE - 1) * aUnitBackoffPeriod + overhead(guards)
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - Random number generator
+    ///
+    /// # Returns
+    ///
+    /// The backoff delay duration.
     #[inline]
     pub fn delay<RadioDriverImpl: DriverConfig>(&self, rng: &mut dyn RngCore) -> NsDuration {
         let max = (1u32 << self.be).saturating_sub(1);
@@ -132,36 +174,48 @@ impl Backoff {
     }
 }
 
-/// CSMA task
+/// CSMA-CA scheduler task.
+///
+/// Manages the state machine for CSMA-CA medium access control.
+/// Handles transmission requests, backoff timing, retransmissions,
+/// and reception.
 pub struct CsmaTask<RadioDriverImpl: DriverConfig> {
-    /// Current scheduler state
+    /// Current state machine state.
     pub state: CsmaState,
-    /// Backoff state
+    /// Backoff algorithm state.
     pub backoff: Backoff,
-    /// TX retry count
+    /// Number of transmission retries for current frame.
     pub tx_retries: u8,
 
-    /// PHY Channel
+    /// PHY channel for transmissions.
     pub channel: Channel,
-    /// Base time for scheduling
+    /// Base timestamp for scheduling (updated after each operation).
     pub base_time: NsInstant,
 
-    /// Current TX token
+    /// Response token for current TX operation.
     pub tx_token: Option<ResponseToken>,
-    /// Next operation info
+    /// Information about pipelined next operation.
     pub pipelined: Option<Pipelined>,
 
-    /// Pending TX from NACK recovery
+    /// Pending TX request from NACK recovery for retransmission.
     pub pending_tx: Option<TxRequest>,
-    /// RX frame buffer
+    /// Pre-allocated buffer for receiving frames.
     pub rx_frame: Option<RadioFrame<RadioFrameUnsized>>,
 
-    /// Marker for Radio Driver Implementation
+    /// Phantom data for radio driver type.
     _marker: PhantomData<RadioDriverImpl>,
 }
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     /// Create a new CSMA task.
+    ///
+    /// Initializes the task in Idle state with default backoff parameters
+    /// from the PIB and allocates an RX frame buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - PHY channel to use
+    /// * `context` - Scheduler context for accessing PIB and allocator
     pub fn new(channel: Channel, context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         Self {
             state: CsmaState::Idle,
@@ -177,13 +231,13 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
-    /// Take the TX token (panics if none).
+    /// Take the current TX response token.
     #[inline]
     pub fn take_tx_token(&mut self) -> ResponseToken {
         self.tx_token.take().expect("no tx token")
     }
 
-    /// Calculate backoff time from base_time.
+    /// Calculate the next backoff time based on current base_time.
     #[inline]
     pub fn backoff_time(&mut self, rng: &mut dyn RngCore) -> NsInstant {
         self.base_time + self.backoff.delay::<RadioDriverImpl>(rng)

@@ -1,4 +1,9 @@
-//! TSCH scheduler logic implementation.
+//! TSCH scheduler state machine logic.
+//!
+//! This module implements the state transition logic for the TSCH scheduler.
+//! Operations are queued and executed at their scheduled times.
+//! The scheduler wakes up slightly before each timeslot (guard time)
+//! to prepare for the operation.
 
 use core::mem;
 
@@ -48,10 +53,18 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
         }
     }
 }
+
 // ============================================================================
-// States Execution
+// State Execution Methods
 // ============================================================================
+
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
+    /// Handle Idle state - waiting for timeslot deadline or requests.
+    ///
+    /// In idle state, the scheduler waits for:
+    /// - Timer expiration to execute the next scheduled operation
+    /// - New TX requests from the MAC layer
+    /// - Commands to configure TSCH parameters
     fn execute_idle(
         &mut self,
         event: SchedulerTaskEvent,
@@ -89,6 +102,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle WaitingForTxStart state - CCA/TX preparation in progress.
     fn execute_waiting_for_tx_start(
         &mut self,
         response_token: Option<ResponseToken>,
@@ -105,6 +119,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Transmitting state - frame transmission in progress.
     fn execute_transmitting(
         &mut self,
         response_token: Option<ResponseToken>,
@@ -151,6 +166,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Listening state - RX window active, waiting for frames.
     fn execute_listening(
         &mut self,
         response_token: Option<ResponseToken>,
@@ -171,6 +187,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Receiving state - frame reception in progress.
     fn execute_receiving(
         &mut self,
         response_token: Option<ResponseToken>,
@@ -205,8 +222,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 // ============================================================================
 // Scheduler Requests handling
 // ============================================================================
+
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
-    /// Handle a TX request by finding appropriate link and scheduling.
+    /// Handle a TX request from the MAC layer.
+    ///
+    /// Finds an appropriate link based on frame type and schedules
+    /// the transmission for the next occurrence of that link.
+    ///
+    /// Transform that request into a TSCH operation that is inserted
+    /// in the pending operations queue.
     fn on_scheduler_tx_request(
         &mut self,
         token: ResponseToken,
@@ -253,6 +277,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             todo!()
         }
     }
+
+    /// Handle a command request (mode switching, configuration).
     fn on_scheduler_command(
         &mut self,
         token: ResponseToken,
@@ -306,9 +332,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 }
 
 // ============================================================================
-// TSCH Operations Scheduling
+// TSCH Operation Scheduling
 // ============================================================================
+
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
+    /// Schedule a TX operation for the current timeslot.
+    ///
+    /// Pops the operation from the queue (which is assumed to be of TX type)
+    /// and submits the driver request with precise timing.
     fn schedule_tx_operation(
         &mut self,
         context: &SchedulerContext<RadioDriverImpl>,
@@ -347,6 +378,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             _ => unreachable!(),
         }
     }
+
+    /// Schedule an RX operation for the current timeslot.
+    ///
+    /// Pops the operation (which is assumed to be of TX type) from the queue
+    /// and submits the driver request with precise timing.
     fn schedule_rx_operation(
         &mut self,
         context: &SchedulerContext<RadioDriverImpl>,
@@ -381,6 +417,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             _ => unreachable!(),
         }
     }
+
+    /// Schedule an advertisement (beacon) operation for the current timeslot.
+    ///
+    /// Coordinator-only. Updates the beacon frame with current ASN and
+    /// schedules transmission.
     #[cfg(feature = "tsch-coordinator")]
     fn schedule_advertisement_operation(
         &mut self,
@@ -427,9 +468,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 }
 
 // ============================================================================
-// Helpers
+// Helper Methods
 // ============================================================================
+
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
+    /// Transition to idle state and wait for the next deadline by configuring
+    /// timer action accordingly.
     fn go_idle(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> SchedulerAction {
         let deadline = self.peek_deadline(context);
         self.state = TschState::Idle {
