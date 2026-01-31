@@ -6,12 +6,9 @@
 use dot15d4_driver::{radio::DriverConfig, timer::RadioTimerApi};
 use dot15d4_util::sync::{select, ConsumerToken, Either};
 
-use crate::scheduler::task::SchedulerTaskEvent;
-
 use super::{
-    action::SchedulerAction,
-    task::{SchedulerTask, SchedulerTaskTransition},
-    MessageType, SchedulerContext,
+    MessageType, SchedulerAction, SchedulerContext, SchedulerTask, SchedulerTaskEvent,
+    SchedulerTaskTransition,
 };
 
 /// Run a scheduler task loop.
