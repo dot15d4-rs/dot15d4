@@ -1,4 +1,5 @@
 //! Enhanced Beacon frame builder for TSCH.
+
 use core::marker::PhantomData;
 
 use dot15d4_driver::radio::{
@@ -19,16 +20,22 @@ use crate::pib::Pib;
 
 /// Builder for Enhanced Beacon frames.
 ///
-/// This struct holds the MPDU representation with pre-configured IE structure
-/// for TSCH beacons. The static IE configuration allows for efficient beacon
-/// generation without runtime allocation.
+/// Pre-configures the MPDU representation with TSCH IEs for efficient
+/// beacon generation. The IE structure is defined at compile time.
 pub struct EnhancedBeaconBuilder<'buffer, RadioDriverImpl: DriverConfig> {
+    /// Pre-configured MPDU representation with IE structure.
     mpdu_repr: MpduRepr<'buffer, MpduWithIes>,
+    /// Phantom data for radio driver type.
     _phantom: PhantomData<RadioDriverImpl>,
 }
 
 impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, RadioDriverImpl> {
     /// Create a new Enhanced Beacon builder.
+    ///
+    /// The builder is configured with the standard TSCH IEs:
+    /// - TSCH Synchronization IE
+    /// - Full TSCH Timeslot IE
+    /// - TSCH Slotframe and Link IE
     pub const fn new() -> Self {
         static SLOTFRAMES: [u8; 1] = [1];
         static IES: [IeRepr; 3] = [
@@ -56,6 +63,12 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
         }
     }
 
+    /// Build an Enhanced Beacon frame with schedule information.
+    ///
+    /// Populates the beacon IEs with:
+    /// - Source/destination addressing from PIB
+    /// - Slotframe and link configuration from TSCH PIB
+    /// - Timeslot timing parameters
     pub fn build_enhanced_beacon(
         &self,
         pib: &Pib,
@@ -132,8 +145,21 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
         Some(mpdu_writer.into_mpdu_frame())
     }
 
+    /// Update the (already build) beacon frame with a new ASN before
+    /// transmission.
+    ///
+    /// # Arguments
+    ///
+    /// * `mpdu` - Previously built beacon MPDU
+    /// * `asn` - Current Absolute Slot Number to embed
+    ///
+    /// # Returns
+    ///
+    /// The updated MPDU frame, or `None` if update failed.
     pub fn update_beacon(&self, mpdu: MpduFrame, asn: TschAsn) -> Option<MpduFrame> {
         let buffer = mpdu.into_buffer();
+        // TODO: should not fail since compile-time repr but we may move to
+        // dynamic repr (i.e. runtime)
         let mut mpdu_writer = self
             .mpdu_repr
             .into_writer::<RadioDriverImpl>(FrameVersion::Ieee802154, FrameType::Beacon, 0, buffer)

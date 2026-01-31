@@ -1,4 +1,6 @@
-//! CSMA scheduler logic - refactored for efficiency.
+//! CSMA-CA scheduler state machine logic.
+//!
+//! This module implements the state transition logic for the CSMA-CA scheduler.
 
 use dot15d4_driver::{
     radio::{
@@ -34,6 +36,7 @@ use crate::{
 use super::task::{CsmaState, CsmaTask, Pipelined};
 
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for CsmaTask<RadioDriverImpl> {
+    /// Main state machine entry point - dispatches to state-specific handlers.
     fn step(
         &mut self,
         event: SchedulerTaskEvent,
@@ -52,9 +55,11 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for CsmaTask<
 }
 
 // ============================================================================
-// States Execution
+// State Execution Methods
 // ============================================================================
+
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    /// Handle Idle state - decide next action (TX or RX).
     fn execute_idle(
         &mut self,
         event: SchedulerTaskEvent,
@@ -69,6 +74,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Listening state - waiting for frames or TX requests.
     fn execute_listening(
         &mut self,
         event: SchedulerTaskEvent,
@@ -100,6 +106,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Receiving state - frame reception in progress.
     fn execute_receiving(
         &mut self,
         event: SchedulerTaskEvent,
@@ -136,6 +143,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle WaitingForTxStart state - CCA in progress.
     fn execute_waiting_for_tx_start(
         &mut self,
         event: SchedulerTaskEvent,
@@ -159,6 +167,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Transmitting state - frame transmission in progress.
     fn execute_transmitting(
         &mut self,
         event: SchedulerTaskEvent,
@@ -206,6 +215,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle Terminating state - shutting down CSMA to switch modes.
     #[cfg(feature = "tsch")]
     fn execute_terminating(
         &mut self,
@@ -235,10 +245,14 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 }
 
 // ============================================================================
-// Handling Driver Service events from TX request
+// TX Event Handlers (retransmission and backoff)
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    /// Handle NACK - attempt retransmission or report failure.
+    ///
+    /// If retries remain, schedules another transmission attempt with reset backoff.
+    /// Otherwise, reports No Ack failure and transitions to next operation.
     fn retransmit_or_fail(
         &mut self,
         frame: RadioFrame<RadioFrameSized>,
@@ -267,6 +281,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle CCA busy - attempt another backoff or report channel access failure.
     fn backoff_or_fail(
         &mut self,
         frame: RadioFrame<RadioFrameSized>,
@@ -293,7 +308,10 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         SchedulerTaskTransition::Execute(self.next_action(context), Some((token, resp)))
     }
 
-    /// Pipeline the next operation after TX started.
+    /// Pipeline the next operation while transmission is in progress.
+    ///
+    /// Called after TxStarted to prepare the next operation (TX or RX)
+    /// to minimize idle time between operations.
     fn pipeline_next_operation(
         &mut self,
         context: &mut SchedulerContext<RadioDriverImpl>,
@@ -316,10 +334,13 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 }
 
 // ============================================================================
-// Commands
+// Command Handlers
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    /// Handle incoming scheduler commands.
+    ///
+    /// Dispatches to specific command handlers for CSMA, PIB, and TSCH commands.
     fn on_scheduler_command_request(
         &mut self,
         token: ResponseToken,
@@ -347,6 +368,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle PIB attribute commands.
+    ///
+    /// Processes Set and Reset commands for PAN Information Base attributes.
     fn on_pib_cmd(
         &mut self,
         token: ResponseToken,
@@ -401,6 +425,10 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Handle TSCH commands while in CSMA mode.
+    ///
+    /// Handles UseTsch to switch modes, and slotframe/link configuration
+    /// commands that can be processed while still in CSMA mode.
     #[cfg(feature = "tsch")]
     fn on_tsch_cmd(
         &mut self,
@@ -508,12 +536,15 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
-    /// Send driver request and wait for driver event.
+    /// Helper to create a "send request then wait" transition.
     #[inline]
     fn send_driver_request_and_wait(&self, req: DrvSvcRequest) -> SchedulerTaskTransition {
         SchedulerTaskTransition::Execute(SchedulerAction::SendDriverRequestThenWait(req), None)
     }
 
+    /// Determine the next action based on pending operations.
+    ///
+    /// Priority order: pending TX > channel TX request > start RX
     fn next_action(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> SchedulerAction {
         // If a TX request is available in channel (or pending)
         if let Some((tx_token, mpdu)) = self.next_tx_request(context) {
@@ -526,6 +557,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    /// Schedule a new transmission.
+    ///
+    /// Initializes backoff state and submits TX request to driver.
     fn schedule_tx(
         &mut self,
         token: ResponseToken,
@@ -547,7 +581,10 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         SchedulerAction::SendDriverRequestThenWait(req)
     }
 
-    /// Continue with next pipelined operation after TX completes.
+    /// Continue with the next pipelined operation after TX completes.
+    ///
+    /// If a TX was pipelined, wait for its completion.
+    /// Otherwise, transition to listening state.
     fn continue_with_pipelined(
         &mut self,
         response: (ResponseToken, SchedulerResponse),
@@ -572,7 +609,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
-    /// Retrieves the next TX request to process, if any.
+    /// Get the next TX request to process, if any.
+    ///
+    /// Checks pending TX (from NACK recovery) first, then channel requests.
     fn next_tx_request(
         &mut self,
         context: &SchedulerContext<RadioDriverImpl>,
@@ -591,10 +630,11 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 }
 
 // ============================================================================
-// Request Builders
+// Driver Request Builders
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    /// Build a TX request for the driver service.
     #[inline]
     fn build_tx_request(
         &self,
@@ -612,6 +652,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         })
     }
 
+    /// Build an RX request for the driver service.
     #[inline]
     fn build_rx_request(
         &self,

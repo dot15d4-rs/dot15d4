@@ -1,5 +1,13 @@
-//! Root Scheduler Task that manages switching from one mode of
-//! operation (i.e. scheduler) to another.
+//! Top-level (root) Scheduler Task.
+//!
+//! This module implements the top-level scheduler task that manages
+//! switching between different mode of operation (CSMA-CA and TSCH).
+//!
+//! # Architecture
+//!
+//! The [`RootSchedulerTask`] acts as a wrapper around the active scheduler
+//! (either CSMA or TSCH). It delegates events to the active scheduler and
+//! handles mode switching when a scheduler completes with a switch request.
 
 use dot15d4_driver::radio::{config::Channel, DriverConfig};
 
@@ -10,23 +18,34 @@ use super::{
     SchedulerTaskTransition,
 };
 
-/// Active scheduler type.
+/// Enumeration of active scheduler implementations.
+///
+/// At any time, exactly one scheduler is active and processing events.
 pub enum ActiveScheduler<RadioDriverImpl: DriverConfig> {
-    /// Using CSMA-CA
+    /// CSMA-CA scheduler is active.
     Csma(CsmaTask<RadioDriverImpl>),
-    /// Using TSCH
+    /// TSCH scheduler is active (requires `tsch` feature).
     #[cfg(feature = "tsch")]
     Tsch(TschTask<RadioDriverImpl>),
 }
 
-/// Complete scheduler service state.
+/// Root scheduler task that manages scheduler switching.
+///
+/// This is the top-level task that wraps the actual scheduler implementations.
+/// It handles mode switching requests and ensures proper initialization of
+/// new schedulers when switching.
 pub struct RootSchedulerTask<RadioDriverImpl: DriverConfig> {
-    /// Which scheduler is currently active.
+    /// The currently active scheduler.
     pub inner_task: ActiveScheduler<RadioDriverImpl>,
 }
 
 impl<RadioDriverImpl: DriverConfig> RootSchedulerTask<RadioDriverImpl> {
-    /// Create new scheduler service state starting with CSMA.
+    /// Create a new root scheduler task starting in CSMA mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_channel` - The PHY channel to operate on
+    /// * `context` - Scheduler context for initialization
     pub fn new(initial_channel: Channel, context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         Self {
             inner_task: ActiveScheduler::Csma(CsmaTask::new(initial_channel, context)),
@@ -37,6 +56,10 @@ impl<RadioDriverImpl: DriverConfig> RootSchedulerTask<RadioDriverImpl> {
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
     for RootSchedulerTask<RadioDriverImpl>
 {
+    /// Process an event by delegating to the active scheduler.
+    ///
+    /// If the active scheduler completes with a switch request, this method
+    /// handles creating the new scheduler and transitioning to it.
     fn step(
         &mut self,
         event: SchedulerTaskEvent,
