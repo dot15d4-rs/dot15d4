@@ -18,15 +18,13 @@ use super::{
     SchedulerTaskTransition,
 };
 
-/// Enumeration of active scheduler implementations.
-///
-/// At any time, exactly one scheduler is active and processing events.
-pub enum ActiveScheduler<RadioDriverImpl: DriverConfig> {
+/// Root scheduler state machine states.
+pub enum RootSchedulerState<RadioDriverImpl: DriverConfig> {
     /// CSMA-CA scheduler is active.
-    Csma(CsmaTask<RadioDriverImpl>),
+    UsingCsma(CsmaTask<RadioDriverImpl>),
     /// TSCH scheduler is active (requires `tsch` feature).
     #[cfg(feature = "tsch")]
-    Tsch(TschTask<RadioDriverImpl>),
+    UsingTsch(TschTask<RadioDriverImpl>),
 }
 
 /// Root scheduler task that manages scheduler switching.
@@ -35,8 +33,8 @@ pub enum ActiveScheduler<RadioDriverImpl: DriverConfig> {
 /// It handles mode switching requests and ensures proper initialization of
 /// new schedulers when switching.
 pub struct RootSchedulerTask<RadioDriverImpl: DriverConfig> {
-    /// The currently active scheduler.
-    pub inner_task: ActiveScheduler<RadioDriverImpl>,
+    /// Current scheduler state
+    pub state: RootSchedulerState<RadioDriverImpl>,
 }
 
 impl<RadioDriverImpl: DriverConfig> RootSchedulerTask<RadioDriverImpl> {
@@ -48,7 +46,7 @@ impl<RadioDriverImpl: DriverConfig> RootSchedulerTask<RadioDriverImpl> {
     /// * `context` - Scheduler context for initialization
     pub fn new(initial_channel: Channel, context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         Self {
-            inner_task: ActiveScheduler::Csma(CsmaTask::new(initial_channel, context)),
+            state: RootSchedulerState::UsingCsma(CsmaTask::new(initial_channel, context)),
         }
     }
 }
@@ -66,10 +64,10 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         // Delegate to inner task
-        let transition = match &mut self.inner_task {
-            ActiveScheduler::Csma(csma_task) => csma_task.step(event, context),
+        let transition = match &mut self.state {
+            RootSchedulerState::UsingCsma(csma_task) => csma_task.step(event, context),
             #[cfg(feature = "tsch")]
-            ActiveScheduler::Tsch(tsch_task) => tsch_task.step(event, context),
+            RootSchedulerState::UsingTsch(tsch_task) => tsch_task.step(event, context),
         };
 
         // Handle scheduler switching
@@ -78,13 +76,13 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
                 match completion_result {
                     SchedulerTaskCompletion::SwitchToCsma => {
                         // Get channel from current CSMA task or use default
-                        let channel = match &self.inner_task {
-                            ActiveScheduler::Csma(csma) => csma.channel,
+                        let channel = match &self.state {
+                            RootSchedulerState::UsingCsma(csma) => csma.channel,
                             #[cfg(feature = "tsch")]
                             // TODO: configurable default channel
-                            ActiveScheduler::Tsch(_) => Channel::_12, // Default channel
+                            RootSchedulerState::UsingTsch(_) => Channel::_12, // Default channel
                         };
-                        self.inner_task = ActiveScheduler::Csma(CsmaTask::new(channel, context));
+                        self.state = RootSchedulerState::UsingCsma(CsmaTask::new(channel, context));
                         SchedulerTaskTransition::Completed(
                             SchedulerTaskCompletion::SwitchToCsma,
                             response,
@@ -92,7 +90,7 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
                     }
                     #[cfg(feature = "tsch")]
                     SchedulerTaskCompletion::SwitchToTsch => {
-                        self.inner_task = ActiveScheduler::Tsch(TschTask::new(context));
+                        self.state = RootSchedulerState::UsingTsch(TschTask::new(context));
                         SchedulerTaskTransition::Completed(
                             SchedulerTaskCompletion::SwitchToTsch,
                             response,
