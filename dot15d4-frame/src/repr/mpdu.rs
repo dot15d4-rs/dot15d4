@@ -200,8 +200,7 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
             Ok(mpdu_size_wo_fcs) => Ok(RadioFrameRepr::<Config, RadioFrameSized>::new(
                 mpdu_size_wo_fcs,
             )
-            .sdu_length()
-            .get() as usize),
+            .pdu_length() as usize),
             Err(e) => Err(e),
         }
     }
