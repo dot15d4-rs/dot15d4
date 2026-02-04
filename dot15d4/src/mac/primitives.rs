@@ -31,13 +31,34 @@ pub enum MacRequest {
     MlmeReset(ResetRequest),
     /// IEEE 802.15.4-2020, section 8.2.18.1
     MlmeBeacon(BeaconRequest),
+    /// IEEE 802.15.4-2024, section 8.2.5 - MLME-SCAN
+    #[cfg(feature = "tsch")]
+    MlmeScan(ScanRequest),
     /// IEEE 802.15.4-2020, section 8.3.2
     McpsData(DataRequest),
 }
 
-// FIXME: temporary solution. Should mirror MacRequest
-pub struct MacConfirm {
-    pub timestamp: Option<NsInstant>,
+pub enum MacConfirm {
+    /// IEEE 802.15.4-2024, section 10.3.10.7
+    #[cfg(feature = "tsch")]
+    MlmeTschMode(TschModeConfirm),
+    /// IEEE 802.15.4-2024, section 10.3.10.2
+    #[cfg(feature = "tsch")]
+    MlmeSetSlotframe(SetSlotframeConfirm),
+    /// IEEE 802.15.4-2024, section 10.3.10.4
+    #[cfg(feature = "tsch")]
+    MlmeSetLink(SetLinkConfirm),
+    /// IEEE 802.15.4-2024, section 8.2.5.4
+    MlmeSet(SetConfirm),
+    /// IEEE 802.15.4-2024, section 8.2.6.2
+    MlmeReset(ResetConfirm),
+    /// IEEE 802.15.4-2020, section 8.2.18.1
+    MlmeBeacon(BeaconConfirm),
+    /// IEEE 802.15.4-2024, section 8.2.5 - MLME-SCAN
+    #[cfg(feature = "tsch")]
+    MlmeScan(ScanConfirm<2>),
+    /// IEEE 802.15.4-2020, section 8.3.2
+    McpsData(Option<NsInstant>),
 }
 
 /// Fake implementation to satisfy the generic channel.
