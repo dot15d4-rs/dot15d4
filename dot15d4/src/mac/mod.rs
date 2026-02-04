@@ -434,30 +434,36 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 //         currently as the smoltcp driver is synchronous and
                 //         cannot handle any response.
                 self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: instant });
+                    .received(response_token, MacConfirm::McpsData(instant));
             }
-            MacSvcTaskResult::SetRequest(_set_confirm) => {
+            MacSvcTaskResult::ScanRequest(scan_confirm) => {
+                // Scan completed - notify upper layer
+                // TODO: Return scan results through a proper response type
                 self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: None });
+                    .received(response_token, MacConfirm::MlmeScan(scan_confirm));
             }
-            MacSvcTaskResult::ResetRequest(_reset_confirm) => {
+            MacSvcTaskResult::SetRequest(set_confirm) => {
                 self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: None });
+                    .received(response_token, MacConfirm::MlmeSet(set_confirm));
             }
-            #[cfg(feature = "tsch")]
-            MacSvcTaskResult::TschModeRequest(_mode_confirm) => {
+            MacSvcTaskResult::ResetRequest(reset_confirm) => {
                 self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: None });
-            }
-            #[cfg(feature = "tsch")]
-            MacSvcTaskResult::SetLinkRequest(_confirm) => {
-                self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: None });
+                    .received(response_token, MacConfirm::MlmeReset(reset_confirm));
             }
             #[cfg(feature = "tsch")]
-            MacSvcTaskResult::SetSlotframeRequest(_confirm) => {
+            MacSvcTaskResult::TschModeRequest(mode_confirm) => {
                 self.request_receiver
-                    .received(response_token, MacConfirm { timestamp: None });
+                    .received(response_token, MacConfirm::MlmeTschMode(mode_confirm));
+            }
+            #[cfg(feature = "tsch")]
+            MacSvcTaskResult::SetLinkRequest(confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm::MlmeSetLink(confirm));
+            }
+            #[cfg(feature = "tsch")]
+            MacSvcTaskResult::SetSlotframeRequest(confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm::MlmeSetSlotframe(confirm));
             }
             MacSvcTaskResult::DataIndication(_) => unreachable!(),
         }
