@@ -2,12 +2,22 @@ use dot15d4_driver::timer::NsInstant;
 
 use crate::util::sync::HasAddress;
 
-use super::mlme::reset::ResetRequest;
-use super::mlme::set::SetRequest;
+pub use super::mlme::scan::{
+    PanDescriptor, ScanConfirm, ScanRequest, ScanStatus, ScanType, MAX_PAN_DESCRIPTORS,
+};
 #[cfg(feature = "tsch")]
 pub use super::mlme::tsch::mode::TschModeRequest;
 #[cfg(feature = "tsch")]
-use super::mlme::tsch::{setlink::SetLinkRequest, setslotframe::SetSlotframeRequest};
+use super::mlme::tsch::{
+    mode::TschModeConfirm,
+    setlink::{SetLinkConfirm, SetLinkRequest},
+    setslotframe::{SetSlotframeConfirm, SetSlotframeRequest},
+};
+use super::mlme::{
+    beacon::BeaconConfirm,
+    reset::{ResetConfirm, ResetRequest},
+    set::{SetConfirm, SetRequest},
+};
 pub use super::{
     mcps::data::{DataIndication, DataRequest},
     mlme::beacon::{BeaconNotifyIndication, BeaconRequest},

@@ -16,8 +16,7 @@ use self::mlme::tsch::{
 use self::{
     frame::mpdu::MpduFrame,
     mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    mlme::reset::ResetRequestTask,
-    mlme::set::SetRequestTask,
+    mlme::{reset::ResetRequestTask, scan::ScanRequestTask, set::SetRequestTask},
     primitives::{MacConfirm, MacIndication, MacRequest},
     task::*,
 };
@@ -152,6 +151,7 @@ mac_svc_tasks!(
     DataRequest,
     DataIndication,
     TschModeRequest,
+    ScanRequest,
     SetLinkRequest,
     SetSlotframeRequest,
     SetRequest,
@@ -363,6 +363,9 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 MacSvcTask::DataRequest(DataRequestTask::new(data_request))
             }
             MacRequest::MlmeBeacon(_) => todo!(),
+            MacRequest::MlmeScan(scan_request) => {
+                MacSvcTask::ScanRequest(ScanRequestTask::new(scan_request))
+            }
             MacRequest::MlmeSet(set_request) => {
                 MacSvcTask::SetRequest(SetRequestTask::new(set_request))
             }

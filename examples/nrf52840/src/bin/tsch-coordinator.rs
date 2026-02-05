@@ -1,6 +1,15 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "tsch")]
+use dot15d4::{
+    driver::timer::NsInstant,
+    mac::{
+        frame::{fields::MpduParser, mpdu::MpduFrame, MpduWithAllFields},
+        primitives::ScanConfirm,
+    },
+    scheduler::command::scan::ScanCommand,
+};
 use dot15d4::{
     driver::{
         radio::{
@@ -210,11 +219,14 @@ async fn driver_service_task(
 }
 
 #[cfg(feature = "tsch")]
-async fn start_tsch(request_sender: &MacRequestSender<'static>) {
+async fn start_tsch(request_sender: &MacRequestSender<'static>, mut timer: NrfRadioSleepTimer) {
     use dot15d4::mac::{
         frame::fields::TschLinkOption,
-        mlme::tsch::{
-            setlink::SetLinkRequest, setslotframe::SetSlotframeRequest, TschScheduleOperation,
+        mlme::{
+            set::{SetRequest, SetRequestAttribute},
+            tsch::{
+                setlink::SetLinkRequest, setslotframe::SetSlotframeRequest, TschScheduleOperation,
+            },
         },
         primitives::{MacRequest, TschModeRequest},
     };
@@ -235,10 +247,13 @@ async fn start_tsch(request_sender: &MacRequestSender<'static>) {
     // Then, we add a link (for advertising) to that new slotframe
     let request_token = request_sender.allocate_request_token().await;
     let mac_request = MacRequest::MlmeSetLink(SetLinkRequest {
-        slotframe_handle: 0,                  // handle of the associated slotframe
-        channel_offset: 0,                    // Channel offset used for the link
-        timeslot: 0,                          // Timeslot to use in the slotframe
-        link_options: TschLinkOption::Shared, // Link used only for transmissions
+        slotframe_handle: 0, // handle of the associated slotframe
+        channel_offset: 0,   // Channel offset used for the link
+        timeslot: 0,         // Timeslot to use in the slotframe
+        link_options: TschLinkOption::Tx
+            | TschLinkOption::Rx
+            | TschLinkOption::Shared
+            | TschLinkOption::TimeKeeping, // Link used only for transmissions
         link_type: TschLinkType::Advertising, // Used for data transmission and not for advertising
         neighbor: None,
         advertise: true, // The link will be advertised in Enhanced Beacons
@@ -258,7 +273,155 @@ async fn start_tsch(request_sender: &MacRequestSender<'static>) {
     request_sender
         .send_request_awaiting_response(request_token, mac_request)
         .await;
-    info!("TSCH started");
+    info!("TSCH PAN Started");
+}
+
+#[cfg(feature = "tsch")]
+async fn join_network_from_scan(
+    request_sender: &MacRequestSender<'static>,
+    scan_confirm: ScanConfirm,
+    buffer_allocator: MacBufferAllocator,
+) {
+    let mut best_candidate = None;
+    for descriptor in scan_confirm.pan_descriptor_list {
+        let timestamp = descriptor.timestamp;
+        let parser = descriptor.mpdu.into_parser().parse_addressing().unwrap();
+        let parser = parser
+            .parse_security()
+            .parse_ies::<NrfRadioDriver>()
+            .unwrap();
+        let ies = parser.ies_fields();
+        let join_metric = ies.tsch_sync().map(|ts| ts.join_metric());
+
+        if let Some(join_metric) = join_metric {
+            if let Some((best_join_metric, best_mpdu, best_timestamp)) = best_candidate {
+                if join_metric < best_join_metric {
+                    best_candidate = Some((join_metric, parser, timestamp));
+                    unsafe { buffer_allocator.deallocate_buffer(best_mpdu.into_buffer()) };
+                } else {
+                    best_candidate = Some((best_join_metric, best_mpdu, best_timestamp));
+                    unsafe { buffer_allocator.deallocate_buffer(parser.into_buffer()) };
+                }
+            } else {
+                best_candidate = Some((join_metric, parser, timestamp));
+            }
+        } else {
+            unsafe { buffer_allocator.deallocate_buffer(parser.into_buffer()) };
+        }
+    }
+
+    if let Some((_, mpdu_parser, timestamp)) = best_candidate {
+        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator).await;
+    }
+}
+
+#[cfg(feature = "tsch")]
+async fn join_network_from_beacon(
+    request_sender: &MacRequestSender<'static>,
+    mpdu_parser: MpduParser<MpduFrame, MpduWithAllFields>,
+    rx_timestamp: NsInstant,
+    buffer_allocator: MacBufferAllocator,
+) {
+    use dot15d4::{
+        mac::{
+            frame::fields::TschLinkOption,
+            mlme::{
+                set::{SetRequest, SetRequestAttribute},
+                tsch::{
+                    setlink::SetLinkRequest, setslotframe::SetSlotframeRequest,
+                    TschScheduleOperation,
+                },
+            },
+        },
+        scheduler::tsch::TschLinkType,
+    };
+    let ies = mpdu_parser.ies_fields();
+
+    let sf_links_ie = ies.tsch_slotframe_link();
+    if let Some(sf_links_ie) = sf_links_ie {
+        use dot15d4::mac::primitives::TschModeRequest;
+
+        for slotframe in sf_links_ie.slotframes() {
+            // We add the slotframe to our schedule
+            let request_token = request_sender.allocate_request_token().await;
+            let mac_request = MacRequest::MlmeSetSlotframe(SetSlotframeRequest {
+                handle: slotframe.handle() as u16,     // Slotframe Identifier
+                operation: TschScheduleOperation::Add, // we want to add a slotframe
+                size: slotframe.size(),                // Size of the sloframe in timeslots
+                advertise: true, // The slotframe will be advertised in Enhanced Beacons
+            });
+            request_sender
+                .send_request_awaiting_response(request_token, mac_request)
+                .await;
+            for link in slotframe.links() {
+                let request_token = request_sender.allocate_request_token().await;
+                let mac_request = MacRequest::MlmeSetLink(SetLinkRequest {
+                    slotframe_handle: slotframe.handle() as u16,
+                    channel_offset: link.channel_offset(),
+                    timeslot: link.timeslot(),
+                    link_options: TschLinkOption::from_bits(link.options()).unwrap(),
+                    link_type: TschLinkType::Advertising,
+                    neighbor: None,
+                    advertise: true,
+                });
+                request_sender
+                    .send_request_awaiting_response(request_token, mac_request)
+                    .await;
+            }
+        }
+
+        let request_token = request_sender.allocate_request_token().await;
+        let asn = ies.tsch_sync().unwrap().asn();
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(SetRequestAttribute::MacAsn(
+            asn,
+            rx_timestamp,
+        )));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+
+        // TODO: join metric
+
+        // Finally, we switch to TSCH mode
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeTschMode(TschModeRequest {
+            tsch_mode: true,
+            tsch_cca: false,
+        });
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+
+        unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
+        info!("Synchronized to TSCH PAN");
+    }
+}
+
+#[cfg(feature = "tsch")]
+async fn scan(request_sender: &MacRequestSender<'static>, buffer_allocator: MacBufferAllocator) {
+    use dot15d4::driver::radio::config::Channel;
+    use dot15d4::mac::primitives::{
+        MacConfirm, MacRequest, ScanRequest, ScanType, TschModeRequest,
+    };
+    use dot15d4::scheduler::scan::ScanChannels;
+
+    // Finally, we switch to TSCH mode
+    let request_token = request_sender.allocate_request_token().await;
+    let mac_request = MacRequest::MlmeScan(ScanRequest {
+        scan_type: ScanType::Passive,
+        scan_channels: ScanChannels::Single(Channel::_26),
+        scan_duration: 12,
+    });
+    let response = request_sender
+        .send_request_awaiting_response(request_token, mac_request)
+        .await;
+    info!("Scanned Channels");
+    match response {
+        MacConfirm::MlmeScan(scan_confirm) => {
+            join_network_from_scan(request_sender, scan_confirm, buffer_allocator).await
+        }
+        _ => unreachable!(),
+    }
 }
 
 async fn upper_layer_task(
@@ -273,7 +436,9 @@ async fn upper_layer_task(
 
     #[cfg(feature = "tsch")]
     if is_sender {
-        start_tsch(&request_sender).await;
+        start_tsch(&request_sender, timer).await;
+    } else {
+        scan(&request_sender, buffer_allocator).await;
     }
 
     #[cfg(not(feature = "tsch"))]

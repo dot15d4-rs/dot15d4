@@ -136,14 +136,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                 } else {
-                    // Put beacon frame back for next advertisement
-                    self.beacon_mpdu
-                        .set(Some(MpduFrame::from_radio_frame(tx_frame)));
+                    #[cfg(feature = "tsch-coordinator")]
+                    {
+                        // Put beacon frame back for next advertisement
+                        self.beacon_mpdu
+                            .set(Some(MpduFrame::from_radio_frame(tx_frame)));
 
-                    // Record beacon transmission time for period calculation
-                    self.on_beacon_sent(instant);
-                    self.schedule_beacon(context);
-
+                        // Record beacon transmission time for period calculation
+                        self.on_beacon_sent(instant);
+                        self.schedule_beacon(context);
+                    }
                     // Return to idle - next beacon will be scheduled automatically
                     // in get_initial_action when the period expires
                     SchedulerTaskTransition::Execute(self.go_idle(context), None)
@@ -327,6 +329,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // For now, we handle them similarly to CSMA mode
                 todo!("PibCommand not yet implemented in TSCH mode")
             }
+            SchedulerCommand::ScanCommand(scan_command) => todo!(),
         }
     }
 }
