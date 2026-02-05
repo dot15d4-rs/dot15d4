@@ -12,6 +12,8 @@
 use dot15d4_driver::radio::{config::Channel, DriverConfig};
 
 #[cfg(feature = "tsch")]
+use super::scan::ScanTask;
+#[cfg(feature = "tsch")]
 use super::tsch::TschTask;
 use super::{
     csma::CsmaTask, SchedulerContext, SchedulerTask, SchedulerTaskCompletion, SchedulerTaskEvent,
@@ -25,6 +27,8 @@ pub enum RootSchedulerState<RadioDriverImpl: DriverConfig> {
     /// TSCH scheduler is active (requires `tsch` feature).
     #[cfg(feature = "tsch")]
     UsingTsch(TschTask<RadioDriverImpl>),
+    #[cfg(feature = "tsch")]
+    ScanningChannels(ScanTask<RadioDriverImpl>),
 }
 
 /// Root scheduler task that manages scheduler switching.
@@ -68,6 +72,8 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
             RootSchedulerState::UsingCsma(csma_task) => csma_task.step(event, context),
             #[cfg(feature = "tsch")]
             RootSchedulerState::UsingTsch(tsch_task) => tsch_task.step(event, context),
+            #[cfg(feature = "tsch")]
+            RootSchedulerState::ScanningChannels(scan_task) => scan_task.step(event, context),
         };
 
         // Handle scheduler switching
@@ -80,7 +86,7 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
                             RootSchedulerState::UsingCsma(csma) => csma.channel,
                             #[cfg(feature = "tsch")]
                             // TODO: configurable default channel
-                            RootSchedulerState::UsingTsch(_) => Channel::_12, // Default channel
+                            _ => Channel::_26, // Default channel
                         };
                         self.state = RootSchedulerState::UsingCsma(CsmaTask::new(channel, context));
                         SchedulerTaskTransition::Completed(
@@ -93,6 +99,13 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
                         self.state = RootSchedulerState::UsingTsch(TschTask::new(context));
                         SchedulerTaskTransition::Completed(
                             SchedulerTaskCompletion::SwitchToTsch,
+                            response,
+                        )
+                    }
+                    SchedulerTaskCompletion::SwitchToScanning(channels) => {
+                        self.state = RootSchedulerState::ScanningChannels(ScanTask::new(channels));
+                        SchedulerTaskTransition::Completed(
+                            SchedulerTaskCompletion::SwitchToScanning(channels),
                             response,
                         )
                     }

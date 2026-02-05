@@ -5,6 +5,7 @@
 
 use dot15d4_driver::radio::config::Channel;
 
+use self::scan::{ScanCommand, ScanCommandResult};
 #[cfg(feature = "tsch")]
 use self::tsch::{TschCommand, TschCommandResult};
 
@@ -22,6 +23,8 @@ pub enum SchedulerCommand {
     CsmaCommand(CsmaCommand),
     /// PIB attribute command.
     PibCommand(PibCommand),
+    /// Channel Scanning Command
+    ScanCommand(ScanCommand),
 }
 
 /// Results returned from scheduler commands.
@@ -33,6 +36,8 @@ pub enum SchedulerCommandResult {
     CsmaCommand(CsmaCommandResult),
     /// Result of a PIB command.
     PibCommand(PibCommandResult),
+    /// Result of a Scanning Command
+    ScanCommand(ScanCommandResult),
 }
 
 /// CSMA-specific commands.
@@ -145,5 +150,25 @@ pub mod tsch {
         SetTschSlotframe(SetTschSlotframeResult),
         /// Result of SetTschLink command.
         SetTschLink(SetTschLinkResult),
+    }
+}
+
+#[cfg(feature = "tsch")]
+pub mod scan {
+    use crate::scheduler::scan::ScanChannels;
+
+    /// TSCH-specific commands.
+    pub enum ScanCommand {
+        /// Start scanning channels
+        StartScanning(ScanChannels),
+        StopScanning,
+    }
+
+    /// Result of UseTsch command.
+    pub enum ScanCommandResult {
+        /// TSCH mode was successfully started.
+        StartedScanning,
+        /// TSCH mode was successfully stopped.
+        StoppedScanning,
     }
 }

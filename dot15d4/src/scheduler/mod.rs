@@ -8,6 +8,7 @@
 pub mod command;
 pub mod csma;
 mod runner;
+pub mod scan;
 pub mod task;
 #[cfg(feature = "tsch")]
 pub mod tsch;
@@ -30,6 +31,8 @@ use crate::pib::Pib;
 
 pub use self::command::{SchedulerCommand, SchedulerCommandResult};
 
+#[cfg(feature = "tsch")]
+use self::scan::ScanChannels;
 use self::{runner::run_task, task::RootSchedulerTask};
 
 pub const SCHEDULER_CHANNEL_CAPACITY: usize = 5;
@@ -216,7 +219,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerService<'svc, RadioDriverImpl
             .try_allocate_consumer_token()
             .expect("no capacity for consumer token");
 
-        let mut task = RootSchedulerTask::new(PhyChannel::_12, &mut self.context);
+        let mut task = RootSchedulerTask::new(PhyChannel::_26, &mut self.context);
         run_task(&mut task, &mut self.context, &mut consumer_token).await
     }
 }
@@ -289,8 +292,11 @@ pub enum SchedulerTaskTransition {
 }
 
 /// Result from a scheduler task that completed
+#[derive(Debug, Clone, Copy)]
 pub enum SchedulerTaskCompletion {
     SwitchToCsma,
     #[cfg(feature = "tsch")]
     SwitchToTsch,
+    #[cfg(feature = "tsch")]
+    SwitchToScanning(ScanChannels),
 }

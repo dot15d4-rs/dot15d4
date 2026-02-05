@@ -19,11 +19,13 @@ use dot15d4_util::sync::ResponseToken;
 use rand_core::RngCore;
 
 use crate::scheduler::SchedulerContext;
+#[cfg(feature = "tsch")]
+use crate::scheduler::SchedulerTaskCompletion;
 
 /// CSMA-CA scheduler state machine states.
 ///
 /// Represents the current state of the CSMA scheduler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 #[repr(u8)]
 pub enum CsmaState {
     /// No operation pending, scheduler is inactive.
@@ -38,7 +40,7 @@ pub enum CsmaState {
     Receiving,
     /// Terminating CSMA operation to switch to another mode (e.g., TSCH).
     #[cfg(feature = "tsch")]
-    Terminating,
+    Terminating(SchedulerTaskCompletion),
 }
 
 /// Information about a pipelined operation.

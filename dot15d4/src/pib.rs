@@ -92,7 +92,7 @@ impl Pib {
             short_address: 0xffff,
             enhanced_beacon_order: 0,
             // TODO: configurable hopping sequence
-            hopping_sequence: Vec::from_slice(&[Channel::_12, Channel::_26]).unwrap(),
+            hopping_sequence: Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap(),
             #[cfg(feature = "tsch")]
             tsch: TschPib::new(),
         }

@@ -14,7 +14,7 @@ use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
-use crate::scheduler::command::tsch::UseTschCommandResult;
+use crate::scheduler::{command::tsch::UseTschCommandResult, SchedulerTaskCompletion};
 #[cfg(feature = "tsch")]
 use crate::scheduler::{
     command::tsch::{TschCommand, TschCommandResult},
@@ -23,7 +23,10 @@ use crate::scheduler::{
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     mac::mlme::set::SetRequestAttribute,
-    scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
+    scheduler::{
+        command::scan::ScanCommand, SchedulerAction, SchedulerTask, SchedulerTaskEvent,
+        SchedulerTaskTransition,
+    },
 };
 use crate::{
     pib::Pib,
@@ -49,7 +52,9 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for CsmaTask<
             CsmaState::Listening => self.execute_listening(event, context),
             CsmaState::Receiving => self.execute_receiving(event, context),
             #[cfg(feature = "tsch")]
-            CsmaState::Terminating => self.execute_terminating(event, context),
+            CsmaState::Terminating(completion) => {
+                self.execute_terminating(event, context, completion)
+            }
         }
     }
 }
@@ -221,21 +226,32 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         &mut self,
         event: SchedulerTaskEvent,
         context: &SchedulerContext<RadioDriverImpl>,
+        completion: SchedulerTaskCompletion,
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
-                use crate::scheduler::SchedulerTaskCompletion;
+                use crate::scheduler::command::scan::ScanCommandResult;
 
                 unsafe {
                     context
                         .buffer_allocator
                         .deallocate_buffer(radio_frame.into_buffer());
                 }
-                let response = SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
-                    TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
-                ));
+                let response = match &completion {
+                    SchedulerTaskCompletion::SwitchToCsma => todo!(),
+                    SchedulerTaskCompletion::SwitchToTsch => {
+                        SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
+                            TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
+                        ))
+                    }
+                    SchedulerTaskCompletion::SwitchToScanning(_scan_channels) => {
+                        SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+                            ScanCommandResult::StartedScanning,
+                        ))
+                    }
+                };
                 SchedulerTaskTransition::Completed(
-                    SchedulerTaskCompletion::SwitchToTsch,
+                    completion,
                     Some((self.take_tx_token(), response)),
                 )
             }
@@ -358,13 +374,12 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.state = CsmaState::Idle;
                 SchedulerTaskTransition::Execute(self.next_action(context), Some((token, resp)))
             }
-
             SchedulerCommand::PibCommand(cmd) => self.on_pib_cmd(token, cmd, context),
-
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(cmd) => {
                 self.on_tsch_cmd(token, cmd, &mut context.pib.tsch)
             }
+            SchedulerCommand::ScanCommand(cmd) => self.on_scan_command(token, cmd),
         }
     }
 
@@ -425,6 +440,25 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    pub(crate) fn on_scan_command(
+        &mut self,
+        token: ResponseToken,
+        cmd: ScanCommand,
+    ) -> crate::scheduler::SchedulerTaskTransition {
+        match cmd {
+            ScanCommand::StartScanning(channels) => {
+                self.state =
+                    CsmaState::Terminating(SchedulerTaskCompletion::SwitchToScanning(channels));
+                self.tx_token = Some(token);
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::SendDriverRequestThenWait(DrvSvcRequest::CompleteThenGoIdle),
+                    None,
+                )
+            }
+            ScanCommand::StopScanning => todo!(),
+        }
+    }
+
     /// Handle TSCH commands while in CSMA mode.
     ///
     /// Handles UseTsch to switch modes, and slotframe/link configuration
@@ -447,7 +481,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         match cmd {
             TschCommand::UseTsch(enabled, _) => {
                 if enabled {
-                    self.state = CsmaState::Terminating;
+                    self.state = CsmaState::Terminating(SchedulerTaskCompletion::SwitchToTsch);
                     self.tx_token = Some(token);
                     SchedulerTaskTransition::Execute(
                         SchedulerAction::SendDriverRequestThenWait(
