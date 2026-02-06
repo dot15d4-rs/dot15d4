@@ -43,12 +43,8 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
             TschState::Transmitting { response_token } => {
                 self.execute_transmitting(response_token, event, context)
             }
-            TschState::Listening { response_token } => {
-                self.execute_listening(response_token, event, context)
-            }
-            TschState::Receiving { response_token } => {
-                self.execute_receiving(response_token, event, context)
-            }
+            TschState::Listening => self.execute_listening(event, context),
+            TschState::Receiving => self.execute_receiving(event, context),
             _ => unreachable!(),
         }
     }
@@ -74,9 +70,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::Entry => {
                 #[cfg(feature = "tsch-coordinator")]
                 {
-                    let current_time = context.timer.now();
-                    self.init_coordinator(context, current_time, Some(3));
-                    self.schedule_beacon(context);
+                    self.init_coordinator(context, Some(3));
+                }
+                #[cfg(not(feature = "tsch-coordinator"))]
+                {
+                    self.init_device(context);
                 }
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
@@ -144,7 +142,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                         // Record beacon transmission time for period calculation
                         self.on_beacon_sent(instant);
-                        self.schedule_beacon(context);
+                        self.schedule_next_beacon(context);
                     }
                     // Return to idle - next beacon will be scheduled automatically
                     // in get_initial_action when the period expires
@@ -171,18 +169,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Handle Listening state - RX window active, waiting for frames.
     fn execute_listening(
         &mut self,
-        response_token: Option<ResponseToken>,
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
-                self.state = TschState::Receiving { response_token };
+                self.state = TschState::Receiving;
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(rx_frame)) => {
                 // No frame received in this slot
                 self.put_rx_frame(rx_frame);
+                self.schedule_next_rx(context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
             _ => unreachable!(),
@@ -192,15 +190,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Handle Receiving state - frame reception in progress.
     fn execute_receiving(
         &mut self,
-        response_token: Option<ResponseToken>,
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
+        self.schedule_next_rx(context);
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, instant)) => {
                 let action = self.go_idle(context);
 
-                if let Some(token) = response_token {
+                if let Some((token, _)) = context.try_receive_rx_request() {
                     // Allocate new frame for next RX
                     self.put_rx_frame(context.allocate_frame());
 

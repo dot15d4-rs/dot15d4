@@ -12,7 +12,7 @@ use dot15d4_driver::{
     },
     timer::{NsDuration, NsInstant},
 };
-use dot15d4_frame::mpdu::MpduFrame;
+use dot15d4_frame::{fields::TschLinkOption, mpdu::MpduFrame};
 use dot15d4_util::sync::ResponseToken;
 use heapless::Vec;
 
@@ -39,11 +39,7 @@ pub enum TschOperation {
         response_token: ResponseToken,
     },
     /// Reception slot.
-    RxSlot {
-        asn: TschAsn,
-        channel: Channel,
-        response_token: Option<ResponseToken>,
-    },
+    RxSlot { asn: TschAsn, channel: Channel },
     /// Advertisement (beacon) slot - internally managed.
     AdvertisementSlot { asn: TschAsn, channel: Channel },
     /// No operation.
@@ -81,13 +77,9 @@ pub enum TschState {
         response_token: Option<ResponseToken>,
     },
     /// RX slot - driver request sent, waiting for FrameStarted/RxWindowEnded.
-    Listening {
-        response_token: Option<ResponseToken>,
-    },
+    Listening,
     /// RX slot - FrameStarted received, waiting for Received/CrcError.
-    Receiving {
-        response_token: Option<ResponseToken>,
-    },
+    Receiving,
     /// Placeholder
     Placeholder,
 }
@@ -182,6 +174,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.state = TschState::Idle {
             next_deadline: INFINITE_DEADLINE,
         };
+        if !self.schedule_next_rx(context) {
+            // TODO: no rx slot available, fallback to CSMA ?
+        }
     }
 
     /// Pop the next operation from the queue (earliest ASN).
@@ -322,6 +317,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             next_deadline: INFINITE_DEADLINE,
         };
         self.init_beacon_frame(context);
+        self.schedule_next_beacon(context);
     }
 
     fn init_beacon_frame(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
@@ -375,7 +371,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Schedule the next beacon advertisement.
     #[cfg(feature = "tsch-coordinator")]
-    pub fn schedule_beacon(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> bool {
+    pub fn schedule_next_beacon(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> bool {
         use dot15d4_driver::timer::RadioTimerApi;
 
         use crate::scheduler::tsch::TschLinkType;
