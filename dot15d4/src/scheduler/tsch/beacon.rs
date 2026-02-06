@@ -4,8 +4,8 @@ use core::marker::PhantomData;
 
 use dot15d4_driver::radio::{
     frame::{
-        Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr, IeRepr,
-        IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameUnsized,
+        Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
+        IeListRepr, IeRepr, IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameUnsized,
     },
     DriverConfig,
 };
