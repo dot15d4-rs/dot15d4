@@ -140,10 +140,6 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub state: TschState,
     /// Queue of pending operations (sorted by ASN, earliest last for pop).
     pub pending_operations: Vec<TschOperation, MAC_TSCH_MAX_PENDING_OPERATIONS>,
-    /// Timestamp of last known timeslot start.
-    pub last_base_time: NsInstant,
-    /// Last known Absolute Slot Number.
-    pub last_asn: TschAsn,
     /// Pre-allocated frame for inbound frames.
     pub rx_frame: Cell<Option<RadioFrame<RadioFrameUnsized>>>,
     /// Whether this device is coordinator.
@@ -169,8 +165,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 next_deadline: INFINITE_DEADLINE,
             },
             pending_operations: Vec::new(),
-            last_base_time: NsInstant::from_ticks(0),
-            last_asn: 0,
             rx_frame: Cell::new(Some(rx_frame)),
             is_coordinator: false,
             beacon_mpdu: Cell::new(None),
@@ -181,9 +175,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     }
 
     /// Initialize as device with observed ASN and timestamp.
-    pub fn init_device(&mut self, asn: TschAsn, timestamp: NsInstant) {
-        self.last_base_time = timestamp;
-        self.last_asn = asn;
+    pub fn init_device(&mut self, context: &SchedulerContext<RadioDriverImpl>) {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
         self.last_beacon_time = None;
@@ -221,7 +213,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         match self.pending_operations.last() {
             Some(op) => {
                 if let Some(asn) = op.asn() {
-                    let instant = self.expected_slot_start(asn, timeslot_length_us);
+                    let instant = context
+                        .pib
+                        .tsch
+                        .expected_slot_start(asn, timeslot_length_us);
                     instant - NsDuration::micros(TIMESLOT_GUARD_TIME_US)
                 } else {
                     INFINITE_DEADLINE
@@ -229,34 +224,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             }
             None => INFINITE_DEADLINE,
         }
-    }
-
-    /// Calculate expected slot start time for given ASN.
-    pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
-        let slot_duration = NsDuration::micros(timeslot_length_us);
-        let slots_diff = asn.saturating_sub(self.last_asn) as u32;
-        self.last_base_time + slots_diff * slot_duration
-    }
-
-    /// Calculate current ASN from timestamp.
-    pub fn asn_at(
-        &self,
-        instant: NsInstant,
-        context: &SchedulerContext<RadioDriverImpl>,
-    ) -> TschAsn {
-        let timeslot_length_us = context.pib.tsch.timeslot_length_us();
-        if instant <= self.last_base_time {
-            return self.last_asn;
-        }
-        let elapsed = instant - self.last_base_time;
-        self.last_asn + elapsed.to_micros() / timeslot_length_us
-    }
-
-    /// Update base time and ASN after executing an operation.
-    pub fn update_timing(&mut self, asn: TschAsn, context: &SchedulerContext<RadioDriverImpl>) {
-        let timeslot_length_us = context.pib.tsch.timeslot_length_us();
-        self.last_base_time = self.expected_slot_start(asn, timeslot_length_us);
-        self.last_asn = asn;
     }
 
     /// Check if in idle state.
@@ -296,6 +263,41 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn rx_frame_mut(&mut self) -> &mut Option<RadioFrame<RadioFrameUnsized>> {
         self.rx_frame.get_mut()
     }
+
+    pub fn schedule_next_rx(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> bool {
+        use dot15d4_driver::timer::RadioTimerApi;
+
+        let current_time = context.timer.now();
+        let current_asn = context.pib.tsch.asn_at(current_time);
+
+        // Find an advertising link
+        let link = match context
+            .pib
+            .tsch
+            .links()
+            .find(|l| l.link_options.contains(TschLinkOption::Rx))
+        {
+            Some(l) => l,
+            None => return false,
+        };
+
+        // Calculate next ASN for this link
+        let asn = match context.pib.tsch.next_asn_for_link(link, current_asn) {
+            Some(asn) => asn,
+            None => return false,
+        };
+
+        // Calculate channel
+        let channel = context
+            .pib
+            .tsch
+            .channel_for_link(asn, link, &context.pib.hopping_sequence);
+
+        // Create and queue the operation
+        let op = TschOperation::RxSlot { asn, channel };
+
+        self.push_operation(op).is_ok()
+    }
 }
 
 // ========================================================================
@@ -307,11 +309,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn init_coordinator(
         &mut self,
         context: &mut SchedulerContext<RadioDriverImpl>,
-        start_time: NsInstant,
         beacon_period_secs: Option<u32>,
     ) {
-        self.last_base_time = start_time;
-        self.last_asn = 0;
         self.is_coordinator = true;
         self.beacon_config = if let Some(beacon_period_secs) = beacon_period_secs {
             BeaconConfig::new(beacon_period_secs)
@@ -394,28 +393,22 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         };
 
         // Convert min_beacon_time to ASN
-        let min_asn = self.asn_at(min_beacon_time, context);
-        let current_asn = self.asn_at(current_time, context);
+        let min_asn = context.pib.tsch.asn_at(min_beacon_time);
+        let current_asn = context.pib.tsch.asn_at(current_time);
 
         let search_from_asn = core::cmp::max(current_asn, min_asn);
 
         // Find an advertising link
-        let link = match context
-            .pib
-            .tsch
-            .links()
-            .find(|l| matches!(l.link_type, TschLinkType::Advertising))
-        {
+        let link = match context.pib.tsch.links().find(|l| {
+            matches!(l.link_type, TschLinkType::Advertising)
+                && l.link_options.contains(TschLinkOption::Shared)
+        }) {
             Some(l) => l,
             None => return false,
         };
 
         // Calculate next ASN for this link
-        let next_asn = match context
-            .pib
-            .tsch
-            .next_asn_for_link_strict(link, search_from_asn)
-        {
+        let next_asn = match context.pib.tsch.next_asn_for_link(link, search_from_asn) {
             Some(asn) => asn,
             None => return false,
         };

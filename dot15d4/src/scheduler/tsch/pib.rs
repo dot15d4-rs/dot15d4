@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use dot15d4_driver::radio::config::Channel;
+use dot15d4_driver::timer::{NsDuration, NsInstant};
 use heapless::Vec;
 
 use crate::constants::{
@@ -156,6 +157,8 @@ pub struct TschPib<Neighbor> {
     pub timeslot_timings: TschTimeslotTimings,
     /// Current Absolute Slot Number.
     pub asn: TschAsn,
+    /// Timestamp of last known timeslot start.
+    pub last_base_time: NsInstant,
 }
 
 impl<Neighbor> TschPib<Neighbor> {
@@ -251,17 +254,6 @@ impl<Neighbor> TschPib<Neighbor> {
             .map(|sf| sf.next_asn_for_link(link, current_asn))
     }
 
-    /// Calculate the next ASN for a link, strictly after current_asn.
-    /// TODO: remove, redundant
-    pub fn next_asn_for_link_strict(
-        &self,
-        link: &TschLink<Neighbor>,
-        current_asn: TschAsn,
-    ) -> Option<TschAsn> {
-        self.get_slotframe(link.slotframe_handle)
-            .map(|sf| sf.next_asn_for_link(link, current_asn.saturating_add(1)))
-    }
-
     /// Calculate the channel for a given ASN and link.
     pub fn channel_for_link(
         &self,
@@ -272,6 +264,38 @@ impl<Neighbor> TschPib<Neighbor> {
         let channel_index =
             ((asn + link.channel_offset as u64) % hopping_sequence.len() as u64) as usize;
         hopping_sequence[channel_index]
+    }
+
+    /// Update base time and ASN after executing an operation.
+    pub fn update_timing(&mut self, asn: TschAsn) {
+        let timeslot_length_us = self.timeslot_length_us();
+        self.last_base_time = self.expected_slot_start(asn, timeslot_length_us);
+        self.asn = asn;
+    }
+
+    /// Calculate expected slot start time for given ASN.
+    pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
+        let slot_duration = NsDuration::micros(timeslot_length_us);
+        let slots_diff = asn.saturating_sub(self.asn) as u32;
+        self.last_base_time + slots_diff * slot_duration
+    }
+
+    /// Calculate current ASN from timestamp.
+    pub fn asn_at(&self, instant: NsInstant) -> TschAsn {
+        let last_asn = self.asn;
+        let timeslot_length_us = self.timeslot_length_us();
+        if instant <= self.last_base_time {
+            return last_asn;
+        }
+        let elapsed = instant - self.last_base_time;
+        last_asn + elapsed.to_micros() / timeslot_length_us
+    }
+
+    /// Synchronize an ASN to an observed RMARKER.
+    pub fn sync_asn(&mut self, asn: TschAsn, instant: NsInstant) {
+        self.asn = asn;
+        let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
+        self.last_base_time = instant - NsDuration::micros(tx_offset_us);
     }
 
     /// Get iterator over slotframes.
@@ -312,6 +336,7 @@ impl<Neighbor> Default for TschPib<Neighbor> {
             links: Vec::new(),
             timeslot_timings: TschTimeslotTimings::default(),
             asn: 0,
+            last_base_time: NsInstant::from_ticks(0),
         }
     }
 }

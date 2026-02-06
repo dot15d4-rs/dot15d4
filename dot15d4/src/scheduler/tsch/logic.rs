@@ -241,7 +241,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         let current_time = context.timer.now();
         // Get current ASN
-        let current_asn = self.asn_at(current_time, context);
+        let current_asn = context.pib.tsch.asn_at(current_time);
 
         // Find appropriate link based on frame type
         let link = match mpdu.frame_control().frame_type() {
@@ -345,7 +345,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// and submits the driver request with precise timing.
     fn schedule_tx_operation(
         &mut self,
-        context: &SchedulerContext<RadioDriverImpl>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
             TschOperation::TxSlot {
@@ -359,11 +359,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     response_token: Some(response_token),
                 };
 
-                self.update_timing(asn, context);
+                context.pib.tsch.update_timing(asn);
 
                 // Calculate TX start time: timeslot start + macTsTxOffset
+                // TODO: from method, remove inline calculation
                 let tx_offset_us = context.pib.tsch.timeslot_timings.tx_offset() as u64;
-                let tx_instant = self.last_base_time + NsDuration::micros(tx_offset_us);
+                let tx_instant = context.pib.tsch.last_base_time + NsDuration::micros(tx_offset_us);
 
                 let request = DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
                     at: Timestamp::Scheduled(tx_instant),
@@ -388,22 +389,19 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// and submits the driver request with precise timing.
     fn schedule_rx_operation(
         &mut self,
-        context: &SchedulerContext<RadioDriverImpl>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
-            TschOperation::RxSlot {
-                asn,
-                channel,
-                response_token,
-            } => {
-                self.update_timing(asn, context);
+            TschOperation::RxSlot { asn, channel } => {
+                context.pib.tsch.update_timing(asn);
                 let frame = self.take_rx_frame().expect("no rx_frame for TSCH RX slot");
 
-                self.state = TschState::Listening { response_token };
+                self.state = TschState::Listening;
 
                 // Calculate RX start time: timeslot start + macTsRxOffset
+                // TODO: remove inline calculation
                 let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
-                let rx_instant = self.last_base_time + NsDuration::micros(rx_offset_us);
+                let rx_instant = context.pib.tsch.last_base_time + NsDuration::micros(rx_offset_us);
 
                 let request = DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
                     start: Timestamp::Scheduled(rx_instant),
@@ -428,11 +426,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     #[cfg(feature = "tsch-coordinator")]
     fn schedule_advertisement_operation(
         &mut self,
-        context: &SchedulerContext<RadioDriverImpl>,
+        // TODO: pass tsch context
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
             TschOperation::AdvertisementSlot { asn, channel } => {
-                self.update_timing(asn, context);
+                context.pib.tsch.update_timing(asn);
                 // Take beacon frame and update ASN
                 let beacon_frame = self
                     .beacon_mpdu
@@ -450,7 +449,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 // Calculate TX start time: timeslot start + macTsTxOffset
                 let tx_offset_us = context.pib.tsch.timeslot_timings.tx_offset() as u64;
-                let tx_instant = self.last_base_time + NsDuration::micros(tx_offset_us);
+                let tx_instant = context.pib.tsch.last_base_time + NsDuration::micros(tx_offset_us);
 
                 let request = DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
                     at: Timestamp::Scheduled(tx_instant),
