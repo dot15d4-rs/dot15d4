@@ -264,6 +264,17 @@ async fn start_tsch(request_sender: &MacRequestSender<'static>, mut timer: NrfRa
         .send_request_awaiting_response(request_token, mac_request)
         .await;
 
+    // Then, we configure absolute timing (i.e. t0 for ASN 0)
+    let start_timestamp = timer.now();
+    let request_token = request_sender.allocate_request_token().await;
+    let mac_request = MacRequest::MlmeSet(SetRequest::new(SetRequestAttribute::MacAsn(
+        0,
+        start_timestamp,
+    )));
+    request_sender
+        .send_request_awaiting_response(request_token, mac_request)
+        .await;
+
     // Finally, we switch to TSCH mode
     let request_token = request_sender.allocate_request_token().await;
     let mac_request = MacRequest::MlmeTschMode(TschModeRequest {

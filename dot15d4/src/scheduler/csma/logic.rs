@@ -411,6 +411,11 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                         context.pib.short_address = short_addr;
                         SetPibResult::Success
                     }
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacAsn(asn, instant) => {
+                        context.pib.tsch.sync_asn(asn, instant);
+                        SetPibResult::Success
+                    }
                 };
                 let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
                     PibCommandResult::Set(result),

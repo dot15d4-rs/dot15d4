@@ -2,6 +2,8 @@
 use core::marker::PhantomData;
 
 use dot15d4_driver::radio::DriverConfig;
+#[cfg(feature = "tsch")]
+use dot15d4_driver::timer::NsInstant;
 
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
@@ -26,6 +28,8 @@ pub enum SetRequestAttribute {
     MacAssociationPermit(bool),
     MacPanId(u16),
     MacShortAddress(u16),
+    #[cfg(feature = "tsch")]
+    MacAsn(u64, NsInstant),
 }
 
 /// MLME-SET.request primitive
