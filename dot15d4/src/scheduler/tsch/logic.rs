@@ -16,13 +16,16 @@ use dot15d4_util::sync::ResponseToken;
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
-use crate::scheduler::{
-    command::SchedulerCommand, SchedulerAction, SchedulerContext, SchedulerRequest,
-    SchedulerResponse, SchedulerTransmissionResult,
-};
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
+};
+use crate::{
+    scheduler::{
+        command::SchedulerCommand, SchedulerAction, SchedulerContext, SchedulerRequest,
+        SchedulerResponse, SchedulerTransmissionResult,
+    },
+    utils,
 };
 
 use super::task::{TschOperation, TschState, TschTask};
@@ -84,7 +87,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     self.on_scheduler_tx_request(token, mpdu, context)
                 }
                 SchedulerRequest::Command(command) => self.on_scheduler_command(token, command),
-                SchedulerRequest::Reception => todo!(),
+                SchedulerRequest::Reception(_reception_type) => todo!(),
             },
             // Timer expired: time to execute next operation in the upcoming timeslot
             SchedulerTaskEvent::TimerExpired => match self.pending_operations.last() {
@@ -198,16 +201,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, instant)) => {
                 let action = self.go_idle(context);
 
-                if let Some((token, _)) = context.try_receive_rx_request() {
-                    // Allocate new frame for next RX
-                    self.put_rx_frame(context.allocate_frame());
+                match utils::process_rx_frame(rx_frame, instant, context) {
+                    Ok((response, token)) => {
+                        // Allocate new frame for next RX
+                        self.put_rx_frame(context.allocate_frame());
 
-                    let response = SchedulerResponse::Reception(rx_frame, instant);
-                    SchedulerTaskTransition::Execute(action, Some((token, response)))
-                } else {
-                    // No receiver, reuse frame
-                    self.put_rx_frame(rx_frame.forget_size::<RadioDriverImpl>());
-                    SchedulerTaskTransition::Execute(action, None)
+                        SchedulerTaskTransition::Execute(action, Some((token, response)))
+                    }
+                    Err(recovered_frame) => {
+                        // No receiver, reuse frame
+                        self.put_rx_frame(recovered_frame);
+                        SchedulerTaskTransition::Execute(action, None)
+                    }
                 }
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(rx_frame, instant)) => {

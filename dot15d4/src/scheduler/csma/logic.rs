@@ -27,6 +27,7 @@ use crate::{
         command::scan::ScanCommand, SchedulerAction, SchedulerTask, SchedulerTaskEvent,
         SchedulerTaskTransition,
     },
+    utils,
 };
 use crate::{
     pib::Pib,
@@ -118,24 +119,25 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(frame, instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, instant)) => {
                 self.base_time = instant;
                 self.state = CsmaState::Listening;
 
-                // Check for pending RX request
-                if let Some((token, _)) = context.try_receive_rx_request() {
-                    self.rx_frame = Some(context.allocate_frame());
-                    let response = Some((token, SchedulerResponse::Reception(frame, instant)));
-                    SchedulerTaskTransition::Execute(
-                        SchedulerAction::SelectDriverEventOrRequest,
-                        response,
-                    )
-                } else {
-                    self.rx_frame = Some(frame.forget_size::<RadioDriverImpl>());
-                    SchedulerTaskTransition::Execute(
-                        SchedulerAction::SelectDriverEventOrRequest,
-                        None,
-                    )
+                match utils::process_rx_frame(rx_frame, instant, context) {
+                    Ok((response, token)) => {
+                        self.rx_frame = Some(context.allocate_frame());
+                        SchedulerTaskTransition::Execute(
+                            SchedulerAction::SelectDriverEventOrRequest,
+                            Some((token, response)),
+                        )
+                    }
+                    Err(recovered_frame) => {
+                        self.rx_frame = Some(recovered_frame);
+                        SchedulerTaskTransition::Execute(
+                            SchedulerAction::SelectDriverEventOrRequest,
+                            None,
+                        )
+                    }
                 }
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(frame, instant)) => {
