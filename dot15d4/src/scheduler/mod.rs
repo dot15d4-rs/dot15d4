@@ -42,7 +42,7 @@ pub const SCHEDULER_CHANNEL_BACKLOG: usize = 5;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MessageType {
     Tx,
-    Rx,
+    Rx(ReceptionType),
     Command,
     TxOrCommand,
 }
@@ -77,8 +77,21 @@ pub type SchedulerRequestSender<'channel> = Sender<
 /// Request to the scheduler service.
 pub enum SchedulerRequest {
     Transmission(MpduFrame),
-    Reception,
+    Reception(ReceptionType),
     Command(SchedulerCommand),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ReceptionType {
+    Data,
+    Beacon,
+    MacCommand(MacCommandType),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MacCommandType {
+    AssociateRequest,
+    AssociateResponse,
 }
 
 pub enum SchedulerTransmissionResult {
@@ -100,9 +113,27 @@ pub enum SchedulerTransmissionResult {
     ),
 }
 
+pub enum SchedulerReceptionResult {
+    Data(
+        RadioFrame<RadioFrameSized>,
+        /// RMARKER Timestamp
+        NsInstant,
+    ),
+    Beacon(
+        RadioFrame<RadioFrameSized>,
+        /// RMARKER Timestamp
+        NsInstant,
+    ),
+    Command(
+        RadioFrame<RadioFrameSized>,
+        /// RMARKER Timestamp
+        NsInstant,
+    ),
+}
+
 pub enum SchedulerResponse {
     Transmission(SchedulerTransmissionResult),
-    Reception(RadioFrame<RadioFrameSized>, NsInstant),
+    Reception(SchedulerReceptionResult),
     Command(SchedulerCommandResult),
 }
 
@@ -112,7 +143,16 @@ impl HasAddress<MessageType> for SchedulerRequest {
             SchedulerRequest::Transmission(_) => {
                 matches!(*address, MessageType::TxOrCommand) || matches!(*address, MessageType::Tx)
             }
-            SchedulerRequest::Reception => matches!(*address, MessageType::Rx),
+            SchedulerRequest::Reception(reception) => match reception {
+                ReceptionType::Data => matches!(*address, MessageType::Rx(ReceptionType::Data)),
+                ReceptionType::Beacon => matches!(*address, MessageType::Rx(ReceptionType::Beacon)),
+                ReceptionType::MacCommand(command) => {
+                    matches!(
+                        *address,
+                        MessageType::Rx(ReceptionType::MacCommand(command))
+                    )
+                }
+            },
             SchedulerRequest::Command(_) => {
                 matches!(*address, MessageType::TxOrCommand)
                     || matches!(*address, MessageType::Command)
@@ -177,10 +217,18 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
         }
     }
 
-    fn try_receive_rx_request(
+    pub(crate) fn try_receive_rx_request(
         &self,
+        reception_type: ReceptionType,
     ) -> Option<(dot15d4_util::sync::ResponseToken, SchedulerRequest)> {
-        self.request_receiver.try_receive_request(&MessageType::Rx)
+        let address = match reception_type {
+            ReceptionType::Data => MessageType::Rx(ReceptionType::Data),
+            ReceptionType::Beacon => MessageType::Rx(ReceptionType::Beacon),
+            ReceptionType::MacCommand(command) => {
+                MessageType::Rx(ReceptionType::MacCommand(command))
+            }
+        };
+        self.request_receiver.try_receive_request(&address)
     }
 }
 

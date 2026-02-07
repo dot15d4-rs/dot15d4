@@ -1,7 +1,24 @@
-use dot15d4_driver::radio::frame::{Address, PanId, ShortAddress, BROADCAST_PAN_ID};
-use dot15d4_driver::radio::tasks::PreliminaryFrameInfo;
+use dot15d4_driver::{
+    radio::{
+        frame::{
+            Address, FrameType, PanId, RadioFrame, RadioFrameSized, RadioFrameUnsized,
+            ShortAddress, BROADCAST_PAN_ID,
+        },
+        tasks::PreliminaryFrameInfo,
+        DriverConfig,
+    },
+    timer::NsInstant,
+};
+use dot15d4_frame::mpdu::{CommandFrameIdentifier, MpduFrame};
+use dot15d4_util::sync::ResponseToken;
 
-use crate::constants::{MAC_IMPLICIT_BROADCAST, MAC_PAN_ID};
+use crate::scheduler::{
+    ReceptionType, SchedulerContext, SchedulerReceptionResult, SchedulerResponse,
+};
+use crate::{
+    constants::{MAC_IMPLICIT_BROADCAST, MAC_PAN_ID},
+    scheduler::MacCommandType,
+};
 
 /// Checks if the given MPDU is valid and intended for us. For the hardware
 /// address, the full big-endian 64-bit address should be provided.
@@ -63,5 +80,77 @@ pub fn is_frame_valid_and_for_us(
             }
         }
         _ => false,
+    }
+}
+
+pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
+    rx_frame: RadioFrame<RadioFrameSized>,
+    instant: NsInstant,
+    context: &mut SchedulerContext<RadioDriverImpl>,
+) -> Result<(SchedulerResponse, ResponseToken), RadioFrame<RadioFrameUnsized>> {
+    let mpdu_frame = MpduFrame::from_radio_frame(rx_frame);
+    let reader = mpdu_frame.reader();
+
+    match reader.frame_control().frame_type() {
+        FrameType::Beacon => {
+            if let Some((token, _)) = context.try_receive_rx_request(ReceptionType::Beacon) {
+                let response = SchedulerResponse::Reception(SchedulerReceptionResult::Beacon(
+                    mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
+                    instant,
+                ));
+                Ok((response, token))
+            } else {
+                // No receiver, reuse frame
+                Err(mpdu_frame
+                    .into_radio_frame::<RadioDriverImpl>()
+                    .forget_size::<RadioDriverImpl>())
+            }
+        }
+        FrameType::Data => {
+            if let Some((token, _)) = context.try_receive_rx_request(ReceptionType::Data) {
+                let response = SchedulerResponse::Reception(SchedulerReceptionResult::Data(
+                    mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
+                    instant,
+                ));
+                Ok((response, token))
+            } else {
+                // No receiver, reuse frame
+                Err(mpdu_frame
+                    .into_radio_frame::<RadioDriverImpl>()
+                    .forget_size::<RadioDriverImpl>())
+            }
+        }
+        FrameType::MacCommand => {
+            // TODO: handle unwrap()
+            let reader = reader
+                .parse_addressing()
+                .unwrap()
+                .parse_security()
+                .parse_ies::<RadioDriverImpl>()
+                .unwrap();
+            let payload = reader.try_frame_payload().unwrap();
+            // TODO: use enum
+            let mac_command_type = match payload[0] {
+                0x01 => MacCommandType::AssociateRequest,
+                0x02 => MacCommandType::AssociateResponse,
+                _ => todo!(),
+            };
+            // Association Request
+            if let Some((token, _)) =
+                context.try_receive_rx_request(ReceptionType::MacCommand(mac_command_type))
+            {
+                let response = SchedulerResponse::Reception(SchedulerReceptionResult::Command(
+                    mpdu_frame.into_radio_frame::<RadioDriverImpl>(),
+                    instant,
+                ));
+                Ok((response, token))
+            } else {
+                // No receiver, reuse frame
+                Err(mpdu_frame
+                    .into_radio_frame::<RadioDriverImpl>()
+                    .forget_size::<RadioDriverImpl>())
+            }
+        }
+        _ => todo!(),
     }
 }

@@ -16,7 +16,10 @@ use crate::{
         frame::mpdu::MpduFrame,
         task::{MacTask, MacTaskEvent, MacTaskTransition},
     },
-    scheduler::{SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult},
+    scheduler::{
+        ReceptionType, SchedulerReceptionResult, SchedulerRequest, SchedulerResponse,
+        SchedulerTransmissionResult,
+    },
     util::{Error, Result as SimplifiedResult},
 };
 
@@ -254,7 +257,7 @@ impl<'task, RadioDriverImpl: DriverConfig> DataIndicationTask<'task, RadioDriver
             Self {
                 state: DataIndicationState::WaitingForFrame,
             },
-            SchedulerRequest::Reception,
+            SchedulerRequest::Reception(ReceptionType::Data),
             Some(data_indication),
         )
     }
@@ -271,12 +274,15 @@ impl<RadioDriverImpl: DriverConfig> MacTask for DataIndicationTask<'_, RadioDriv
             DataIndicationState::Initial(_) => {
                 debug_assert!(matches!(event, MacTaskEvent::Entry));
                 self.state = DataIndicationState::WaitingForFrame;
-                MacTaskTransition::SchedulerRequest(self, SchedulerRequest::Reception, None)
+                MacTaskTransition::SchedulerRequest(
+                    self,
+                    SchedulerRequest::Reception(ReceptionType::Data),
+                    None,
+                )
             }
             DataIndicationState::WaitingForFrame => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Reception(
-                    radio_frame,
-                    rx_timestamp,
+                    SchedulerReceptionResult::Data(radio_frame, rx_timestamp),
                 )) => {
                     self.state = DataIndicationState::WaitingForFrame;
                     let mpdu = MpduFrame::from_radio_frame(radio_frame);

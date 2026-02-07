@@ -25,7 +25,8 @@ use crate::{
     scheduler::{
         command::scan::{ScanCommand, ScanCommandResult},
         scan::ScanChannels,
-        SchedulerCommand, SchedulerCommandResult, SchedulerRequest, SchedulerResponse,
+        ReceptionType, SchedulerCommand, SchedulerCommandResult, SchedulerReceptionResult,
+        SchedulerRequest, SchedulerResponse,
     },
 };
 
@@ -205,14 +206,21 @@ where
                     SchedulerCommandResult::ScanCommand(ScanCommandResult::StartedScanning),
                 )) => {
                     self.state = ScanState::ScanningChannel;
-                    MacTaskTransition::SchedulerRequest(self, SchedulerRequest::Reception, None)
+                    MacTaskTransition::SchedulerRequest(
+                        self,
+                        SchedulerRequest::Reception(ReceptionType::Beacon),
+                        None,
+                    )
                 }
                 _ => unreachable!(),
             },
             ScanState::ScanningChannel => {
                 match event {
                     MacTaskEvent::SchedulerResponse(response) => match response {
-                        SchedulerResponse::Reception(beacon_frame, timestamp) => {
+                        SchedulerResponse::Reception(SchedulerReceptionResult::Beacon(
+                            beacon_frame,
+                            timestamp,
+                        )) => {
                             // A frame was received - check if it's a beacon
                             self.process_received_frame(beacon_frame, timestamp);
                             MacTaskTransition::SchedulerRequest(

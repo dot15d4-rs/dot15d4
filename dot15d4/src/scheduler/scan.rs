@@ -11,8 +11,8 @@ use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, Timestamp},
     scheduler::{
-        command::scan::ScanCommand, SchedulerCommand, SchedulerCommandResult, SchedulerRequest,
-        SchedulerResponse,
+        command::scan::ScanCommand, ReceptionType, SchedulerCommand, SchedulerCommandResult,
+        SchedulerReceptionResult, SchedulerRequest, SchedulerResponse,
     },
 };
 
@@ -182,8 +182,12 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                 DrvSvcEvent::Received(radio_frame, instant) => {
                     match self.validate_rx_frame(radio_frame) {
                         Ok(beacon_frame) => {
-                            if let Some((response_token, _)) = context.try_receive_rx_request() {
-                                let response = SchedulerResponse::Reception(beacon_frame, instant);
+                            if let Some((response_token, _)) =
+                                context.try_receive_rx_request(ReceptionType::Beacon)
+                            {
+                                let response = SchedulerResponse::Reception(
+                                    SchedulerReceptionResult::Beacon(beacon_frame, instant),
+                                );
                                 if let Some(next_channel) = self.channels.next() {
                                     self.state = ScanTaskState::ScanningChannel(next_channel);
                                     let radio_frame = context.allocate_frame();
