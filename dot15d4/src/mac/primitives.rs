@@ -2,6 +2,7 @@ use dot15d4_driver::timer::NsInstant;
 
 use crate::util::sync::HasAddress;
 
+#[cfg(feature = "tsch")]
 pub use super::mlme::scan::{
     PanDescriptor, ScanConfirm, ScanRequest, ScanStatus, ScanType, MAX_PAN_DESCRIPTORS,
 };
@@ -20,7 +21,10 @@ use super::mlme::{
 };
 pub use super::{
     mcps::data::{DataIndication, DataRequest},
-    mlme::beacon::{BeaconNotifyIndication, BeaconRequest},
+    mlme::{
+        associate::{AssociateConfirm, AssociateIndication, AssociateRequest},
+        beacon::{BeaconNotifyIndication, BeaconRequest},
+    },
 };
 
 // TODO: update doc, protocol version and sections numbering
@@ -46,6 +50,9 @@ pub enum MacRequest {
     MlmeScan(ScanRequest),
     /// IEEE 802.15.4-2020, section 8.3.2
     McpsData(DataRequest),
+    /// IEEE 802.15.4-2024, section 10.21.6.1.2
+    #[cfg(feature = "tsch")]
+    MlmeAssociate(AssociateRequest),
 }
 
 pub enum MacConfirm {
@@ -69,6 +76,9 @@ pub enum MacConfirm {
     MlmeScan(ScanConfirm<2>),
     /// IEEE 802.15.4-2020, section 8.3.2
     McpsData(Option<NsInstant>),
+    /// IEEE 802.15.4-2024, section 10.21.6.1.5
+    #[cfg(feature = "tsch")]
+    MlmeAssociate(AssociateConfirm),
 }
 
 /// Fake implementation to satisfy the generic channel.
@@ -84,6 +94,8 @@ impl HasAddress<()> for MacRequest {
 pub enum MacIndication {
     McpsData(DataIndication),
     MlmeBeaconNotify(BeaconNotifyIndication),
+    #[cfg(feature = "tsch")]
+    MlmeAssociateIndication(AssociateIndication),
 }
 
 /// Fake implementation to satisfy the generic channel.

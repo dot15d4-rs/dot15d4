@@ -83,7 +83,7 @@ impl Default for CapabilityInformation {
 
 /// Association request command frame payload length:
 /// 1 byte command ID + 1 byte capability information.
-pub const ASSOCIATION_REQUEST_PAYLOAD_LENGTH: u16 = 2;
+pub const ASSOCIATION_REQUEST_PAYLOAD_LENGTH: u16 = 4;
 
 /// Association response command frame payload length:
 /// 1 byte command ID + 2 bytes short address + 1 byte association status.
@@ -118,7 +118,7 @@ impl From<u8> for AssociationStatus {
 pub const ASSOCIATE_REQUEST_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(
-        AddressingMode::Short,
+        AddressingMode::Extended,
         AddressingMode::Extended,
         true,
         PanIdCompressionRepr::Legacy,
@@ -150,7 +150,7 @@ pub fn associate_request_frame<Config: DriverConfig>(
 ) -> Result<MpduParser<MpduFrame, MpduWithAllFields>> {
     let frame_repr = ASSOCIATE_REQUEST_FRAME_REPR.without_ies();
     let min_buffer_size =
-        frame_repr.min_buffer_size::<Config>(ASSOCIATION_REQUEST_PAYLOAD_LENGTH)?;
+        frame_repr.min_buffer_size::<Config>(ASSOCIATION_REQUEST_PAYLOAD_LENGTH + 10)?;
     let buffer = buffer_allocator
         .try_allocate_buffer(min_buffer_size)
         .unwrap();
@@ -183,7 +183,7 @@ pub fn associate_response_frame<Config: DriverConfig>(
 ) -> Result<MpduParser<MpduFrame, MpduWithAllFields>> {
     let frame_repr = ASSOCIATE_RESPONSE_FRAME_REPR.without_ies();
     let min_buffer_size =
-        frame_repr.min_buffer_size::<Config>(ASSOCIATION_RESPONSE_PAYLOAD_LENGTH)?;
+        frame_repr.min_buffer_size::<Config>(ASSOCIATION_RESPONSE_PAYLOAD_LENGTH + 10)?;
     let buffer = buffer_allocator
         .try_allocate_buffer(min_buffer_size)
         .unwrap();

@@ -1,6 +1,7 @@
 pub mod associate;
 pub mod beacon;
 pub mod reset;
+#[cfg(feature = "tsch")]
 pub mod scan;
 pub mod set;
 pub mod start;
