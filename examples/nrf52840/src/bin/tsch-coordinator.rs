@@ -8,7 +8,6 @@ use dot15d4::{
         frame::{fields::MpduParser, mpdu::MpduFrame, MpduWithAllFields},
         primitives::ScanConfirm,
     },
-    scheduler::command::scan::ScanCommand,
 };
 use dot15d4::{
     driver::{
@@ -21,7 +20,7 @@ use dot15d4::{
             RadioDriver,
         },
         socs::nrf::{NrfRadioDriver, NrfRadioSleepTimer},
-        timer::{NsDuration, RadioTimerApi},
+        timer::RadioTimerApi,
         DriverEventChannel, DriverEventReceiver, DriverEventSender, DriverRequestChannel,
         DriverRequestReceiver, DriverRequestSender, DriverService,
     },
@@ -430,6 +429,59 @@ async fn scan(request_sender: &MacRequestSender<'static>, buffer_allocator: MacB
     match response {
         MacConfirm::MlmeScan(scan_confirm) => {
             join_network_from_scan(request_sender, scan_confirm, buffer_allocator).await
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(feature = "tsch")]
+async fn associate(request_sender: &MacRequestSender<'static>) {
+    use dot15d4::mac::frame::mpdu::{AssociationStatus, CapabilityInformation};
+    use dot15d4::mac::{
+        mlme::set::{SetRequest, SetRequestAttribute},
+        primitives::{AssociateConfirm, AssociateRequest, MacConfirm, MacRequest},
+    };
+
+    let request_token = request_sender.allocate_request_token().await;
+    let mac_request = MacRequest::MlmeAssociate(AssociateRequest::new(
+        // Coordinator extended address (the SENDER node).
+        [0xfe, 0xd6, 0x1f, 0xaf, 0x7d, 0x5a, 0x36, 0xfc],
+        // PAN ID.
+        0xBEEF,
+        CapabilityInformation::default(),
+    ));
+    let response = request_sender
+        .send_request_awaiting_response(request_token, mac_request)
+        .await;
+
+    match response {
+        MacConfirm::MlmeAssociate(AssociateConfirm::Completed {
+            status,
+            short_address,
+        }) => {
+            if status == AssociationStatus::Successful {
+                let addr_bytes = short_address.as_ref();
+                let short_addr_u16 = u16::from_le_bytes([addr_bytes[0], addr_bytes[1]]);
+                info!("Associated with short address: {:04X}", short_addr_u16);
+
+                // MLME-SET short address from associate confirm.
+                let request_token = request_sender.allocate_request_token().await;
+                let mac_request = MacRequest::MlmeSet(SetRequest::new(
+                    SetRequestAttribute::MacShortAddress(short_addr_u16),
+                ));
+                request_sender
+                    .send_request_awaiting_response(request_token, mac_request)
+                    .await;
+                info!("Short address configured");
+            } else {
+                info!("Association failed: {:?}", status);
+            }
+        }
+        MacConfirm::MlmeAssociate(AssociateConfirm::NoAck) => {
+            info!("Association request not acknowledged");
+        }
+        MacConfirm::MlmeAssociate(AssociateConfirm::ChannelAccessFailure) => {
+            info!("Association failed: channel access failure");
         }
         _ => unreachable!(),
     }

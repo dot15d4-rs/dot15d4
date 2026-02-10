@@ -35,8 +35,8 @@ pub use self::command::{SchedulerCommand, SchedulerCommandResult};
 use self::scan::ScanChannels;
 use self::{runner::run_task, task::RootSchedulerTask};
 
-pub const SCHEDULER_CHANNEL_CAPACITY: usize = 5;
-pub const SCHEDULER_CHANNEL_BACKLOG: usize = 5;
+pub const SCHEDULER_CHANNEL_CAPACITY: usize = 6;
+pub const SCHEDULER_CHANNEL_BACKLOG: usize = 6;
 
 /// Message types for routing scheduler requests.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

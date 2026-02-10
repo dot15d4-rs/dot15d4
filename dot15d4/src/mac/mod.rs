@@ -10,13 +10,19 @@ pub use dot15d4_frame as frame;
 use paste::paste;
 
 #[cfg(feature = "tsch")]
+use self::mlme::associate::{AssociateConfirm, AssociateIndication};
+#[cfg(feature = "tsch")]
+use self::mlme::associate::{AssociateIndicationTask, AssociateRequestTask};
+#[cfg(feature = "tsch")]
+use self::mlme::scan::ScanRequestTask;
+#[cfg(feature = "tsch")]
 use self::mlme::tsch::{
     mode::TschModeRequestTask, setlink::SetLinkRequestTask, setslotframe::SetSlotframeRequestTask,
 };
 use self::{
     frame::mpdu::MpduFrame,
     mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    mlme::{reset::ResetRequestTask, scan::ScanRequestTask, set::SetRequestTask},
+    mlme::{reset::ResetRequestTask, set::SetRequestTask},
     primitives::{MacConfirm, MacIndication, MacRequest},
     task::*,
 };
@@ -73,9 +79,16 @@ pub type MacIndicationSender<'channel> =
     Sender<'channel, (), MacIndication, (), UL_MAX_RX_TOKENS, UL_MSG_BACKLOG, UL_NUM_CLIENTS>;
 
 const MAC_NUM_PARALLEL_REQUEST_TASKS: usize = UL_MAX_TX_TOKENS;
+
+/// Number of indication tasks: data + associate (tsch only).
+#[cfg(feature = "tsch")]
+const MAC_NUM_INDICATION_TASKS: usize = 2;
+#[cfg(not(feature = "tsch"))]
+const MAC_NUM_INDICATION_TASKS: usize = 1;
+
 const _: () = {
     assert!(
-        SCHEDULER_CHANNEL_CAPACITY == 1 + MAC_NUM_PARALLEL_REQUEST_TASKS,
+        SCHEDULER_CHANNEL_CAPACITY >= 1 + MAC_NUM_PARALLEL_REQUEST_TASKS,
         "scheduler channel capacity does not match number of MAC tasks"
     )
 };
@@ -91,7 +104,7 @@ const _: () = {
 /// - one buffer for indication task
 /// - one pre-allocated buffer for outgoing ACKs
 /// - one pre-allocated buffer for incoming ACKs
-pub const MAC_NUM_REQUIRED_BUFFERS: usize = UL_MAX_TX_TOKENS + 1 + 3;
+pub const MAC_NUM_REQUIRED_BUFFERS: usize = UL_MAX_TX_TOKENS + MAC_NUM_INDICATION_TASKS + 3;
 // TODO: Make this generic over the radio driver configuration.
 pub const MAC_BUFFER_SIZE: usize =
     <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize + MAX_DRIVER_OVERHEAD;
@@ -155,13 +168,15 @@ mac_svc_tasks!(
     SetLinkRequest,
     SetSlotframeRequest,
     SetRequest,
-    ResetRequest
+    ResetRequest,
+    AssociateRequest,
+    AssociateIndication
 );
 #[cfg(not(feature = "tsch"))]
 mac_svc_tasks!(DataRequest, DataIndication, SetRequest, ResetRequest);
 
-/// Number of mac service tasks which include requests tasks and one indication task
-const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + 1;
+/// Number of mac service tasks which include requests tasks and indication tasks
+const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_INDICATION_TASKS;
 
 struct MacServiceState<'state, RadioDriverImpl: DriverConfig> {
     // MAC request tasks are indexed by the message slots of the corresponding
@@ -363,6 +378,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 MacSvcTask::DataRequest(DataRequestTask::new(data_request))
             }
             MacRequest::MlmeBeacon(_) => todo!(),
+            #[cfg(feature = "tsch")]
             MacRequest::MlmeScan(scan_request) => {
                 MacSvcTask::ScanRequest(ScanRequestTask::new(scan_request))
             }
@@ -384,22 +400,41 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacRequest::MlmeSetLink(set_link_request) => {
                 MacSvcTask::SetLinkRequest(SetLinkRequestTask::new(set_link_request))
             }
+            #[cfg(feature = "tsch")]
+            MacRequest::MlmeAssociate(associate_request) => MacSvcTask::AssociateRequest(
+                AssociateRequestTask::new(associate_request, self.buffer_allocator),
+            ),
         }
     }
     fn create_indication_tasks<'tasks>(&self, state: &mut MacServiceState<'tasks, RadioDriverImpl>)
     where
         'svc: 'tasks,
     {
-        const MAC_INDICATION_TASK_INDEX: usize = NUM_MAC_SVC_TASKS - 1;
+        const DATA_INDICATION_TASK_INDEX: usize = MAC_NUM_PARALLEL_REQUEST_TASKS;
 
         let mac_indication_task =
             MacSvcTask::DataIndication(DataIndicationTask::<'tasks, RadioDriverImpl>::new());
         self.step_task(
             state,
-            MAC_INDICATION_TASK_INDEX,
+            DATA_INDICATION_TASK_INDEX,
             mac_indication_task,
             MacTaskEvent::Entry,
         );
+
+        #[cfg(feature = "tsch-coordinator")]
+        {
+            const ASSOCIATE_INDICATION_TASK_INDEX: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + 1;
+
+            let associate_indication_task = MacSvcTask::AssociateIndication(
+                AssociateIndicationTask::<'tasks, RadioDriverImpl>::new(self.buffer_allocator),
+            );
+            self.step_task(
+                state,
+                ASSOCIATE_INDICATION_TASK_INDEX,
+                associate_indication_task,
+                MacTaskEvent::Entry,
+            );
+        }
     }
 
     fn handle_request_task_result(
@@ -439,6 +474,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 self.request_receiver
                     .received(response_token, MacConfirm::McpsData(instant));
             }
+            #[cfg(feature = "tsch")]
             MacSvcTaskResult::ScanRequest(scan_confirm) => {
                 // Scan completed - notify upper layer
                 // TODO: Return scan results through a proper response type
@@ -469,6 +505,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                     .received(response_token, MacConfirm::MlmeSetSlotframe(confirm));
             }
             MacSvcTaskResult::DataIndication(_) => unreachable!(),
+            #[cfg(feature = "tsch")]
+            MacSvcTaskResult::AssociateRequest(associate_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm::MlmeAssociate(associate_confirm));
+            }
+            #[cfg(feature = "tsch")]
+            MacSvcTaskResult::AssociateIndication(_) => unreachable!(),
         }
     }
 
@@ -476,6 +519,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         match result {
             MacSvcTaskResult::DataIndication(DataIndication { mpdu, timestamp }) => {
                 self.handle_incoming_mpdu(mpdu, timestamp);
+            }
+            #[cfg(feature = "tsch")]
+            MacSvcTaskResult::AssociateIndication(indication) => {
+                self.handle_associate_indication(indication);
             }
             // The rest are requests
             _ => unreachable!(),
@@ -516,5 +563,19 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "tsch")]
+    fn handle_associate_indication(&self, indication: AssociateIndication) {
+        if let Some(request_token) = self.indication_sender.try_allocate_request_token() {
+            self.indication_sender.send_request_no_response(
+                request_token,
+                MacIndication::MlmeAssociateIndication(indication),
+            );
+        }
+        // If no token available, the indication is dropped (back-pressure).
+
+        #[cfg(feature = "rtos-trace")]
+        rtos_trace::trace::task_exec_end();
     }
 }
