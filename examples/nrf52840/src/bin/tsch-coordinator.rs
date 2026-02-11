@@ -355,7 +355,7 @@ async fn join_network_from_beacon(
             // We add the slotframe to our schedule
             let request_token = request_sender.allocate_request_token().await;
             let mac_request = MacRequest::MlmeSetSlotframe(SetSlotframeRequest {
-                handle: slotframe.handle() as u16,     // Slotframe Identifier
+                handle: slotframe.handle(),            // Slotframe Identifier
                 operation: TschScheduleOperation::Add, // we want to add a slotframe
                 size: slotframe.size(),                // Size of the sloframe in timeslots
                 advertise: true, // The slotframe will be advertised in Enhanced Beacons
@@ -366,7 +366,7 @@ async fn join_network_from_beacon(
             for link in slotframe.links() {
                 let request_token = request_sender.allocate_request_token().await;
                 let mac_request = MacRequest::MlmeSetLink(SetLinkRequest {
-                    slotframe_handle: slotframe.handle() as u16,
+                    slotframe_handle: slotframe.handle(),
                     channel_offset: link.channel_offset(),
                     timeslot: link.timeslot(),
                     link_options: TschLinkOption::from_bits(link.options()).unwrap(),

@@ -15,7 +15,7 @@ use crate::{
 
 pub struct SetLinkRequest {
     /// Slotframe identifier of the slotframe to which the link is associated.
-    pub slotframe_handle: u16,
+    pub slotframe_handle: u8,
     /// Associated timeslot in the slotframe
     pub timeslot: u16,
     /// Associated Channel offset for the given timeslot for the link

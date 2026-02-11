@@ -15,7 +15,7 @@ use super::TschScheduleOperation;
 
 pub struct SetSlotframeRequest {
     /// Slotframe Identifier
-    pub handle: u16,
+    pub handle: u8,
     /// The number of timeslots in a given slotframe, representing of often a
     /// timeslot repeats.
     pub size: u16,

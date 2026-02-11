@@ -45,7 +45,7 @@ pub enum TschLinkType {
 #[derive(Debug, Clone)]
 pub struct TschLink<Neighbor> {
     /// Slotframe identifier of the slotframe to which the link is associated.
-    pub slotframe_handle: u16,
+    pub slotframe_handle: u8,
     /// Associated timeslot in the slotframe.
     pub timeslot: u16,
     /// Associated channel offset for the given timeslot for the link.
@@ -83,14 +83,14 @@ impl<Neighbor> Default for TschLink<Neighbor> {
 #[derive(Debug)]
 pub struct TschSlotframe {
     /// Slotframe Identifier.
-    pub handle: u16,
+    pub handle: u8,
     /// The number of timeslots in a given slotframe.
     pub size: u16,
 }
 
 impl TschSlotframe {
     /// Create a new slotframe.
-    pub fn new(handle: u16, size: u16) -> Self {
+    pub fn new(handle: u8, size: u16) -> Self {
         Self { handle, size }
     }
 
@@ -132,7 +132,7 @@ impl TschSlotframe {
     }
 
     /// Get the slotframe handle.
-    pub fn handle(&self) -> u16 {
+    pub fn handle(&self) -> u8 {
         self.handle
     }
 }
@@ -173,7 +173,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 
     /// Create a slotframe and add it to the schedule.
-    pub fn create_slotframe(&mut self, handle: u16, size: u16) -> Result<u16, ScheduleError> {
+    pub fn create_slotframe(&mut self, handle: u8, size: u16) -> Result<u16, ScheduleError> {
         // Check for duplicate handle
         if self.slotframes.iter().any(|sf| sf.handle == handle) {
             return Err(ScheduleError::HandleDuplicate);
@@ -191,7 +191,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 
     /// Get a slotframe by its handle.
-    pub fn get_slotframe(&self, handle: u16) -> Option<&TschSlotframe> {
+    pub fn get_slotframe(&self, handle: u8) -> Option<&TschSlotframe> {
         self.slotframes.iter().find(|sf| sf.handle == handle)
     }
 
@@ -310,7 +310,7 @@ impl<Neighbor> TschPib<Neighbor> {
 
     /// Get slotframe info for beacon IE generation.
     /// Returns iterator of (handle, size) tuples.
-    pub fn slotframe_info(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+    pub fn slotframe_info(&self) -> impl Iterator<Item = (u8, u16)> + '_ {
         self.slotframes.iter().map(|sf| (sf.handle, sf.size))
     }
 
