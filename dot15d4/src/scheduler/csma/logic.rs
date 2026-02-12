@@ -398,6 +398,10 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                         context.pib.extended_address = Address::from_le_bytes(&addr);
                         SetPibResult::Success
                     }
+                    SetRequestAttribute::MacCoordExtendedAddress(addr) => {
+                        context.pib.coord_extended_address = Address::from_le_bytes(&addr);
+                        SetPibResult::Success
+                    }
                     SetRequestAttribute::MacAssociationPermit(permit) => {
                         context.pib.association_permit = permit;
                         SetPibResult::Success
