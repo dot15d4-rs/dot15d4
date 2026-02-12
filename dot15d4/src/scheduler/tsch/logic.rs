@@ -337,6 +337,28 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 todo!()
             }
             SchedulerCommand::PibCommand(cmd) => match cmd {
+                PibCommand::Set(attribute) => {
+                    let result = match attribute {
+                        SetRequestAttribute::MacShortAddress(short_addr) => {
+                            context.pib.short_address = short_addr;
+                            SetPibResult::Success
+                        }
+                        SetRequestAttribute::MacCoordExtendedAddress(addr) => {
+                            context.pib.coord_extended_address = Address::from_le_bytes(&addr);
+                            SetPibResult::Success
+                        }
+                        // NOTE: we do not need/support other attributes in
+                        //       TSCH mode for now.
+                        _ => unreachable!(),
+                    };
+                    let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
+                        PibCommandResult::Set(result),
+                    ));
+                    SchedulerTaskTransition::Execute(
+                        SchedulerAction::SelectDriverEventOrRequest,
+                        Some((token, resp)),
+                    )
+                }
                 PibCommand::Get(attribute) => {
                     let result = match attribute {
                         GetRequestAttribute::MacExtendedAddress => {

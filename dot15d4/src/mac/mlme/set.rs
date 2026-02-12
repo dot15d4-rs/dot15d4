@@ -26,6 +26,7 @@ pub enum SetRequestAttribute {
     // IEEE 802.15.4-2020, section 8.4.3.1, table 8-94
     MacExtendedAddress([u8; 8]),
     MacAssociationPermit(bool),
+    MacCoordExtendedAddress([u8; 8]),
     MacPanId(u16),
     MacShortAddress(u16),
     #[cfg(feature = "tsch")]
