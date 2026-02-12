@@ -2,6 +2,7 @@ use dot15d4_driver::timer::NsInstant;
 
 use crate::util::sync::HasAddress;
 
+use super::mlme::get::{GetConfirm, GetRequest};
 #[cfg(feature = "tsch")]
 pub use super::mlme::scan::{
     PanDescriptor, ScanConfirm, ScanRequest, ScanStatus, ScanType, MAX_PAN_DESCRIPTORS,
@@ -40,6 +41,8 @@ pub enum MacRequest {
     #[cfg(feature = "tsch")]
     MlmeSetLink(SetLinkRequest),
     /// IEEE 802.15.4-2024, section 8.2.5.4
+    MlmeGet(GetRequest),
+    /// IEEE 802.15.4-2024, section 8.2.5.4
     MlmeSet(SetRequest),
     /// IEEE 802.15.4-2024, section 8.2.6.2
     MlmeReset(ResetRequest),
@@ -65,6 +68,8 @@ pub enum MacConfirm {
     /// IEEE 802.15.4-2024, section 10.3.10.4
     #[cfg(feature = "tsch")]
     MlmeSetLink(SetLinkConfirm),
+    /// IEEE 802.15.4-2024, section 8.2.5.2
+    MlmeGet(GetConfirm),
     /// IEEE 802.15.4-2024, section 8.2.5.4
     MlmeSet(SetConfirm),
     /// IEEE 802.15.4-2024, section 8.2.6.2

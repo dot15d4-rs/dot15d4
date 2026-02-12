@@ -61,12 +61,16 @@ pub enum CsmaCommandResult {
 
 /// PIB (PAN Information Base) command module.
 pub mod pib {
-    use crate::mac::mlme::set::SetRequestAttribute;
+    use dot15d4_driver::radio::frame::Address;
+
+    use crate::mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute};
 
     /// PIB-related commands for the scheduler.
     pub enum PibCommand {
         /// Set a PIB attribute to a new value.
         Set(SetRequestAttribute),
+        /// Get a PIB attribute
+        Get(GetRequestAttribute),
         /// Reset PIB to default values (preserving extended address).
         Reset,
     }
@@ -76,6 +80,16 @@ pub mod pib {
         /// Attribute was successfully set.
         Success,
         /// The provided value was invalid for the attribute.
+        InvalidParameter,
+    }
+
+    /// Result of a PIB Get operation.
+    pub enum GetPibResult {
+        MacExtendedAddress(Address<[u8; 8]>),
+        MacCoordExtendedAddress(Address<[u8; 8]>),
+        MacAssociationPermit(bool),
+        MacPanId(u16),
+        MacShortAddress(u16),
         InvalidParameter,
     }
 
@@ -89,6 +103,8 @@ pub mod pib {
     pub enum PibCommandResult {
         /// Result of a Set command.
         Set(SetPibResult),
+        /// Result of a Set command.
+        Get(GetPibResult),
         /// Result of a Reset command.
         Reset(ResetPibResult),
     }

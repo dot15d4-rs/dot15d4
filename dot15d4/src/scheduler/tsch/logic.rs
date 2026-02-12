@@ -18,7 +18,11 @@ use dot15d4_util::sync::ResponseToken;
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
-    scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
+    mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute},
+    scheduler::{
+        command::pib::{GetPibResult, SetPibResult},
+        SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition,
+    },
 };
 use crate::{
     scheduler::{
@@ -86,7 +90,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 SchedulerRequest::Transmission(mpdu) => {
                     self.on_scheduler_tx_request(token, mpdu, context)
                 }
-                SchedulerRequest::Command(command) => self.on_scheduler_command(token, command),
+                SchedulerRequest::Command(command) => {
+                    self.on_scheduler_command(token, command, context)
+                }
                 SchedulerRequest::Reception(_reception_type) => todo!(),
             },
             // Timer expired: time to execute next operation in the upcoming timeslot
@@ -288,8 +294,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         &mut self,
         token: ResponseToken,
         command: SchedulerCommand,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         use crate::scheduler::command::*;
+
+        self.state = TschState::Idle;
 
         match command {
             #[cfg(feature = "tsch")]
@@ -327,11 +336,38 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // CSMA commands not handled in TSCH mode
                 todo!()
             }
-            SchedulerCommand::PibCommand(_cmd) => {
-                // PIB commands should be forwarded to the root scheduler or handled here
-                // For now, we handle them similarly to CSMA mode
-                todo!("PibCommand not yet implemented in TSCH mode")
-            }
+            SchedulerCommand::PibCommand(cmd) => match cmd {
+                PibCommand::Get(attribute) => {
+                    let result = match attribute {
+                        GetRequestAttribute::MacExtendedAddress => {
+                            GetPibResult::MacExtendedAddress(context.pib.extended_address)
+                        }
+                        GetRequestAttribute::MacCoordExtendedAddress => {
+                            GetPibResult::MacCoordExtendedAddress(
+                                context.pib.coord_extended_address,
+                            )
+                        }
+                        GetRequestAttribute::MacAssociationPermit => {
+                            GetPibResult::MacAssociationPermit(context.pib.association_permit)
+                        }
+                        GetRequestAttribute::MacPanId => {
+                            GetPibResult::MacPanId(context.pib.pan_id.into_u16())
+                        }
+                        GetRequestAttribute::MacShortAddress => {
+                            GetPibResult::MacShortAddress(context.pib.short_address)
+                        }
+                        _ => todo!(),
+                    };
+                    let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
+                        PibCommandResult::Get(result),
+                    ));
+                    SchedulerTaskTransition::Execute(
+                        SchedulerAction::SelectDriverEventOrRequest,
+                        Some((token, resp)),
+                    )
+                }
+                PibCommand::Reset => todo!(),
+            },
             SchedulerCommand::ScanCommand(scan_command) => todo!(),
         }
     }
