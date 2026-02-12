@@ -22,11 +22,8 @@ use crate::scheduler::{
 };
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
-    mac::mlme::set::SetRequestAttribute,
-    scheduler::{
-        command::scan::ScanCommand, SchedulerAction, SchedulerTask, SchedulerTaskEvent,
-        SchedulerTaskTransition,
-    },
+    mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute},
+    scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
     utils,
 };
 use crate::{
@@ -421,6 +418,30 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 };
                 let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
                     PibCommandResult::Set(result),
+                ));
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::SelectDriverEventOrRequest,
+                    Some((token, resp)),
+                )
+            }
+            PibCommand::Get(attribute) => {
+                let result = match attribute {
+                    GetRequestAttribute::MacExtendedAddress => {
+                        GetPibResult::MacExtendedAddress(context.pib.extended_address)
+                    }
+                    GetRequestAttribute::MacAssociationPermit => {
+                        GetPibResult::MacAssociationPermit(context.pib.association_permit)
+                    }
+                    GetRequestAttribute::MacPanId => {
+                        GetPibResult::MacPanId(context.pib.pan_id.into_u16())
+                    }
+                    GetRequestAttribute::MacShortAddress => {
+                        GetPibResult::MacShortAddress(context.pib.short_address)
+                    }
+                    _ => todo!(),
+                };
+                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
+                    PibCommandResult::Get(result),
                 ));
                 SchedulerTaskTransition::Execute(
                     SchedulerAction::SelectDriverEventOrRequest,

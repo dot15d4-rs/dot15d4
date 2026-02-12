@@ -22,7 +22,7 @@ use self::mlme::tsch::{
 use self::{
     frame::mpdu::MpduFrame,
     mcps::data::{DataIndication, DataIndicationTask, DataRequestTask},
-    mlme::{reset::ResetRequestTask, set::SetRequestTask},
+    mlme::{get::GetRequestTask, reset::ResetRequestTask, set::SetRequestTask},
     primitives::{MacConfirm, MacIndication, MacRequest},
     task::*,
 };
@@ -168,12 +168,19 @@ mac_svc_tasks!(
     SetLinkRequest,
     SetSlotframeRequest,
     SetRequest,
+    GetRequest,
     ResetRequest,
     AssociateRequest,
     AssociateIndication
 );
 #[cfg(not(feature = "tsch"))]
-mac_svc_tasks!(DataRequest, DataIndication, SetRequest, ResetRequest);
+mac_svc_tasks!(
+    DataRequest,
+    DataIndication,
+    GetRequest,
+    SetRequest,
+    ResetRequest
+);
 
 /// Number of mac service tasks which include requests tasks and indication tasks
 const NUM_MAC_SVC_TASKS: usize = MAC_NUM_PARALLEL_REQUEST_TASKS + MAC_NUM_INDICATION_TASKS;
@@ -385,6 +392,9 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacRequest::MlmeSet(set_request) => {
                 MacSvcTask::SetRequest(SetRequestTask::new(set_request))
             }
+            MacRequest::MlmeGet(get_request) => {
+                MacSvcTask::GetRequest(GetRequestTask::new(get_request))
+            }
             MacRequest::MlmeReset(reset_request) => {
                 MacSvcTask::ResetRequest(ResetRequestTask::new(reset_request))
             }
@@ -484,6 +494,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
             MacSvcTaskResult::SetRequest(set_confirm) => {
                 self.request_receiver
                     .received(response_token, MacConfirm::MlmeSet(set_confirm));
+            }
+            MacSvcTaskResult::GetRequest(get_confirm) => {
+                self.request_receiver
+                    .received(response_token, MacConfirm::MlmeGet(get_confirm));
             }
             MacSvcTaskResult::ResetRequest(reset_confirm) => {
                 self.request_receiver
