@@ -1,5 +1,5 @@
 use dot15d4_driver::radio::config::Channel;
-use dot15d4_driver::radio::frame::{Address, PanId};
+use dot15d4_driver::radio::frame::{Address, ExtendedAddress, PanId};
 use heapless::Vec;
 
 use crate::constants::{
@@ -28,7 +28,7 @@ pub struct Pib {
     /// If `true`, association is permitted.
     pub(crate) association_permit: bool,
     /// The address of the coordinator through which the device is associated.
-    pub(crate) coord_extended_address: Option<[u8; 8]>,
+    pub(crate) coord_extended_address: Address<[u8; 8]>,
     /// The short address assigned to the coordinator through which the device
     /// is associated. A value of 0xfffe indicates that the coordinator is
     /// only using its extended address. A value of 0xffff indicates that this
@@ -79,7 +79,7 @@ impl Pib {
             extended_address: Address::from_le_bytes(address),
             associated_pan_coord: false,
             association_permit: false,
-            coord_extended_address: None,
+            coord_extended_address: Address::Extended(ExtendedAddress::new_owned([0xff; 8])),
             coord_short_address: 0xffff,
             max_be: MAC_MAX_BE,
             min_be: MAC_MIN_BE,
