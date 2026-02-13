@@ -14,6 +14,8 @@ use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
+use crate::scheduler::command::scan::ScanCommand;
+#[cfg(feature = "tsch")]
 use crate::scheduler::{command::tsch::UseTschCommandResult, SchedulerTaskCompletion};
 #[cfg(feature = "tsch")]
 use crate::scheduler::{
@@ -243,11 +245,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                             TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
                         ))
                     }
-                    SchedulerTaskCompletion::SwitchToScanning(_scan_channels) => {
-                        SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
-                            ScanCommandResult::StartedScanning,
-                        ))
-                    }
+                    SchedulerTaskCompletion::SwitchToScanning(_, _) => SchedulerResponse::Command(
+                        SchedulerCommandResult::ScanCommand(ScanCommandResult::StartedScanning),
+                    ),
                 };
                 SchedulerTaskTransition::Completed(
                     completion,
@@ -378,6 +378,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             SchedulerCommand::TschCommand(cmd) => {
                 self.on_tsch_cmd(token, cmd, &mut context.pib.tsch)
             }
+            #[cfg(feature = "tsch")]
             SchedulerCommand::ScanCommand(cmd) => self.on_scan_command(token, cmd),
         }
     }
@@ -472,15 +473,18 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         }
     }
 
+    #[cfg(feature = "tsch")]
     pub(crate) fn on_scan_command(
         &mut self,
         token: ResponseToken,
         cmd: ScanCommand,
     ) -> crate::scheduler::SchedulerTaskTransition {
         match cmd {
-            ScanCommand::StartScanning(channels) => {
-                self.state =
-                    CsmaState::Terminating(SchedulerTaskCompletion::SwitchToScanning(channels));
+            ScanCommand::StartScanning(channels, max_pan_descriptors) => {
+                self.state = CsmaState::Terminating(SchedulerTaskCompletion::SwitchToScanning(
+                    channels,
+                    max_pan_descriptors,
+                ));
                 self.tx_token = Some(token);
                 SchedulerTaskTransition::Execute(
                     SchedulerAction::SendDriverRequestThenWait(DrvSvcRequest::CompleteThenGoIdle),
