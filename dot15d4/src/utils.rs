@@ -75,7 +75,7 @@ pub fn is_frame_valid_and_for_us(
                     let derived_short_addr = ShortAddress::new_owned(derived_short_address);
                     *derived_short_addr.as_ref() == *addr.as_ref()
                 }
-                Address::Extended(addr) => *hardware_addr == addr.into_be_bytes(),
+                Address::Extended(addr) => hardware_addr == addr.as_ref(),
                 _ => false,
             }
         }
