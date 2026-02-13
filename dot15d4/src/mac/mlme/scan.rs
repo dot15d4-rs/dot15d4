@@ -52,24 +52,27 @@ pub struct ScanRequest {
     /// For n=14, this is approximately 4 minutes per channel.
     /// A value of 5 gives approximately 1 second per channel.
     pub scan_duration: u8,
+    pub max_pan_descriptors: usize,
 }
 
 impl ScanRequest {
     /// Create a new passive scan request for all channels.
-    pub fn passive_all(scan_duration: u8) -> Self {
+    pub fn passive_all(scan_duration: u8, max_pan_descriptors: usize) -> Self {
         Self {
             scan_type: ScanType::Passive,
             scan_channels: ScanChannels::All,
             scan_duration,
+            max_pan_descriptors,
         }
     }
 
     /// Create a new passive scan request for a single channel.
-    pub fn passive_single(channel: Channel, scan_duration: u8) -> Self {
+    pub fn passive_single(channel: Channel, scan_duration: u8, max_pan_descriptors: usize) -> Self {
         Self {
             scan_type: ScanType::Passive,
             scan_channels: ScanChannels::Single(channel),
             scan_duration,
+            max_pan_descriptors,
         }
     }
 }
@@ -156,6 +159,7 @@ pub(crate) struct ScanRequestTask<'task, RadioDriverImpl: DriverConfig> {
     /// Duration per channel in nanoseconds.
     duration_per_channel: NsDuration,
     results: ScanConfirm<MAX_PAN_DESCRIPTORS>,
+    max_pan_descriptors: usize,
     _task: PhantomData<&'task ()>,
     _radio: PhantomData<RadioDriverImpl>,
 }
@@ -166,10 +170,12 @@ impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImp
         //TODO: handle scan_duration exponent instead of arbitrary value
         let duration_per_channel = NsDuration::secs(4);
         let scan_type = request.scan_type;
+        let max_pan_descriptors = request.max_pan_descriptors;
         Self {
             state: ScanState::Initial(request),
             duration_per_channel,
             results: ScanConfirm::new(scan_type),
+            max_pan_descriptors,
             _task: PhantomData,
             _radio: PhantomData,
         }
@@ -187,6 +193,7 @@ where
         match self.state {
             ScanState::Initial(request) => {
                 debug_assert!(matches!(event, MacTaskEvent::Entry));
+                assert!(request.max_pan_descriptors <= MAX_PAN_DESCRIPTORS);
 
                 // TODO: support active and other types
                 let _scan_type = request.scan_type;
@@ -196,7 +203,10 @@ where
                 MacTaskTransition::SchedulerRequest(
                     self,
                     SchedulerRequest::Command(SchedulerCommand::ScanCommand(
-                        ScanCommand::StartScanning(request.scan_channels),
+                        ScanCommand::StartScanning(
+                            request.scan_channels,
+                            request.max_pan_descriptors,
+                        ),
                     )),
                     None,
                 )
@@ -222,14 +232,7 @@ where
                             timestamp,
                         )) => {
                             // A frame was received - check if it's a beacon
-                            self.process_received_frame(beacon_frame, timestamp);
-                            MacTaskTransition::SchedulerRequest(
-                                self,
-                                SchedulerRequest::Command(SchedulerCommand::ScanCommand(
-                                    ScanCommand::StopScanning,
-                                )),
-                                None,
-                            )
+                            self.process_received_frame(beacon_frame, timestamp)
                         }
                         SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
                             ScanCommandResult::StoppedScanning,
@@ -246,10 +249,10 @@ where
 impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImpl> {
     /// Process a received frame and extract beacon information if applicable.
     fn process_received_frame(
-        &mut self,
+        mut self,
         beacon_frame: RadioFrame<RadioFrameSized>,
         timestamp: NsInstant,
-    ) {
+    ) -> MacTaskTransition<Self> {
         // Convert to MPDU and check frame type
         let mpdu = MpduFrame::from_radio_frame(beacon_frame);
         let descriptor = PanDescriptor {
@@ -261,6 +264,15 @@ impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImp
         // Try to add to results (may fail if full)
         if !self.results.add_pan_descriptor(descriptor) {
             self.results.status = ScanStatus::LimitReached;
+        }
+        if self.results.pan_descriptor_list.len() == self.max_pan_descriptors {
+            MacTaskTransition::Terminated(self.results)
+        } else {
+            MacTaskTransition::SchedulerRequest(
+                self,
+                SchedulerRequest::Reception(ReceptionType::Beacon),
+                None,
+            )
         }
     }
 }

@@ -102,10 +102,17 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl>
                             response,
                         )
                     }
-                    SchedulerTaskCompletion::SwitchToScanning(channels) => {
-                        self.state = RootSchedulerState::ScanningChannels(ScanTask::new(channels));
+                    #[cfg(feature = "tsch")]
+                    SchedulerTaskCompletion::SwitchToScanning(channels, max_pan_descriptors) => {
+                        self.state = RootSchedulerState::ScanningChannels(ScanTask::new(
+                            channels,
+                            max_pan_descriptors,
+                        ));
                         SchedulerTaskTransition::Completed(
-                            SchedulerTaskCompletion::SwitchToScanning(channels),
+                            SchedulerTaskCompletion::SwitchToScanning(
+                                channels,
+                                max_pan_descriptors,
+                            ),
                             response,
                         )
                     }

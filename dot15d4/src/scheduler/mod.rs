@@ -8,6 +8,7 @@
 pub mod command;
 pub mod csma;
 mod runner;
+#[cfg(feature = "tsch")]
 pub mod scan;
 pub mod task;
 #[cfg(feature = "tsch")]
@@ -346,5 +347,5 @@ pub enum SchedulerTaskCompletion {
     #[cfg(feature = "tsch")]
     SwitchToTsch,
     #[cfg(feature = "tsch")]
-    SwitchToScanning(ScanChannels),
+    SwitchToScanning(ScanChannels, usize),
 }

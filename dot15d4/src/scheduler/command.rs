@@ -5,6 +5,7 @@
 
 use dot15d4_driver::radio::config::Channel;
 
+#[cfg(feature = "tsch")]
 use self::scan::{ScanCommand, ScanCommandResult};
 #[cfg(feature = "tsch")]
 use self::tsch::{TschCommand, TschCommandResult};
@@ -24,6 +25,7 @@ pub enum SchedulerCommand {
     /// PIB attribute command.
     PibCommand(PibCommand),
     /// Channel Scanning Command
+    #[cfg(feature = "tsch")]
     ScanCommand(ScanCommand),
 }
 
@@ -37,6 +39,7 @@ pub enum SchedulerCommandResult {
     /// Result of a PIB command.
     PibCommand(PibCommandResult),
     /// Result of a Scanning Command
+    #[cfg(feature = "tsch")]
     ScanCommand(ScanCommandResult),
 }
 
@@ -176,7 +179,7 @@ pub mod scan {
     /// TSCH-specific commands.
     pub enum ScanCommand {
         /// Start scanning channels
-        StartScanning(ScanChannels),
+        StartScanning(ScanChannels, usize),
         StopScanning,
     }
 
