@@ -8,7 +8,10 @@
 use core::mem;
 
 use dot15d4_driver::{
-    radio::{frame::FrameType, DriverConfig},
+    radio::{
+        frame::{Address, FrameType},
+        DriverConfig,
+    },
     timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
@@ -33,8 +36,6 @@ use crate::{
 };
 
 use super::task::{TschOperation, TschState, TschTask};
-#[cfg(feature = "tsch-coordinator")]
-use super::TschAsn;
 
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<RadioDriverImpl> {
     fn step(
@@ -43,7 +44,7 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match mem::replace(&mut self.state, TschState::Placeholder) {
-            TschState::Idle { next_deadline } => self.execute_idle(event, context),
+            TschState::Idle => self.execute_idle(event, context),
             TschState::WaitingForTxStart { response_token } => {
                 self.execute_waiting_for_tx_start(response_token, event, context)
             }
@@ -539,9 +540,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// timer action accordingly.
     fn go_idle(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> SchedulerAction {
         let deadline = self.peek_deadline(context);
-        self.state = TschState::Idle {
-            next_deadline: deadline,
-        };
+        self.state = TschState::Idle;
 
         SchedulerAction::WaitForTimeoutOrSchedulerRequest { deadline }
     }
