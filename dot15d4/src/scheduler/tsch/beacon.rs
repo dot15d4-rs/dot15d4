@@ -4,8 +4,8 @@ use core::marker::PhantomData;
 
 use dot15d4_driver::radio::{
     frame::{
-        Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
-        IeListRepr, IeRepr, IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameUnsized,
+        Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr, IeRepr,
+        IeReprList, PanIdCompressionRepr, RadioFrame, RadioFrameUnsized,
     },
     DriverConfig,
 };
@@ -15,7 +15,6 @@ use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
 use dot15d4_frame::MpduWithIes;
 use dot15d4_util::allocator::IntoBuffer;
 
-use super::pib::TschAsn;
 use crate::pib::Pib;
 
 /// Builder for Enhanced Beacon frames.
@@ -141,37 +140,6 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 timeslot_ie.set_timeslot_length(timings.timeslot_length());
             }
         }
-
-        Some(mpdu_writer.into_mpdu_frame())
-    }
-
-    /// Update the (already build) beacon frame with a new ASN before
-    /// transmission.
-    ///
-    /// # Arguments
-    ///
-    /// * `mpdu` - Previously built beacon MPDU
-    /// * `asn` - Current Absolute Slot Number to embed
-    ///
-    /// # Returns
-    ///
-    /// The updated MPDU frame, or `None` if update failed.
-    pub fn update_beacon(&self, mpdu: MpduFrame, asn: TschAsn) -> Option<MpduFrame> {
-        let buffer = mpdu.into_buffer();
-        // TODO: should not fail since compile-time repr but we may move to
-        // dynamic repr (i.e. runtime)
-        let mut mpdu_writer = self
-            .mpdu_repr
-            .into_writer::<RadioDriverImpl>(FrameVersion::Ieee802154, FrameType::Beacon, 0, buffer)
-            .ok()?;
-
-        let mut ies = mpdu_writer.ies_fields_mut();
-
-        // Update TSCH Synchronization IE with new ASN
-        let mut tsch_sync = ies.tsch_sync_mut()?;
-        tsch_sync.set_asn(asn);
-        //TODO: support join metric
-        tsch_sync.set_join_metric(0);
 
         Some(mpdu_writer.into_mpdu_frame())
     }

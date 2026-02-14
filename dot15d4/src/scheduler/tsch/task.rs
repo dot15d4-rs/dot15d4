@@ -2,21 +2,24 @@
 //!
 //! Defines the state machine for TSCH (Time Slotted Channel Hopping) operation.
 
-use core::cell::Cell;
+use core::{cell::Cell, marker::PhantomData};
 
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{RadioFrame, RadioFrameUnsized},
+        frame::{FrameType, RadioFrame, RadioFrameUnsized},
         DriverConfig,
     },
-    timer::{NsDuration, NsInstant},
+    timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::{fields::TschLinkOption, mpdu::MpduFrame};
 use dot15d4_util::sync::ResponseToken;
 use heapless::Vec;
 
-use crate::{constants::MAC_TSCH_MAX_PENDING_OPERATIONS, scheduler::SchedulerContext};
+use crate::{
+    constants::MAC_TSCH_MAX_PENDING_OPERATIONS,
+    scheduler::{tsch::TschLinkType, SchedulerContext},
+};
 
 use super::beacon::EnhancedBeaconBuilder;
 use super::pib::TschAsn;
@@ -34,14 +37,23 @@ pub enum TschOperation {
     TxSlot {
         mpdu: MpduFrame,
         asn: TschAsn,
+        slotframe_handle: u8,
         channel: Channel,
         cca: bool,
         response_token: ResponseToken,
     },
     /// Reception slot.
-    RxSlot { asn: TschAsn, channel: Channel },
+    RxSlot {
+        asn: TschAsn,
+        slotframe_handle: u8,
+        channel: Channel,
+    },
     /// Advertisement (beacon) slot - internally managed.
-    AdvertisementSlot { asn: TschAsn, channel: Channel },
+    AdvertisementSlot {
+        asn: TschAsn,
+        slotframe_handle: u8,
+        channel: Channel,
+    },
     /// No operation.
     Idle,
 }
@@ -57,9 +69,50 @@ impl TschOperation {
         }
     }
 
+    /// Get the slotframe handle for this operation.
+    pub fn slotframe_handle(&self) -> Option<u8> {
+        match self {
+            TschOperation::TxSlot {
+                slotframe_handle, ..
+            } => Some(*slotframe_handle),
+            TschOperation::RxSlot {
+                slotframe_handle, ..
+            } => Some(*slotframe_handle),
+            TschOperation::AdvertisementSlot {
+                slotframe_handle, ..
+            } => Some(*slotframe_handle),
+            TschOperation::Idle => None,
+        }
+    }
+
+    /// Check if this is a TX-type operation (TX or Advertisement).
+    pub fn is_tx(&self) -> bool {
+        matches!(
+            self,
+            TschOperation::TxSlot { .. } | TschOperation::AdvertisementSlot { .. }
+        )
+    }
+
     /// Check if this is an advertisement operation.
     pub fn is_advertisement(&self) -> bool {
         matches!(self, TschOperation::AdvertisementSlot { .. })
+    }
+}
+
+fn operation_wins_over(new_op: &TschOperation, existing: &TschOperation) -> bool {
+    let new_is_tx = new_op.is_tx();
+    let existing_is_tx = existing.is_tx();
+
+    if new_is_tx && !existing_is_tx {
+        return true; // TX > RX
+    }
+    if !new_is_tx && existing_is_tx {
+        return false; // RX < TX
+    }
+    // Same direction: lower slotframe handle wins.
+    match (new_op.slotframe_handle(), existing.slotframe_handle()) {
+        (Some(new_h), Some(ex_h)) => new_h < ex_h,
+        _ => false,
     }
 }
 
@@ -126,6 +179,38 @@ impl BeaconConfig {
     }
 }
 
+/// Update the TSCH Synchronization IE in an MpduFrame with the given ASN
+/// and join metric.
+///
+/// If the frame does not contain IEs or does not contain a TSCH
+/// Synchronization IE, the frame is returned unchanged.
+pub fn update_tsch_sync_ie<RadioDriverImpl: DriverConfig>(
+    mpdu: MpduFrame,
+    asn: TschAsn,
+    join_metric: u8,
+) -> MpduFrame {
+    if !mpdu.frame_control().information_elements_present() {
+        return mpdu;
+    }
+
+    let mut parser = mpdu
+        .into_parser()
+        .parse_addressing()
+        .expect("well-formed MPDU: addressing parse failed")
+        .parse_security()
+        .parse_ies::<RadioDriverImpl>()
+        .expect("well-formed MPDU: IE parse failed");
+
+    if let Some(mut ies) = parser.try_ies_fields_mut() {
+        if let Some(mut tsch_sync) = ies.tsch_sync_mut() {
+            tsch_sync.set_asn(asn);
+            tsch_sync.set_join_metric(join_metric);
+        }
+    }
+
+    parser.into_mpdu_frame()
+}
+
 /// Complete TSCH scheduler state.
 pub struct TschTask<RadioDriverImpl: DriverConfig> {
     /// Current operating state.
@@ -137,13 +222,18 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     /// Whether this device is coordinator.
     pub is_coordinator: bool,
     /// Beacon frame (for coordinator).
+    #[cfg(feature = "tsch-coordinator")]
     pub beacon_mpdu: Cell<Option<MpduFrame>>,
     /// Beacon builder.
+    #[cfg(feature = "tsch-coordinator")]
     pub beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
     /// Beacon configuration (period and enabled state).
     pub beacon_config: BeaconConfig,
     /// Timestamp of last beacon transmission.
+    #[cfg(feature = "tsch-coordinator")]
     pub last_beacon_time: Option<NsInstant>,
+    /// Marker for radio driver implementation
+    _marker: PhantomData<RadioDriverImpl>,
 }
 
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
@@ -157,10 +247,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             pending_operations: Vec::new(),
             rx_frame: Cell::new(Some(rx_frame)),
             is_coordinator: false,
+            #[cfg(feature = "tsch-coordinator")]
             beacon_mpdu: Cell::new(None),
+            #[cfg(feature = "tsch-coordinator")]
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
+            #[cfg(feature = "tsch-coordinator")]
             last_beacon_time: None,
+            _marker: PhantomData,
         }
     }
 
@@ -168,8 +262,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn init_device(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
-        self.last_beacon_time = None;
+        #[cfg(feature = "tsch-coordinator")]
+        {
+            self.last_beacon_time = None;
+        }
         self.state = TschState::Idle;
+
+        let current_time = context.timer.now();
+        let current_asn = context.pib.tsch.asn_at(current_time);
+
+        if !self.queue_next_rx(current_asn, context) {
             // TODO: no rx slot available, fallback to CSMA ?
         }
     }
@@ -181,19 +283,61 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Push an operation to the queue, maintaining ASN order.
     /// Operations are stored with earliest ASN at the end (for efficient pop).
-    pub fn push_operation(&mut self, op: TschOperation) -> Result<(), TschOperation> {
+    pub fn push_operation(
+        &mut self,
+        op: TschOperation,
+    ) -> Result<Option<TschOperation>, TschOperation> {
         if let Some(op_asn) = op.asn() {
-            // Find insertion point to maintain descending order (earliest last)
-            let insert_pos = self
+            // Check if there is already an operation at the same ASN.
+            if let Some(conflict_idx) = self
                 .pending_operations
                 .iter()
-                .position(|existing| existing.asn().map(|a| a <= op_asn).unwrap_or(true))
-                .unwrap_or(self.pending_operations.len());
+                .position(|existing| existing.asn() == Some(op_asn))
+            {
+                if operation_wins_over(&op, &self.pending_operations[conflict_idx]) {
+                    // Replace the lower-priority operation and return it.
+                    let displaced =
+                        core::mem::replace(&mut self.pending_operations[conflict_idx], op);
+                    self.sort_pending();
 
-            // TODO: implement proper sorted insert
-            self.pending_operations.push(op)
+                    return Ok(Some(displaced));
+                } else {
+                    // Existing operation has equal or higher priority; reject.
+                    return Err(op);
+                }
+            }
+
+            // No conflict, sorted insert maintaining descending ASN order
+            // (earliest ASN at the end for efficient pop).
+            if self.pending_operations.is_full() {
+                return Err(op);
+            }
+
+            // Push to end then re-sort.
+            let _res = self.pending_operations.push(op);
+            self.sort_pending();
+            Ok(None)
         } else {
             Err(op)
+        }
+    }
+
+    /// Sort pending operations in descending ASN order (earliest last for pop).
+    fn sort_pending(&mut self) {
+        // Simple insertion sort, the list is small (MAC_TSCH_MAX_PENDING_OPERATIONS).
+        let len = self.pending_operations.len();
+        for i in 1..len {
+            let mut j = i;
+            while j > 0 {
+                let a_asn = self.pending_operations[j - 1].asn().unwrap_or(0);
+                let b_asn = self.pending_operations[j].asn().unwrap_or(0);
+                if b_asn > a_asn {
+                    self.pending_operations.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -246,39 +390,149 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.rx_frame.get_mut()
     }
 
-    pub fn schedule_next_rx(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> bool {
-        use dot15d4_driver::timer::RadioTimerApi;
-
-        let current_time = context.timer.now();
-        let current_asn = context.pib.tsch.asn_at(current_time);
-
-        // Find an advertising link
-        let link = match context
+    /// Select the next RX link across all slotframes.
+    pub fn next_rx_operation(
+        &self,
+        current_asn: TschAsn,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> Option<TschOperation> {
+        match context
             .pib
             .tsch
-            .links()
-            .find(|l| l.link_options.contains(TschLinkOption::Rx))
+            .select_next_link(current_asn, |l| l.link_options.contains(TschLinkOption::Rx))
         {
-            Some(l) => l,
-            None => return false,
+            Some((link, asn)) => {
+                // Calculate channel
+                let channel =
+                    context
+                        .pib
+                        .tsch
+                        .channel_for_link(asn, link, &context.pib.hopping_sequence);
+                let slotframe_handle = link.slotframe_handle;
+                Some(TschOperation::RxSlot {
+                    asn,
+                    channel,
+                    slotframe_handle,
+                })
+            }
+            None => None,
+        }
+    }
+
+    pub fn next_tx_operation(
+        &self,
+        current_asn: TschAsn,
+        mpdu: MpduFrame,
+        response_token: ResponseToken,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> Option<TschOperation> {
+        match context.pib.tsch.select_next_link(current_asn, |l| {
+            matches!(l.link_type, TschLinkType::Advertising)
+                && l.link_options.contains(TschLinkOption::Shared)
+        }) {
+            Some((link, asn)) => {
+                // Calculate channel
+                let channel =
+                    context
+                        .pib
+                        .tsch
+                        .channel_for_link(asn, link, &context.pib.hopping_sequence);
+                let slotframe_handle = link.slotframe_handle;
+                Some(TschOperation::TxSlot {
+                    mpdu,
+                    asn,
+                    slotframe_handle,
+                    channel,
+                    cca: false, // TODO
+                    response_token,
+                })
+            }
+            None => None,
+        }
+    }
+
+    pub fn next_advertising_operation(
+        &self,
+        current_asn: TschAsn,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> Option<TschOperation> {
+        match context.pib.tsch.select_next_link(current_asn, |l| {
+            matches!(l.link_type, TschLinkType::Advertising)
+                && l.link_options.contains(TschLinkOption::Shared)
+        }) {
+            Some((link, asn)) => {
+                // Calculate channel
+                let channel =
+                    context
+                        .pib
+                        .tsch
+                        .channel_for_link(asn, link, &context.pib.hopping_sequence);
+                let slotframe_handle = link.slotframe_handle;
+                Some(TschOperation::AdvertisementSlot {
+                    asn,
+                    channel,
+                    slotframe_handle,
+                })
+            }
+            None => None,
+        }
+    }
+
+    fn reschedule_operation(
+        &mut self,
+        operation: TschOperation,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> bool {
+        match operation {
+            TschOperation::TxSlot {
+                mpdu,
+                asn,
+                response_token,
+                ..
+            } => self.queue_tx(response_token, mpdu, asn, context),
+            TschOperation::RxSlot { asn, .. } => self.queue_next_rx(asn, context),
+            #[cfg(feature = "tsch-coordinator")]
+            TschOperation::AdvertisementSlot { .. } => self.queue_next_beacon(context),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn queue_next_rx(
+        &mut self,
+        from_asn: TschAsn,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> bool {
+        match self.next_rx_operation(from_asn, context) {
+            Some(op) => match self.push_operation(op) {
+                Ok(None) => true,
+                Ok(Some(op)) => self.reschedule_operation(op, context),
+                Err(op) => self.reschedule_operation(op, context),
+            },
+            None => false,
+        }
+    }
+
+    pub fn queue_tx(
+        &mut self,
+        token: ResponseToken,
+        mpdu: MpduFrame,
+        from_asn: TschAsn,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> bool {
+        // Find appropriate link based on frame type
+        let operation = match mpdu.frame_control().frame_type() {
+            FrameType::Beacon => self.next_advertising_operation(from_asn, context),
+            _ => self.next_tx_operation(from_asn, mpdu, token, context),
         };
 
-        // Calculate next ASN for this link
-        let asn = match context.pib.tsch.next_asn_for_link(link, current_asn) {
-            Some(asn) => asn,
-            None => return false,
-        };
-
-        // Calculate channel
-        let channel = context
-            .pib
-            .tsch
-            .channel_for_link(asn, link, &context.pib.hopping_sequence);
-
-        // Create and queue the operation
-        let op = TschOperation::RxSlot { asn, channel };
-
-        self.push_operation(op).is_ok()
+        match operation {
+            Some(op) => match self.push_operation(op) {
+                Ok(None) => true,
+                Ok(Some(op)) => self.reschedule_operation(op, context),
+                Err(op) => self.reschedule_operation(op, context),
+            },
+            None => false,
+        }
     }
 }
 
@@ -302,7 +556,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.last_beacon_time = None;
         self.state = TschState::Idle;
         self.init_beacon_frame(context);
-        self.schedule_next_beacon(context);
+        self.queue_next_beacon(context);
+
+        let current_time = context.timer.now();
+        let current_asn = context.pib.tsch.asn_at(current_time);
+        self.queue_next_rx(current_asn, context);
     }
 
     fn init_beacon_frame(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
@@ -356,10 +614,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Schedule the next beacon advertisement.
     #[cfg(feature = "tsch-coordinator")]
-    pub fn schedule_next_beacon(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> bool {
+    pub fn queue_next_beacon(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> bool {
         use dot15d4_driver::timer::RadioTimerApi;
-
-        use crate::scheduler::tsch::TschLinkType;
 
         if !self.is_coordinator || !self.beacon_config.enabled {
             return false;
@@ -379,35 +635,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
         let search_from_asn = core::cmp::max(current_asn, min_asn);
 
-        // Find an advertising link
-        let link = match context.pib.tsch.links().find(|l| {
-            matches!(l.link_type, TschLinkType::Advertising)
-                && l.link_options.contains(TschLinkOption::Shared)
-        }) {
-            Some(l) => l,
-            None => return false,
-        };
-
-        // Calculate next ASN for this link
-        let next_asn = match context.pib.tsch.next_asn_for_link(link, search_from_asn) {
-            Some(asn) => asn,
-            None => return false,
-        };
-
-        // Calculate channel
-        let channel =
-            context
-                .pib
-                .tsch
-                .channel_for_link(next_asn, link, &context.pib.hopping_sequence);
-
-        // Create and queue the operation
-        let op = TschOperation::AdvertisementSlot {
-            asn: next_asn,
-            channel,
-        };
-
-        self.push_operation(op).is_ok()
+        match self.next_advertising_operation(search_from_asn, context) {
+            Some(op) => match self.push_operation(op) {
+                Ok(None) => true,
+                Ok(Some(op)) => self.reschedule_operation(op, context),
+                Err(op) => self.reschedule_operation(op, context),
+            },
+            None => false,
+        }
     }
 
     /// Mark beacon as sent and record the time.

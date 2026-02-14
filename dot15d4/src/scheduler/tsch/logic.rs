@@ -5,7 +5,7 @@
 //! The scheduler wakes up slightly before each timeslot (guard time)
 //! to prepare for the operation.
 
-use core::mem;
+use core::{mem, time::Duration};
 
 use dot15d4_driver::{
     radio::{
@@ -46,7 +46,7 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
         match mem::replace(&mut self.state, TschState::Placeholder) {
             TschState::Idle => self.execute_idle(event, context),
             TschState::WaitingForTxStart { response_token } => {
-                self.execute_waiting_for_tx_start(response_token, event, context)
+                self.execute_waiting_for_tx_start(response_token, event)
             }
             TschState::Transmitting { response_token } => {
                 self.execute_transmitting(response_token, event, context)
@@ -76,9 +76,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::Entry => {
+                // Sort links by (slotframe_handle, timeslot)
+                // so that link selection can rely on iteration
+                // order for priority rules.
+                context.pib.tsch.sort_links();
+
                 #[cfg(feature = "tsch-coordinator")]
                 {
-                    self.init_coordinator(context, Some(3));
+                    if context.pib.coord_extended_address.is_broadcast() {
+                        self.init_coordinator(context, Some(9));
+                    } else {
+                        self.init_device(context);
+                    }
                 }
                 #[cfg(not(feature = "tsch-coordinator"))]
                 {
@@ -115,7 +124,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         &mut self,
         response_token: Option<ResponseToken>,
         event: SchedulerTaskEvent,
-        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(instant)) => {
@@ -152,7 +160,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                         // Record beacon transmission time for period calculation
                         self.on_beacon_sent(instant);
-                        self.schedule_next_beacon(context);
+                        self.queue_next_beacon(context);
                     }
                     // Return to idle - next beacon will be scheduled automatically
                     // in get_initial_action when the period expires
@@ -182,6 +190,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
+        let current_asn = context.pib.tsch.asn;
+        self.queue_next_rx(current_asn, context);
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
                 self.state = TschState::Receiving;
@@ -190,7 +200,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(rx_frame)) => {
                 // No frame received in this slot
                 self.put_rx_frame(rx_frame);
-                self.schedule_next_rx(context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
             _ => unreachable!(),
@@ -203,12 +212,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        self.schedule_next_rx(context);
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, rx_instant)) => {
                 let action = self.go_idle(context);
 
-                match utils::process_rx_frame(rx_frame, instant, context) {
+                match utils::process_rx_frame(rx_frame, rx_instant, context) {
                     Ok((response, token)) => {
                         // Allocate new frame for next RX
                         self.put_rx_frame(context.allocate_frame());
@@ -247,44 +255,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         &mut self,
         token: ResponseToken,
         mpdu: MpduFrame,
-        context: &SchedulerContext<RadioDriverImpl>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         let current_time = context.timer.now();
-        // Get current ASN
         let current_asn = context.pib.tsch.asn_at(current_time);
 
-        // Find appropriate link based on frame type
-        let link = match mpdu.frame_control().frame_type() {
-            FrameType::Beacon => context.pib.tsch.next_advertisement_link(current_asn),
-            // TODO: For now, use first available link
-            _ => context.pib.tsch.links().next(),
-        };
-
-        if let Some(link) = link {
-            // Calculate next ASN for this link
-            if let Some(next_asn) = context.pib.tsch.next_asn_for_link(link, current_asn) {
-                // Calculate channel
-                let channel = context.pib.tsch.channel_for_link(
-                    next_asn,
-                    link,
-                    &context.pib.hopping_sequence,
-                );
-
-                // Create and queue the operation
-                let operation = TschOperation::TxSlot {
-                    mpdu,
-                    asn: next_asn,
-                    channel,
-                    cca: false, // TSCH typically doesn't use CCA
-                    response_token: token,
-                };
-
-                let _ = self.push_operation(operation);
-
-                SchedulerTaskTransition::Execute(self.go_idle(context), None)
-            } else {
-                todo!()
-            }
+        if self.queue_tx(token, mpdu, current_asn, context) {
+            SchedulerTaskTransition::Execute(self.go_idle(context), None)
         } else {
             todo!()
         }
@@ -416,12 +393,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 channel,
                 cca,
                 response_token,
+                ..
             } => {
                 self.state = TschState::WaitingForTxStart {
                     response_token: Some(response_token),
                 };
 
                 context.pib.tsch.update_timing(asn);
+
+                // Update TSCH Synchronization IE with current ASN and join metric
+                let join_metric = context.pib.tsch.join_metric as u8;
+                let mpdu =
+                    super::task::update_tsch_sync_ie::<RadioDriverImpl>(mpdu, asn, join_metric);
 
                 // Calculate TX start time: timeslot start + macTsTxOffset
                 // TODO: from method, remove inline calculation
@@ -454,7 +437,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
-            TschOperation::RxSlot { asn, channel } => {
+            TschOperation::RxSlot { asn, channel, .. } => {
                 context.pib.tsch.update_timing(asn);
                 let frame = self.take_rx_frame().expect("no rx_frame for TSCH RX slot");
 
@@ -463,13 +446,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // Calculate RX start time: timeslot start + macTsRxOffset
                 // TODO: remove inline calculation
                 let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
-                let rx_instant = context.pib.tsch.last_base_time + NsDuration::micros(rx_offset_us);
+                let rx_wait_us = context.pib.tsch.timeslot_timings.rx_wait() as u64;
+                let rx_instant = context.pib.tsch.last_base_time; // + NsDuration::micros(rx_offset_us);
+                                                                  // let max_rx_start = rx_instant + NsDuration::millis(rx_wait_us);
+                let max_rx_start = rx_instant + NsDuration::micros(10000);
 
                 let request = DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
                     start: Timestamp::Scheduled(rx_instant),
                     radio_frame: frame,
                     channel: Some(channel),
-                    rx_window: None,
+                    rx_window: Some(max_rx_start),
                 });
 
                 SchedulerTaskTransition::Execute(
@@ -492,7 +478,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pop_operation() {
-            TschOperation::AdvertisementSlot { asn, channel } => {
+            TschOperation::AdvertisementSlot { asn, channel, .. } => {
                 context.pib.tsch.update_timing(asn);
                 // Take beacon frame and update ASN
                 let beacon_frame = self
@@ -500,10 +486,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     .take()
                     .expect("no beacon frame for advertisement");
 
-                let updated_frame = self
-                    .beacon_builder
-                    .update_beacon(beacon_frame, asn)
-                    .expect("failed to update beacon ASN");
+                let join_metric = context.pib.tsch.join_metric as u8;
+                let updated_frame = super::task::update_tsch_sync_ie::<RadioDriverImpl>(
+                    beacon_frame,
+                    asn,
+                    join_metric,
+                );
 
                 self.state = TschState::WaitingForTxStart {
                     response_token: None,
