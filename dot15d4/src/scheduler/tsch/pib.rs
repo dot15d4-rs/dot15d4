@@ -225,33 +225,85 @@ impl<Neighbor> TschPib<Neighbor> {
         }
     }
 
-    /// Find the next advertisement link after the given ASN.
-    pub fn next_advertisement_link(&self, _current_asn: TschAsn) -> Option<&TschLink<Neighbor>> {
-        // For now, return the first advertising link
-        self.links
-            .iter()
-            .find(|l| matches!(l.link_type, TschLinkType::Advertising))
-            .or_else(|| self.links.first())
+    /// Sort links by (slotframe_handle, timeslot) for efficient iteration
+    /// during link selection. Lower slotframe handles are processed first,
+    /// which naturally respects IEEE 802.15.4-2024 priority rules.
+    pub fn sort_links(&mut self) {
+        let len = self.links.len();
+        for i in 1..len {
+            let mut j = i;
+            while j > 0 {
+                let should_swap = {
+                    let a = &self.links[j - 1];
+                    let b = &self.links[j];
+                    (a.slotframe_handle, a.timeslot) > (b.slotframe_handle, b.timeslot)
+                };
+                if should_swap {
+                    self.links.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
-    /// Find links matching the given options.
-    pub fn find_links_with_options(
+    /// Select the next valid link across all slotframes that matches the given
+    /// criteria, returning the link with the smallest next ASN strictly after
+    /// `current_asn`.
+    ///
+    /// When multiple links resolve to the same ASN (from different slotframes),
+    /// the IEEE 802.15.4-2024 priority rules apply:
+    /// - Lower macSlotframeHandle takes precedence over higher handle.
+    ///
+    /// TX vs RX precedence is handled at the task level since this method
+    /// operates on a single filter (TX-only or RX-only).
+    pub fn select_next_link(
         &self,
-        options: TschLinkOption,
-    ) -> impl Iterator<Item = &TschLink<Neighbor>> {
-        self.links
-            .iter()
-            .filter(move |l| l.link_options.contains(options))
-    }
-
-    /// Calculate the next ASN for a given link.
-    pub fn next_asn_for_link(
-        &self,
-        link: &TschLink<Neighbor>,
         current_asn: TschAsn,
-    ) -> Option<TschAsn> {
-        self.get_slotframe(link.slotframe_handle)
-            .map(|sf| sf.next_asn_for_link(link, current_asn))
+        filter: impl Fn(&TschLink<Neighbor>) -> bool,
+    ) -> Option<(&TschLink<Neighbor>, TschAsn)> {
+        let mut best: Option<(&TschLink<Neighbor>, u64)> = None;
+
+        for (idx, link) in self.links.iter().enumerate() {
+            if !filter(link) {
+                continue;
+            }
+
+            let slotframe = match self.get_slotframe(link.slotframe_handle) {
+                Some(sf) => sf,
+                None => continue,
+            };
+
+            let next_asn = slotframe.next_asn_for_link(link, current_asn);
+
+            // Skip if the computed ASN is not strictly in the future.
+            if next_asn <= current_asn {
+                continue;
+            }
+
+            let is_better = match best {
+                None => true,
+                Some((best_link, best_asn)) => {
+                    if next_asn < best_asn {
+                        true
+                    } else if next_asn == best_asn {
+                        // Tie-break per IEEE 802.15.4-2024:
+                        // lower slotframe handle takes precedence.
+                        let best_handle = best_link.slotframe_handle;
+                        link.slotframe_handle < best_handle
+                    } else {
+                        false
+                    }
+                }
+            };
+
+            if is_better {
+                best = Some((link, next_asn));
+            }
+        }
+
+        best
     }
 
     /// Calculate the channel for a given ASN and link.
