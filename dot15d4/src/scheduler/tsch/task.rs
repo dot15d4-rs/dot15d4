@@ -67,7 +67,7 @@ impl TschOperation {
 #[derive(Debug)]
 pub enum TschState {
     /// Idle - waiting for next deadline or scheduler request.
-    Idle { next_deadline: NsInstant },
+    Idle,
     /// TX slot - driver request sent, waiting for TxStarted.
     WaitingForTxStart {
         response_token: Option<ResponseToken>,
@@ -153,9 +153,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn new(context: &mut SchedulerContext<RadioDriverImpl>) -> Self {
         let rx_frame = context.allocate_frame();
         Self {
-            state: TschState::Idle {
-                next_deadline: INFINITE_DEADLINE,
-            },
+            state: TschState::Idle,
             pending_operations: Vec::new(),
             rx_frame: Cell::new(Some(rx_frame)),
             is_coordinator: false,
@@ -167,14 +165,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     }
 
     /// Initialize as device with observed ASN and timestamp.
-    pub fn init_device(&mut self, context: &SchedulerContext<RadioDriverImpl>) {
+    pub fn init_device(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
         self.last_beacon_time = None;
-        self.state = TschState::Idle {
-            next_deadline: INFINITE_DEADLINE,
-        };
-        if !self.schedule_next_rx(context) {
+        self.state = TschState::Idle;
             // TODO: no rx slot available, fallback to CSMA ?
         }
     }
@@ -223,15 +218,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Check if in idle state.
     pub fn is_idle(&self) -> bool {
-        matches!(self.state, TschState::Idle { .. })
-    }
-
-    /// Get the current deadline if idle.
-    pub fn idle_deadline(&self) -> Option<NsInstant> {
-        match self.state {
-            TschState::Idle { next_deadline } => Some(next_deadline),
-            _ => None,
-        }
+        matches!(self.state, TschState::Idle)
     }
 
     /// Check if there are pending operations.
@@ -313,9 +300,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             BeaconConfig::disabled()
         };
         self.last_beacon_time = None;
-        self.state = TschState::Idle {
-            next_deadline: INFINITE_DEADLINE,
-        };
+        self.state = TschState::Idle;
         self.init_beacon_frame(context);
         self.schedule_next_beacon(context);
     }
