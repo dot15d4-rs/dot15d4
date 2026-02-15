@@ -14,13 +14,13 @@ use dot15d4::{
         radio::{
             frame::{
                 Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
-                PanId,
+                IeListRepr, IeRepr, IeReprList, PanId, PanIdCompressionRepr,
             },
             tasks::{RadioDriverApi, TaskOff},
             RadioDriver,
         },
         socs::nrf::{NrfRadioDriver, NrfRadioSleepTimer},
-        timer::RadioTimerApi,
+        timer::{NsDuration, RadioTimerApi},
         DriverEventChannel, DriverEventReceiver, DriverEventSender, DriverRequestChannel,
         DriverRequestReceiver, DriverRequestSender, DriverService,
     },
@@ -29,6 +29,7 @@ use dot15d4::{
             repr::{MpduRepr, SeqNrRepr},
             MpduWithIes,
         },
+        mlme::get::{GetRequest, GetRequestAttribute},
         primitives::{DataRequest, MacRequest},
         MacBufferAllocator, MacIndicationChannel, MacIndicationReceiver, MacIndicationSender,
         MacRequestChannel, MacRequestReceiver, MacRequestSender, MacService, MAC_BUFFER_SIZE,
@@ -58,7 +59,6 @@ const SERVER_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new
 const CLIENT_MAC_ADDR: Address<[u8; 8]> = Address::Extended(ExtendedAddress::new_owned([
     0xD2, 0x04, 0xE3, 0x27, 0x74, 0x01, 0xEB, 0x74,
 ]));
-pub const MAC_PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0xEF, 0xBE]); // PAN Id
 
 //
 static MAC_REQUEST_CHANNEL: StaticCell<MacRequestChannel> = StaticCell::new();
@@ -291,7 +291,7 @@ async fn join_network_from_scan(
     request_sender: &MacRequestSender<'static>,
     scan_confirm: ScanConfirm,
     buffer_allocator: MacBufferAllocator,
-) {
+) -> Option<(u16, [u8; 8])> {
     let mut best_candidate = None;
     for descriptor in scan_confirm.pan_descriptor_list {
         let timestamp = descriptor.timestamp;
@@ -321,7 +321,9 @@ async fn join_network_from_scan(
     }
 
     if let Some((_, mpdu_parser, timestamp)) = best_candidate {
-        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator).await;
+        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator).await
+    } else {
+        None
     }
 }
 
@@ -331,7 +333,7 @@ async fn join_network_from_beacon(
     mpdu_parser: MpduParser<MpduFrame, MpduWithAllFields>,
     rx_timestamp: NsInstant,
     buffer_allocator: MacBufferAllocator,
-) {
+) -> Option<(u16, [u8; 8])> {
     use dot15d4::{
         mac::{
             frame::fields::TschLinkOption,
@@ -360,6 +362,11 @@ async fn join_network_from_beacon(
                 size: slotframe.size(),                // Size of the sloframe in timeslots
                 advertise: true, // The slotframe will be advertised in Enhanced Beacons
             });
+            info!(
+                "Add Slotframe #{} with size {} :",
+                (slotframe.handle()),
+                (slotframe.size())
+            );
             request_sender
                 .send_request_awaiting_response(request_token, mac_request)
                 .await;
@@ -374,6 +381,12 @@ async fn join_network_from_beacon(
                     neighbor: None,
                     advertise: true,
                 });
+                info!(
+                    " * Add Link at timeslot={}, channel_offset={} with options {:b}",
+                    (link.timeslot()),
+                    (link.channel_offset()),
+                    (link.options())
+                );
                 request_sender
                     .send_request_awaiting_response(request_token, mac_request)
                     .await;
@@ -389,6 +402,7 @@ async fn join_network_from_beacon(
         request_sender
             .send_request_awaiting_response(request_token, mac_request)
             .await;
+        info!("ASN:{} rx_timestamp:{}", asn, (rx_timestamp.ticks()));
 
         // TODO: join metric
 
@@ -402,13 +416,27 @@ async fn join_network_from_beacon(
             .send_request_awaiting_response(request_token, mac_request)
             .await;
 
+        let addressing = mpdu_parser.try_addressing_fields().unwrap();
+        let pan_id = addressing.try_dst_pan_id().unwrap().into_u16();
+        let src_address = addressing.try_src_address().unwrap();
+        let src_address = match src_address {
+            Address::Extended(extended_address) => extended_address,
+            _ => unreachable!(),
+        };
+        let mut coord_address = [0u8; 8];
+        coord_address.copy_from_slice(src_address.as_ref());
+
         unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
         info!("Synchronized to TSCH PAN");
+
+        Some((pan_id, coord_address))
+    } else {
+        None
     }
 }
 
 #[cfg(feature = "tsch")]
-async fn scan(request_sender: &MacRequestSender<'static>, buffer_allocator: MacBufferAllocator) {
+async fn scan(request_sender: &MacRequestSender<'static>) -> ScanConfirm {
     use dot15d4::driver::radio::config::Channel;
     use dot15d4::mac::primitives::{
         MacConfirm, MacRequest, ScanRequest, ScanType, TschModeRequest,
@@ -421,33 +449,42 @@ async fn scan(request_sender: &MacRequestSender<'static>, buffer_allocator: MacB
         scan_type: ScanType::Passive,
         scan_channels: ScanChannels::Single(Channel::_26),
         scan_duration: 12,
+        max_pan_descriptors: 1,
     });
     let response = request_sender
         .send_request_awaiting_response(request_token, mac_request)
         .await;
     info!("Scanned Channels");
     match response {
-        MacConfirm::MlmeScan(scan_confirm) => {
-            join_network_from_scan(request_sender, scan_confirm, buffer_allocator).await
-        }
+        MacConfirm::MlmeScan(scan_confirm) => scan_confirm,
         _ => unreachable!(),
     }
 }
 
 #[cfg(feature = "tsch")]
-async fn associate(request_sender: &MacRequestSender<'static>) {
+async fn associate(
+    request_sender: &MacRequestSender<'static>,
+    pan_id: u16,
+    coord_address: [u8; 8],
+) {
     use dot15d4::mac::frame::mpdu::{AssociationStatus, CapabilityInformation};
     use dot15d4::mac::{
         mlme::set::{SetRequest, SetRequestAttribute},
         primitives::{AssociateConfirm, AssociateRequest, MacConfirm, MacRequest},
     };
+    let request_token = request_sender.allocate_request_token().await;
+    let mac_request = MacRequest::MlmeSet(SetRequest::new(
+        SetRequestAttribute::MacCoordExtendedAddress(coord_address),
+    ));
+
+    let confirm = request_sender
+        .send_request_awaiting_response(request_token, mac_request)
+        .await;
 
     let request_token = request_sender.allocate_request_token().await;
     let mac_request = MacRequest::MlmeAssociate(AssociateRequest::new(
-        // Coordinator extended address (the SENDER node).
-        [0xfe, 0xd6, 0x1f, 0xaf, 0x7d, 0x5a, 0x36, 0xfc],
-        // PAN ID.
-        0xBEEF,
+        coord_address,
+        pan_id,
         CapabilityInformation::default(),
     ));
     let response = request_sender
@@ -474,7 +511,7 @@ async fn associate(request_sender: &MacRequestSender<'static>) {
                     .await;
                 info!("Short address configured");
             } else {
-                info!("Association failed: {:?}", status);
+                info!("Association failed");
             }
         }
         MacConfirm::MlmeAssociate(AssociateConfirm::NoAck) => {
@@ -496,17 +533,55 @@ async fn upper_layer_task(
     info!("Start as client");
 
     let is_sender = !option_env!("SENDER").unwrap_or("").is_empty();
+    let is_coord = !option_env!("COORDINATOR").unwrap_or("").is_empty();
 
     #[cfg(feature = "tsch")]
-    if is_sender {
+    if is_coord {
         start_tsch(&request_sender, timer).await;
     } else {
-        scan(&request_sender, buffer_allocator).await;
+        let scan_confirm = scan(&request_sender).await;
+
+        if let Some((pan_id, coord_address)) =
+            join_network_from_scan(&request_sender, scan_confirm, buffer_allocator).await
+        {
+            associate(&request_sender, pan_id, coord_address).await;
+        }
     }
 
-    #[cfg(not(feature = "tsch"))]
     if is_sender {
         use dot15d4::driver::radio::phy::{OQpsk250KBit, Phy, PhyConfig};
+
+        let dst_addr = {
+            let request_token = request_sender.allocate_request_token().await;
+            let mac_request = MacRequest::MlmeGet(GetRequest::new(
+                GetRequestAttribute::MacCoordExtendedAddress,
+            ));
+            let confirm = request_sender
+                .send_request_awaiting_response(request_token, mac_request)
+                .await;
+            match confirm {
+                dot15d4::mac::primitives::MacConfirm::MlmeGet(
+                    dot15d4::mac::mlme::get::GetConfirm::MacCoordExtendedAddress(addr),
+                ) => addr,
+                _ => unreachable!(),
+            }
+        };
+        let src_addr = {
+            let request_token = request_sender.allocate_request_token().await;
+            let mac_request =
+                MacRequest::MlmeGet(GetRequest::new(GetRequestAttribute::MacExtendedAddress));
+
+            let confirm = request_sender
+                .send_request_awaiting_response(request_token, mac_request)
+                .await;
+
+            match confirm {
+                dot15d4::mac::primitives::MacConfirm::MlmeGet(
+                    dot15d4::mac::mlme::get::GetConfirm::MacExtendedAddress(addr),
+                ) => addr,
+                _ => unreachable!(),
+            }
+        };
 
         const BUFFER_SIZE: usize = <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize;
         let payload = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -515,7 +590,7 @@ async fn upper_layer_task(
         let mut nb_sent = 0;
         loop {
             let buffer = buffer_allocator.try_allocate_buffer(BUFFER_SIZE).unwrap();
-            let data_request = data_request(buffer, seq_nr, &payload);
+            let data_request = data_request(buffer, seq_nr, &src_addr, &dst_addr, &payload);
 
             let request_token = request_sender.allocate_request_token().await;
 
@@ -524,15 +599,20 @@ async fn upper_layer_task(
                 .await;
             nb_sent += 1;
 
-            let timestamp = mac_confirm.timestamp.unwrap().ticks();
-            info!("Tx Timestamp: {}", timestamp);
-            unsafe {
-                timer
-                    .wait_until(instant + nb_sent * NsDuration::millis(10))
-                    .await
-                    .unwrap()
-            };
-            seq_nr += 1;
+            match mac_confirm {
+                dot15d4::mac::primitives::MacConfirm::McpsData(timestamp) => {
+                    let timestamp = timestamp.unwrap().ticks();
+                    info!("Tx Timestamp: {}", timestamp);
+                    unsafe {
+                        timer
+                            .wait_until(instant + nb_sent * NsDuration::millis(2000))
+                            .await
+                            .unwrap()
+                    };
+                    seq_nr += 1;
+                }
+                _ => unreachable!(),
+            }
         }
     }
     let mut consumer_token = mac_indication_receiver
@@ -555,16 +635,26 @@ async fn upper_layer_task(
     }
 }
 
-fn data_request(buffer: BufferToken, seq_nr: u8, payload: &[u8]) -> MacRequest {
+fn data_request(
+    buffer: BufferToken,
+    seq_nr: u8,
+    src_addr: &Address<[u8; 8]>,
+    dst_addr: &Address<[u8; 8]>,
+    payload: &[u8],
+) -> MacRequest {
+    static IES: [IeRepr; 1] = [IeRepr::TschSynchronizationNestedIe];
+    static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
+    static IE_LIST: IeListRepr<'static> = IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
     const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
         .with_frame_control(SeqNrRepr::Yes)
-        .with_addressing(AddressingRepr::new_legacy_addressing(
+        .with_addressing(AddressingRepr::new(
             AddressingMode::Extended,
             AddressingMode::Extended,
             true,
+            PanIdCompressionRepr::Yes,
         ))
         .without_security()
-        .without_ies();
+        .with_ies(IE_LIST);
 
     let mut mpdu_writer = MPDU_REPR
         .into_writer::<NrfRadioDriver>(
@@ -579,9 +669,8 @@ fn data_request(buffer: BufferToken, seq_nr: u8, payload: &[u8]) -> MacRequest {
     mpdu_writer.set_ack_request(true);
 
     let mut addressing = mpdu_writer.addressing_fields_mut();
-    // addressing.dst_pan_id_mut().set(&MAC_PAN_ID);
-    addressing.src_address_mut().set(&SERVER_MAC_ADDR);
-    addressing.dst_address_mut().set(&CLIENT_MAC_ADDR);
+    addressing.src_address_mut().set(src_addr);
+    addressing.dst_address_mut().set(dst_addr);
 
     mpdu_writer.frame_payload_mut().copy_from_slice(payload);
 
