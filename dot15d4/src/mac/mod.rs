@@ -2,6 +2,7 @@ mod mcps;
 pub mod mlme;
 pub mod neighbors;
 pub mod primitives;
+pub mod procedures;
 mod task;
 
 use dot15d4_driver::timer::NsInstant;
