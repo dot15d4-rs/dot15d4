@@ -350,6 +350,17 @@ impl<Neighbor> TschPib<Neighbor> {
         self.last_base_time = instant - NsDuration::micros(tx_offset_us);
     }
 
+    /// Acknowledgment-based synchronization.
+    pub fn sync_ack(&mut self, timesync_us: i16) {
+        let asn = self.asn;
+        if timesync_us < 0 {
+            self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
+        } else {
+            self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
+        }
+        self.last_rx = Some((self.last_base_time, asn));
+    }
+
     /// Get iterator over slotframes.
     pub fn slotframes(&self) -> impl Iterator<Item = &TschSlotframe> {
         self.slotframes.iter()

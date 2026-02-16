@@ -319,7 +319,8 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     start: Timestamp::BestEffort,
                     radio_frame,
                     channel: Some(next_channel),
-                    rx_window: Some(current_time + NsDuration::secs(SCAN_DURATION)),
+                    rx_window_end: Some(current_time + NsDuration::secs(SCAN_DURATION)),
+                    expected_rx_framestart: None,
                 });
 
                 return SchedulerTaskTransition::Execute(
