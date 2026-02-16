@@ -159,6 +159,10 @@ pub struct TschPib<Neighbor> {
     pub asn: TschAsn,
     /// Timestamp of last known timeslot start.
     pub last_base_time: NsInstant,
+    /// RMARKER and ASN of last received frame
+    pub last_rx: Option<(NsInstant, TschAsn)>,
+    /// Estimated drift per timeslot in nanoseconds
+    pub drift_ns: i32,
 }
 
 impl<Neighbor> TschPib<Neighbor> {
@@ -327,9 +331,10 @@ impl<Neighbor> TschPib<Neighbor> {
 
     /// Calculate expected slot start time for given ASN.
     pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
-        let slot_duration = NsDuration::micros(timeslot_length_us);
+        let adjusted_slot_duration =
+            NsDuration::nanos(((timeslot_length_us * 1000) as i32 - self.drift_ns) as u64);
         let slots_diff = asn.saturating_sub(self.asn) as u32;
-        self.last_base_time + slots_diff * slot_duration
+        self.last_base_time + slots_diff * adjusted_slot_duration
     }
 
     /// Calculate current ASN from timestamp.
@@ -347,7 +352,35 @@ impl<Neighbor> TschPib<Neighbor> {
     pub fn sync_asn(&mut self, asn: TschAsn, instant: NsInstant) {
         self.asn = asn;
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
-        self.last_base_time = instant - NsDuration::micros(tx_offset_us);
+        let timeslot_start = instant - NsDuration::micros(tx_offset_us);
+        self.last_base_time = timeslot_start;
+        self.update_drift(asn, timeslot_start);
+        self.last_rx = Some((timeslot_start, asn));
+    }
+
+    /// Update clock drift relative to timesource with an instant derived from
+    /// communication with timesource neighbor (i.e. when receiving a frame
+    /// or using Time Sync information in Time Correction IE).
+    fn update_drift(&mut self, asn: TschAsn, timeslot_start: NsInstant) {
+        if let Some((last_slot_start, last_rx_asn)) = self.last_rx {
+            let delta_asn = asn - last_rx_asn;
+
+            if delta_asn == 0 {
+                return;
+            }
+
+            let elapsed_time = timeslot_start - last_slot_start;
+            let expected_elapsed_time = NsDuration::micros(delta_asn * self.timeslot_length_us());
+
+            // Drift per slot in nanoseconds
+            let measured_drift_ns = if elapsed_time > expected_elapsed_time {
+                -(((elapsed_time - expected_elapsed_time).to_nanos() / delta_asn) as i32)
+            } else {
+                ((expected_elapsed_time - elapsed_time).to_nanos() / delta_asn) as i32
+            };
+
+            self.drift_ns = measured_drift_ns;
+        }
     }
 
     /// Acknowledgment-based synchronization.
@@ -358,6 +391,7 @@ impl<Neighbor> TschPib<Neighbor> {
         } else {
             self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
         }
+        self.update_drift(asn, self.last_base_time);
         self.last_rx = Some((self.last_base_time, asn));
     }
 
@@ -400,6 +434,8 @@ impl<Neighbor> Default for TschPib<Neighbor> {
             timeslot_timings: TschTimeslotTimings::default(),
             asn: 0,
             last_base_time: NsInstant::from_ticks(0),
+            last_rx: None,
+            drift_ns: 0,
         }
     }
 }
