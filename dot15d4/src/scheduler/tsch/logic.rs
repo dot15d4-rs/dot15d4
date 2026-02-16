@@ -225,6 +225,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, rx_instant)) => {
                 let action = self.go_idle(context);
 
+                // Frame-based synchronization
+                if !self.is_coordinator {
+                    let asn = context.pib.tsch.asn;
+                    context.pib.tsch.sync_asn(asn, rx_instant);
+                }
+
                 match utils::process_rx_frame(rx_frame, rx_instant, context) {
                     Ok((response, token)) => {
                         // Allocate new frame for next RX
