@@ -180,7 +180,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(frame, instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(frame, instant, _)) => {
                 self.base_time = instant;
 
                 let token = self.take_tx_token();
@@ -190,7 +190,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 ));
                 self.continue_with_pipelined((token, resp))
             }
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(frame, instant, recovered)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(frame, instant, recovered, _)) => {
                 self.base_time = instant;
 
                 match recovered {
@@ -733,7 +733,8 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             start: Timestamp::BestEffort,
             radio_frame,
             channel,
-            rx_window: None,
+            rx_window_end: None,
+            expected_rx_framestart: None,
         })
     }
 }

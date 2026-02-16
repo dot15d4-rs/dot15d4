@@ -143,12 +143,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant, timesync_us)) => {
                 if let Some(response_token) = response_token {
                     let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
                         tx_frame.forget_size::<RadioDriverImpl>(),
                         instant,
                     ));
+                    // Acknowledgment-based synchronization
+                    if let Some(timesync_us) = timesync_us {
+                        context.pib.tsch.sync_ack(timesync_us);
+                    }
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                 } else {
@@ -167,7 +171,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     SchedulerTaskTransition::Execute(self.go_idle(context), None)
                 }
             }
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(tx_frame, instant, request)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(
+                tx_frame,
+                instant,
+                _request,
+                _timesync_us,
+            )) => {
                 if let Some(response_token) = response_token {
                     // TODO: reschedule retransmission
                     let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
@@ -444,18 +453,20 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 self.state = TschState::Listening;
 
                 // Calculate RX start time: timeslot start + macTsRxOffset
-                // TODO: remove inline calculation
                 let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
+                let tx_offset_us = context.pib.tsch.timeslot_timings.tx_offset() as u64;
                 let rx_wait_us = context.pib.tsch.timeslot_timings.rx_wait() as u64;
-                let rx_instant = context.pib.tsch.last_base_time; // + NsDuration::micros(rx_offset_us);
-                                                                  // let max_rx_start = rx_instant + NsDuration::millis(rx_wait_us);
-                let max_rx_start = rx_instant + NsDuration::micros(10000);
+                let rx_instant = context.pib.tsch.last_base_time + NsDuration::micros(rx_offset_us);
+                let max_rx_start = rx_instant + NsDuration::micros(rx_wait_us);
+                let expected_rx_framestart =
+                    context.pib.tsch.last_base_time + NsDuration::micros(tx_offset_us);
 
                 let request = DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
                     start: Timestamp::Scheduled(rx_instant),
                     radio_frame: frame,
                     channel: Some(channel),
-                    rx_window: Some(max_rx_start),
+                    rx_window_end: Some(max_rx_start),
+                    expected_rx_framestart: Some(expected_rx_framestart),
                 });
 
                 SchedulerTaskTransition::Execute(
