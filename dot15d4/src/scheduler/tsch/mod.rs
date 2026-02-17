@@ -4,6 +4,8 @@ pub mod beacon;
 pub mod logic;
 pub mod pib;
 pub mod task;
+#[cfg(test)]
+mod tests;
 
 pub use self::pib::{ScheduleError, TschAsn, TschLink, TschLinkType, TschPib, TschSlotframe};
 pub use self::task::{
