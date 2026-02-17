@@ -304,6 +304,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     let result = if enabled {
                         tsch::UseTschCommandResult::StartedTsch
                     } else {
+                        self.terminate(context);
                         tsch::UseTschCommandResult::StoppedTsch
                     };
 
