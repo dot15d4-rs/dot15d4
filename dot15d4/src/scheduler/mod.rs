@@ -11,6 +11,8 @@ mod runner;
 #[cfg(feature = "tsch")]
 pub mod scan;
 pub mod task;
+#[cfg(test)]
+pub mod tests;
 #[cfg(feature = "tsch")]
 pub mod tsch;
 

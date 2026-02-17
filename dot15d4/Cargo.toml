@@ -27,6 +27,9 @@ arbitrary = { version = "1.3.2", features = ["derive"], optional = true }
 
 rtos-trace = { version = "0.2", optional = true }
 
+[dev-dependencies]
+static_cell = "2"
+
 [features]
 default = ["security", "ies", "dot15d4-frame/strict"]
 
