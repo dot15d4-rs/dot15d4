@@ -7,8 +7,11 @@
 //!
 //! - [`task`]: State machine and task structures
 //! - [`logic`]: State transition logic implementation
+//! - [`tests`]: Tests suite
 
 pub mod logic;
 pub mod task;
+#[cfg(test)]
+pub mod tests;
 
 pub use self::task::CsmaTask;
