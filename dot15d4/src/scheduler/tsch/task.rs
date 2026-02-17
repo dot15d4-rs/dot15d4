@@ -13,7 +13,7 @@ use dot15d4_driver::{
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::{fields::TschLinkOption, mpdu::MpduFrame};
-use dot15d4_util::sync::ResponseToken;
+use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 use heapless::Vec;
 
 use crate::{
@@ -532,6 +532,26 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 Err(op) => self.reschedule_operation(op, context),
             },
             None => false,
+        }
+    }
+
+    /// Terminate TSCH scheduler by releasing resources owned by the scheduler,
+    /// i.e. buffers for beacons and RX frames.
+    pub fn terminate(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
+        if let Some(radio_frame) = self.take_rx_frame() {
+            unsafe {
+                context
+                    .buffer_allocator
+                    .deallocate_buffer(radio_frame.into_buffer())
+            };
+        }
+        #[cfg(feature = "tsch-coordinator")]
+        if let Some(mpdu) = self.beacon_mpdu.take() {
+            unsafe {
+                context
+                    .buffer_allocator
+                    .deallocate_buffer(mpdu.into_buffer())
+            };
         }
     }
 }
