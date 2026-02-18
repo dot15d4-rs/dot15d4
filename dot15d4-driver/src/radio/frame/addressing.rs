@@ -368,7 +368,9 @@ impl<Bytes: AsRef<[u8]>> Address<Bytes> {
             Address::Short(short_address) => {
                 *short_address.as_ref() == *BROADCAST_ADDR_DATA.as_ref()
             }
-            Address::Extended(_) => false,
+            Address::Extended(extended_address) => {
+                extended_address.as_ref().iter().all(|&b| b == 0xff)
+            }
         }
     }
 
