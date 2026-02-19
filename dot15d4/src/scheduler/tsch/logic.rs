@@ -150,6 +150,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                         instant,
                     ));
                     // Acknowledgment-based synchronization
+                    #[cfg(not(feature = "no-tsch-ack-sync"))]
                     if let Some(timesync_us) = timesync_us {
                         context.pib.tsch.sync_ack(timesync_us);
                     }
@@ -226,6 +227,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 let action = self.go_idle(context);
 
                 // Frame-based synchronization
+                #[cfg(not(feature = "no-tsch-frame-sync"))]
                 if !self.is_coordinator {
                     let asn = context.pib.tsch.asn;
                     context.pib.tsch.sync_asn(asn, rx_instant);

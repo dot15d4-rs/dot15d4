@@ -81,6 +81,15 @@ _gpio-trace = []
 tsch = ["dot15d4/tsch"]
 tsch-coordinator = ["tsch", "dot15d4/tsch-coordinator"]
 
+# Disable Enh-Ack-based synchronization in TSCH network
+no-tsch-ack-sync = ["dot15d4/no-tsch-ack-sync"]
+
+# Disable frame-based synchronization in TSCH network
+no-tsch-frame-sync = ["dot15d4/no-tsch-frame-sync"]
+
+# Disable clock drift adjustment in TSCH network
+no-tsch-drift-adjustment = ["dot15d4/no-tsch-drift-adjustment"]
+
 # Enables multi-device tests.
 #
 # Synchronizes the clock of multiple test devices with an external sleep timer
