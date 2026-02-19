@@ -57,6 +57,15 @@ tsch = ["ies"]
 # Support for TSCH coordinator features (beacon transmission, etc.)
 tsch-coordinator = ["tsch"]
 
+# Disable Enh-Ack-based synchronization in TSCH network
+no-tsch-ack-sync = []
+
+# Disable frame-based synchronization in TSCH network
+no-tsch-frame-sync = []
+
+# Disable clock drift adjustment in TSCH network
+no-tsch-drift-adjustment = []
+
 # Tracing
 executor-trace = ["dot15d4-driver/executor-trace"]
 timer-trace = ["dot15d4-driver/timer-trace"]

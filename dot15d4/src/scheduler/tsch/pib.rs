@@ -331,8 +331,11 @@ impl<Neighbor> TschPib<Neighbor> {
 
     /// Calculate expected slot start time for given ASN.
     pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
+        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         let adjusted_slot_duration =
             NsDuration::nanos(((timeslot_length_us * 1000) as i32 - self.drift_ns) as u64);
+        #[cfg(feature = "no-tsch-drift-adjustment")]
+        let adjusted_slot_duration = NsDuration::micros(timeslot_length_us);
         let slots_diff = asn.saturating_sub(self.asn) as u32;
         self.last_base_time + slots_diff * adjusted_slot_duration
     }
@@ -354,6 +357,7 @@ impl<Neighbor> TschPib<Neighbor> {
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
         let timeslot_start = instant - NsDuration::micros(tx_offset_us);
         self.last_base_time = timeslot_start;
+        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, timeslot_start);
         self.last_rx = Some((timeslot_start, asn));
     }
@@ -361,6 +365,7 @@ impl<Neighbor> TschPib<Neighbor> {
     /// Update clock drift relative to timesource with an instant derived from
     /// communication with timesource neighbor (i.e. when receiving a frame
     /// or using Time Sync information in Time Correction IE).
+    #[cfg(not(feature = "no-tsch-drift-adjustment"))]
     fn update_drift(&mut self, asn: TschAsn, timeslot_start: NsInstant) {
         if let Some((last_slot_start, last_rx_asn)) = self.last_rx {
             let delta_asn = asn - last_rx_asn;
@@ -384,6 +389,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 
     /// Acknowledgment-based synchronization.
+    #[cfg(not(feature = "no-tsch-ack-sync"))]
     pub fn sync_ack(&mut self, timesync_us: i16) {
         let asn = self.asn;
         if timesync_us < 0 {
@@ -391,6 +397,7 @@ impl<Neighbor> TschPib<Neighbor> {
         } else {
             self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
         }
+        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, self.last_base_time);
         self.last_rx = Some((self.last_base_time, asn));
     }
