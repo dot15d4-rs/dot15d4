@@ -445,3 +445,537 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
         }
     }
 }
+
+#[cfg(test)]
+mod associate_request_tests {
+    use super::*;
+    use crate::{
+        mac::{
+            mlme::associate::{AssociateConfirm, AssociateRequest, AssociateRequestTask},
+            tests::{
+                channel_access_failure_response, extract_transmission_mpdu,
+                mac_command_reception_response, noack_response, sent_response, MacTaskTestRunner,
+                RequestType,
+            },
+        },
+        scheduler::{
+            command::pib::{GetPibResult, PibCommandResult},
+            tests::{create_test_allocator, FakeDriverConfig},
+            SchedulerCommand, SchedulerCommandResult,
+        },
+    };
+    use dot15d4_driver::{
+        radio::frame::{Address, ExtendedAddress, RadioFrame, RadioFrameSized},
+        timer::NsInstant,
+    };
+    use dot15d4_frame::mpdu::{AssociationStatus, CapabilityInformation};
+
+    const TEST_COORD_ADDR: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    const TEST_DEVICE_ADDR: [u8; 8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
+    const TEST_PAN_ID: u16 = 0xBEEF;
+    const INSTANT_ZER0: NsInstant = NsInstant::from_ticks(0);
+
+    fn setup() -> MacTaskTestRunner<AssociateRequestTask<'static, FakeDriverConfig>> {
+        let allocator = create_test_allocator();
+        let request = AssociateRequest::new(
+            TEST_COORD_ADDR,
+            TEST_PAN_ID,
+            CapabilityInformation(0x80), // allocate address
+        );
+        let task = AssociateRequestTask::new(request, allocator);
+        MacTaskTestRunner::new(task, allocator)
+    }
+
+    fn pib_extended_address_response(addr: [u8; 8]) -> SchedulerResponse {
+        SchedulerResponse::Command(SchedulerCommandResult::PibCommand(PibCommandResult::Get(
+            GetPibResult::MacExtendedAddress(Address::Extended(ExtendedAddress::new_owned(addr))),
+        )))
+    }
+
+    /// Create a properly formatted association response radio frame.
+    fn create_associate_response_frame(
+        runner: &MacTaskTestRunner<AssociateRequestTask<'static, FakeDriverConfig>>,
+        short_address: [u8; 2],
+        status: AssociationStatus,
+    ) -> RadioFrame<RadioFrameSized> {
+        use dot15d4_driver::radio::frame::PanId;
+
+        let allocator = runner.allocator();
+        let mut parser = dot15d4_frame::mpdu::associate_response_frame::<FakeDriverConfig>(
+            *allocator,
+            short_address,
+        )
+        .expect("failed to build associate response frame");
+
+        // Set addressing fields.
+        let mut addressing = parser.addressing_fields_mut();
+        addressing
+            .dst_pan_id_mut()
+            .set(&PanId::new(TEST_PAN_ID.to_le_bytes()));
+        addressing
+            .src_address_mut()
+            .set(&Address::Extended(ExtendedAddress::new(TEST_COORD_ADDR)));
+        addressing
+            .dst_address_mut()
+            .set(&Address::Extended(ExtendedAddress::new(TEST_DEVICE_ADDR)));
+
+        // Override the status byte if not Successful.
+        if status != AssociationStatus::Successful {
+            let payload = parser.frame_payload_mut();
+            payload[3] = status as u8;
+        }
+
+        parser
+            .into_mpdu_frame()
+            .into_radio_frame::<FakeDriverConfig>()
+    }
+
+    // ========================================================================
+    // Entry -> PIB Get
+    // ========================================================================
+
+    #[test]
+    fn associate_entry_requests_extended_address() {
+        let mut runner = setup();
+
+        let outcome = runner.step_entry();
+        let request = outcome.unwrap_request();
+
+        match request {
+            SchedulerRequest::Command(SchedulerCommand::PibCommand(
+                crate::scheduler::command::pib::PibCommand::Get(
+                    crate::mac::mlme::get::GetRequestAttribute::MacExtendedAddress,
+                ),
+            )) => {} // expected
+            _ => panic!("expected PibCommand::Get(MacExtendedAddress)"),
+        }
+    }
+
+    // ========================================================================
+    // PIB Response -> Transmission
+    // ========================================================================
+
+    #[test]
+    fn associate_builds_request_frame_after_pib() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let outcome = runner.step_response(pib_extended_address_response(TEST_DEVICE_ADDR));
+        let request = outcome.unwrap_request();
+
+        assert_eq!(RequestType::from(&request), RequestType::Transmission);
+
+        // Clean up the transmitted MPDU.
+        let mpdu = extract_transmission_mpdu(request);
+        runner.track_mpdu(mpdu);
+    }
+
+    // ========================================================================
+    // Sent -> Reception Request
+    // ========================================================================
+
+    #[test]
+    fn associate_sent_requests_response_reception() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(sent_response(mpdu, INSTANT_ZER0));
+
+        let request = outcome.unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateResponse))
+        );
+    }
+
+    // ========================================================================
+    // NoAck -> Terminated
+    // ========================================================================
+
+    #[test]
+    fn associate_noack_terminates() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(noack_response(mpdu, INSTANT_ZER0));
+
+        let confirm = outcome.unwrap_terminated();
+        assert!(matches!(confirm, AssociateConfirm::NoAck));
+    }
+
+    // ========================================================================
+    // ChannelAccessFailure -> Terminated
+    // ========================================================================
+
+    #[test]
+    fn associate_channel_access_failure_terminates() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(channel_access_failure_response(mpdu));
+
+        let confirm = outcome.unwrap_terminated();
+        assert!(matches!(confirm, AssociateConfirm::ChannelAccessFailure));
+    }
+
+    // ========================================================================
+    // Successful Association Response
+    // ========================================================================
+
+    #[test]
+    fn associate_receives_successful_response() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+        runner.step_response(sent_response(mpdu, INSTANT_ZER0));
+
+        let response_frame =
+            create_associate_response_frame(&runner, [0x42, 0x00], AssociationStatus::Successful);
+        let outcome = runner.step_response(mac_command_reception_response(
+            response_frame,
+            NsInstant::from_ticks(5000),
+        ));
+
+        let confirm = outcome.unwrap_terminated();
+        match confirm {
+            AssociateConfirm::Completed {
+                status,
+                short_address,
+            } => {
+                assert_eq!(status, AssociationStatus::Successful);
+                assert_eq!(short_address.as_ref(), &[0x42, 0x00]);
+            }
+            other => panic!(
+                "expected Completed, got {:?}",
+                core::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    // ========================================================================
+    // Denied Association Response
+    // ========================================================================
+
+    #[test]
+    fn associate_receives_denied_response() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+        runner.step_response(sent_response(mpdu, INSTANT_ZER0));
+
+        let response_frame = create_associate_response_frame(
+            &runner,
+            [0xFF, 0xFF],
+            AssociationStatus::PanAccessDenied,
+        );
+        let outcome = runner.step_response(mac_command_reception_response(
+            response_frame,
+            NsInstant::from_ticks(5000),
+        ));
+
+        let confirm = outcome.unwrap_terminated();
+        match confirm {
+            AssociateConfirm::Completed {
+                status,
+                short_address,
+            } => {
+                assert_eq!(status, AssociationStatus::PanAccessDenied);
+                assert_eq!(short_address.as_ref(), &[0xFF, 0xFF]);
+            }
+            other => panic!(
+                "expected Completed, got {:?}",
+                core::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    // ========================================================================
+    // Full Association Flow
+    // ========================================================================
+
+    #[test]
+    fn associate_full_success_flow() {
+        let mut runner = setup();
+
+        // 1. Entry -> requests extended address.
+        let outcome = runner.step_entry();
+        assert!(outcome.is_pending());
+
+        // 2. PIB response -> builds and transmits request frame.
+        let request = runner
+            .step_response(pib_extended_address_response(TEST_DEVICE_ADDR))
+            .unwrap_request();
+        assert_eq!(RequestType::from(&request), RequestType::Transmission);
+        let mpdu = extract_transmission_mpdu(request);
+
+        // 3. Sent -> requests associate response reception.
+        let request = runner
+            .step_response(sent_response(mpdu, INSTANT_ZER0))
+            .unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateResponse))
+        );
+
+        // 4. Response received -> terminates with Completed.
+        let response_frame =
+            create_associate_response_frame(&runner, [0x10, 0x00], AssociationStatus::Successful);
+        let confirm = runner
+            .step_response(mac_command_reception_response(
+                response_frame,
+                NsInstant::from_ticks(10000),
+            ))
+            .unwrap_terminated();
+
+        match confirm {
+            AssociateConfirm::Completed {
+                status,
+                short_address,
+            } => {
+                assert_eq!(status, AssociationStatus::Successful);
+                assert_eq!(short_address.as_ref(), &[0x10, 0x00]);
+            }
+            _ => panic!("expected Completed"),
+        }
+    }
+}
+
+// ============================================================================
+// Associate Indication Tests
+// ============================================================================
+
+#[cfg(test)]
+mod associate_indication_tests {
+    use super::*;
+    use crate::{
+        mac::tests::{
+            channel_access_failure_response, extract_transmission_mpdu,
+            mac_command_reception_response, noack_response, sent_response, MacTaskTestRunner,
+            RequestType,
+        },
+        scheduler::tests::{create_test_allocator, FakeDriverConfig},
+    };
+    use dot15d4_driver::{
+        radio::frame::{Address, ExtendedAddress, RadioFrame, RadioFrameSized},
+        timer::NsInstant,
+    };
+    use dot15d4_frame::mpdu::CapabilityInformation;
+
+    const TEST_COORD_ADDR: [u8; 8] = [0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7];
+    const TEST_DEVICE_ADDR: [u8; 8] = [0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7];
+    const TEST_PAN_ID: u16 = 0xBEEF;
+    const INSTANT_ZERO: NsInstant = NsInstant::from_ticks(0);
+
+    fn setup() -> MacTaskTestRunner<AssociateIndicationTask<'static, FakeDriverConfig>> {
+        let allocator = create_test_allocator();
+        let task = AssociateIndicationTask::new(allocator);
+        MacTaskTestRunner::new(task, allocator)
+    }
+
+    /// Create a properly formatted association request radio frame.
+    fn create_associate_request_frame(
+        runner: &MacTaskTestRunner<AssociateIndicationTask<'static, FakeDriverConfig>>,
+    ) -> RadioFrame<RadioFrameSized> {
+        let allocator = runner.allocator();
+
+        let mut mpdu_parser = dot15d4_frame::mpdu::associate_request_frame::<FakeDriverConfig>(
+            *allocator,
+            CapabilityInformation(0x80),
+        )
+        .expect("failed to build associate request frame");
+
+        let pan_id = PanId::new_owned(TEST_PAN_ID.to_le_bytes());
+        let coord_addr = Address::Extended(ExtendedAddress::new_owned(TEST_COORD_ADDR));
+        let device_addr = Address::Extended(ExtendedAddress::new_owned(TEST_DEVICE_ADDR));
+
+        let mut addressing = mpdu_parser.addressing_fields_mut();
+        addressing.dst_pan_id_mut().set(&pan_id);
+        addressing.dst_address_mut().set(&coord_addr);
+        addressing.src_address_mut().set(&device_addr);
+
+        mpdu_parser
+            .into_mpdu_frame()
+            .into_radio_frame::<FakeDriverConfig>()
+    }
+
+    // ========================================================================
+    // Entry
+    // ========================================================================
+
+    #[test]
+    fn indication_entry_requests_associate_command_reception() {
+        let mut runner = setup();
+
+        let outcome = runner.step_entry();
+        let request = outcome.unwrap_request();
+
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+    }
+
+    // ========================================================================
+    // Receives Request -> Sends Response
+    // ========================================================================
+
+    #[test]
+    fn indication_receives_request_sends_response() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let req_frame = create_associate_request_frame(&runner);
+        let outcome = runner.step_response(mac_command_reception_response(req_frame, INSTANT_ZERO));
+
+        let request = outcome.unwrap_request();
+        assert_eq!(RequestType::from(&request), RequestType::Transmission);
+
+        // Clean up the response MPDU.
+        let mpdu = extract_transmission_mpdu(request);
+        runner.track_mpdu(mpdu);
+    }
+
+    // ========================================================================
+    // Sent -> Restarts Listening
+    // ========================================================================
+
+    #[test]
+    fn indication_sent_restarts_listening() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let req_frame = create_associate_request_frame(&runner);
+        let request = runner
+            .step_response(mac_command_reception_response(req_frame, INSTANT_ZERO))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(sent_response(mpdu, INSTANT_ZERO));
+
+        let request = outcome.unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+        assert!(!runner.is_terminated());
+    }
+
+    // ========================================================================
+    // NoAck -> Restarts Listening
+    // ========================================================================
+
+    #[test]
+    fn indication_noack_restarts_listening() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let req_frame = create_associate_request_frame(&runner);
+        let request = runner
+            .step_response(mac_command_reception_response(req_frame, INSTANT_ZERO))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(noack_response(mpdu, INSTANT_ZERO));
+
+        let request = outcome.unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+    }
+
+    // ========================================================================
+    // ChannelAccessFailure -> Restarts Listening
+    // ========================================================================
+
+    #[test]
+    fn indication_channel_access_failure_restarts_listening() {
+        let mut runner = setup();
+        runner.step_entry();
+
+        let req_frame = create_associate_request_frame(&runner);
+        let request = runner
+            .step_response(mac_command_reception_response(req_frame, INSTANT_ZERO))
+            .unwrap_request();
+        let mpdu = extract_transmission_mpdu(request);
+
+        let outcome = runner.step_response(channel_access_failure_response(mpdu));
+
+        let request = outcome.unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+    }
+
+    // ========================================================================
+    // Full Indication Cycle
+    // ========================================================================
+
+    #[test]
+    fn indication_full_cycle_then_relisten() {
+        let mut runner = setup();
+
+        // 1. Entry -> listen for AssociateRequest.
+        let request = runner.step_entry().unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+
+        // 2. Receive associate request -> send response.
+        let req_frame = create_associate_request_frame(&runner);
+        let request = runner
+            .step_response(mac_command_reception_response(req_frame, INSTANT_ZERO))
+            .unwrap_request();
+        assert_eq!(RequestType::from(&request), RequestType::Transmission);
+        let mpdu = extract_transmission_mpdu(request);
+
+        // 3. Response sent -> restart listening.
+        let request = runner
+            .step_response(sent_response(mpdu, INSTANT_ZERO))
+            .unwrap_request();
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::MacCommand(MacCommandType::AssociateRequest))
+        );
+
+        // 4. Second request -> send another response.
+        let req_frame2 = create_associate_request_frame(&runner);
+        let request = runner
+            .step_response(mac_command_reception_response(
+                req_frame2,
+                NsInstant::from_ticks(5000),
+            ))
+            .unwrap_request();
+        assert_eq!(RequestType::from(&request), RequestType::Transmission);
+        let mpdu = extract_transmission_mpdu(request);
+        runner.track_mpdu(mpdu);
+
+        // Task is still alive (infinite listener).
+        assert!(!runner.is_terminated());
+    }
+}
