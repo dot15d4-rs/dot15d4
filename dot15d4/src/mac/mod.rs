@@ -4,6 +4,8 @@ pub mod neighbors;
 pub mod primitives;
 pub mod procedures;
 mod task;
+#[cfg(test)]
+pub mod tests;
 
 use dot15d4_driver::timer::NsInstant;
 pub use dot15d4_frame as frame;
