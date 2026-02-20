@@ -276,3 +276,266 @@ impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImp
         }
     }
 }
+
+#[cfg(test)]
+mod scan_tests {
+    use core::num::NonZero;
+
+    use super::*;
+    use crate::{
+        mac::{
+            mlme::scan::{ScanRequest, ScanRequestTask, ScanStatus, ScanType, MAX_PAN_DESCRIPTORS},
+            tests::{beacon_reception_response, MacTaskTestRunner, RequestType},
+        },
+        scheduler::{
+            command::scan::ScanCommandResult,
+            scan::ScanChannels,
+            tests::{create_test_allocator, FakeDriverConfig},
+            SchedulerCommand, SchedulerCommandResult,
+        },
+    };
+    use dot15d4_driver::radio::{config::Channel, frame::RadioFrameUnsized};
+
+    fn setup_passive_all() -> MacTaskTestRunner<ScanRequestTask<'static, FakeDriverConfig>> {
+        let allocator = create_test_allocator();
+        let request = ScanRequest::passive_all(5, MAX_PAN_DESCRIPTORS);
+        let task = ScanRequestTask::new(request);
+        MacTaskTestRunner::new(task, allocator)
+    }
+
+    fn setup_passive_single(
+        channel: Channel,
+        max_descriptors: usize,
+    ) -> MacTaskTestRunner<ScanRequestTask<'static, FakeDriverConfig>> {
+        let allocator = create_test_allocator();
+        let request = ScanRequest::passive_single(channel, 5, max_descriptors);
+        let task = ScanRequestTask::new(request);
+        MacTaskTestRunner::new(task, allocator)
+    }
+
+    fn started_scanning_response() -> SchedulerResponse {
+        SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+            ScanCommandResult::StartedScanning,
+        ))
+    }
+
+    fn stopped_scanning_response() -> SchedulerResponse {
+        SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+            ScanCommandResult::StoppedScanning,
+        ))
+    }
+
+    /// Create a minimal beacon-like radio frame for scan test responses.
+    fn create_beacon_frame(
+        runner: &MacTaskTestRunner<ScanRequestTask<'static, FakeDriverConfig>>,
+    ) -> RadioFrame<RadioFrameSized> {
+        let allocator = runner.allocator();
+        let buffer = allocator
+            .try_allocate_buffer(130)
+            .expect("allocation failed");
+        let frame = RadioFrame::<RadioFrameUnsized>::new::<FakeDriverConfig>(buffer);
+        // Give it a minimal size (frame control + sequence number).
+        frame.with_size(NonZero::new(10).unwrap())
+    }
+
+    // ========================================================================
+    // Entry
+    // ========================================================================
+
+    #[test]
+    fn scan_entry_sends_start_scanning_command() {
+        let mut runner = setup_passive_all();
+
+        let outcome = runner.step_entry();
+        let request = outcome.unwrap_request();
+
+        match request {
+            SchedulerRequest::Command(SchedulerCommand::ScanCommand(
+                crate::scheduler::command::scan::ScanCommand::StartScanning(channels, max),
+            )) => {
+                assert!(matches!(channels, ScanChannels::All));
+                assert_eq!(max, MAX_PAN_DESCRIPTORS);
+            }
+            _ => panic!("expected ScanCommand::StartScanning"),
+        }
+    }
+
+    #[test]
+    fn scan_single_channel_entry() {
+        let mut runner = setup_passive_single(Channel::_15, 1);
+
+        let outcome = runner.step_entry();
+        let request = outcome.unwrap_request();
+
+        match request {
+            SchedulerRequest::Command(SchedulerCommand::ScanCommand(
+                crate::scheduler::command::scan::ScanCommand::StartScanning(channels, max),
+            )) => {
+                assert!(matches!(channels, ScanChannels::Single(Channel::_15)));
+                assert_eq!(max, 1);
+            }
+            _ => panic!("expected ScanCommand::StartScanning"),
+        }
+    }
+
+    // ========================================================================
+    // Started Scanning -> Beacon Reception Request
+    // ========================================================================
+
+    #[test]
+    fn scan_started_requests_beacon_reception() {
+        let mut runner = setup_passive_all();
+        runner.step_entry();
+
+        let outcome = runner.step_response(started_scanning_response());
+        let request = outcome.unwrap_request();
+
+        assert_eq!(
+            RequestType::from(&request),
+            RequestType::Reception(ReceptionType::Beacon)
+        );
+    }
+
+    // ========================================================================
+    // Beacon Reception
+    // ========================================================================
+
+    #[test]
+    fn scan_terminates_on_max_descriptors() {
+        let mut runner = setup_passive_single(Channel::_26, 1);
+        runner.step_entry();
+        runner.step_response(started_scanning_response());
+
+        let beacon = create_beacon_frame(&runner);
+        let outcome = runner.step_response(beacon_reception_response(
+            beacon,
+            NsInstant::from_ticks(1000),
+        ));
+
+        // max_pan_descriptors=1 and we received 1 beacon -> terminate.
+        let confirm = outcome.unwrap_terminated();
+        assert_eq!(confirm.scan_type, ScanType::Passive);
+        assert_eq!(confirm.pan_descriptor_list.len(), 1);
+
+        // Clean up the MpduFrame buffers inside the PanDescriptors.
+        for descriptor in confirm.pan_descriptor_list {
+            runner.track_mpdu(descriptor.mpdu);
+        }
+    }
+
+    #[test]
+    fn scan_two_beacons_fills_results() {
+        let mut runner = setup_passive_all();
+        runner.step_entry();
+        runner.step_response(started_scanning_response());
+
+        // First beacon -> continues.
+        let beacon1 = create_beacon_frame(&runner);
+        let outcome = runner.step_response(beacon_reception_response(
+            beacon1,
+            NsInstant::from_ticks(1000),
+        ));
+        assert!(outcome.is_pending());
+
+        // Second beacon -> terminates (MAX_PAN_DESCRIPTORS = 2).
+        let beacon2 = create_beacon_frame(&runner);
+        let outcome = runner.step_response(beacon_reception_response(
+            beacon2,
+            NsInstant::from_ticks(2000),
+        ));
+
+        let confirm = outcome.unwrap_terminated();
+        assert_eq!(confirm.pan_descriptor_list.len(), 2);
+        assert_eq!(
+            confirm.pan_descriptor_list[0].timestamp,
+            NsInstant::from_ticks(1000)
+        );
+        assert_eq!(
+            confirm.pan_descriptor_list[1].timestamp,
+            NsInstant::from_ticks(2000)
+        );
+
+        for descriptor in confirm.pan_descriptor_list {
+            runner.track_mpdu(descriptor.mpdu);
+        }
+    }
+
+    // ========================================================================
+    // Stopped Scanning
+    // ========================================================================
+
+    #[test]
+    fn scan_terminates_on_stopped_scanning() {
+        let mut runner = setup_passive_all();
+        runner.step_entry();
+        runner.step_response(started_scanning_response());
+
+        let outcome = runner.step_response(stopped_scanning_response());
+
+        let confirm = outcome.unwrap_terminated();
+        assert_eq!(confirm.status, ScanStatus::Success);
+        assert!(confirm.pan_descriptor_list.is_empty());
+    }
+
+    #[test]
+    fn scan_stopped_after_one_beacon() {
+        let mut runner = setup_passive_all();
+        runner.step_entry();
+        runner.step_response(started_scanning_response());
+
+        // Receive one beacon, then stop.
+        let beacon = create_beacon_frame(&runner);
+        runner.step_response(beacon_reception_response(
+            beacon,
+            NsInstant::from_ticks(500),
+        ));
+
+        let outcome = runner.step_response(stopped_scanning_response());
+        let confirm = outcome.unwrap_terminated();
+        assert_eq!(confirm.pan_descriptor_list.len(), 1);
+
+        for descriptor in confirm.pan_descriptor_list {
+            runner.track_mpdu(descriptor.mpdu);
+        }
+    }
+
+    // ========================================================================
+    // Full Passive Scan Flow
+    // ========================================================================
+
+    #[test]
+    fn scan_full_passive_flow() {
+        let mut runner = setup_passive_all();
+
+        // 1. Entry -> StartScanning command
+        let outcome = runner.step_entry();
+        assert!(outcome.is_pending());
+
+        // 2. StartedScanning -> beacon reception request
+        let outcome = runner.step_response(started_scanning_response());
+        assert!(outcome.is_pending());
+
+        // 3. Beacon received -> continues listening
+        let beacon = create_beacon_frame(&runner);
+        let outcome = runner.step_response(beacon_reception_response(
+            beacon,
+            NsInstant::from_ticks(100),
+        ));
+        assert!(outcome.is_pending());
+
+        // 4. Second beacon -> terminates (max reached)
+        let beacon = create_beacon_frame(&runner);
+        let outcome = runner.step_response(beacon_reception_response(
+            beacon,
+            NsInstant::from_ticks(200),
+        ));
+
+        let confirm = outcome.unwrap_terminated();
+        assert_eq!(confirm.scan_type, ScanType::Passive);
+        assert_eq!(confirm.pan_descriptor_list.len(), 2);
+
+        for descriptor in confirm.pan_descriptor_list {
+            runner.track_mpdu(descriptor.mpdu);
+        }
+    }
+}
