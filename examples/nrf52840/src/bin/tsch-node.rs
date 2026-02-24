@@ -6,10 +6,7 @@ use dot15d4::mac::procedures::{join_network_from_scan, scan, tsch_start_pan};
 use dot15d4::{
     driver::{
         radio::{
-            frame::{
-                Address, AddressingMode, AddressingRepr, FrameType, FrameVersion, IeListRepr,
-                IeRepr, IeReprList, PanIdCompressionRepr,
-            },
+            frame::{Address, IeRepr, IeReprList},
             tasks::{RadioDriverApi, TaskOff},
             RadioDriver,
         },
@@ -19,10 +16,7 @@ use dot15d4::{
         DriverRequestReceiver, DriverRequestSender, DriverService,
     },
     mac::{
-        frame::{
-            repr::{MpduRepr, SeqNrRepr},
-            MpduWithIes,
-        },
+        frame::mpdu::data_frame,
         primitives::{DataRequest, MacRequest},
         procedures::{get_coordinator_extended_address, get_device_extended_address},
         MacBufferAllocator, MacIndicationChannel, MacIndicationReceiver, MacIndicationSender,
@@ -31,10 +25,7 @@ use dot15d4::{
     scheduler::{
         SchedulerRequestChannel, SchedulerRequestReceiver, SchedulerRequestSender, SchedulerService,
     },
-    util::{
-        allocator::{BufferToken, IntoBuffer},
-        buffer_allocator, info,
-    },
+    util::{allocator::IntoBuffer, buffer_allocator, info},
     RngCore, RngError,
 };
 #[cfg(feature = "executor-trace")]
@@ -230,19 +221,16 @@ async fn upper_layer_task(
     }
 
     if is_sender {
-        use dot15d4::driver::radio::phy::{OQpsk250KBit, Phy, PhyConfig};
-
         let dst_addr = get_coordinator_extended_address(&request_sender).await;
         let src_addr = get_device_extended_address(&request_sender).await;
 
-        const BUFFER_SIZE: usize = <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize;
         let payload = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut seq_nr = 42;
         let instant = timer.now();
         let mut nb_sent = 0;
         loop {
-            let buffer = buffer_allocator.try_allocate_buffer(BUFFER_SIZE).unwrap();
-            let data_request = data_request(buffer, seq_nr, &src_addr, &dst_addr, &payload);
+            let data_request =
+                data_request(buffer_allocator, seq_nr, &src_addr, &dst_addr, &payload);
 
             let request_token = request_sender.allocate_request_token().await;
 
@@ -294,7 +282,7 @@ async fn upper_layer_task(
 }
 
 fn data_request(
-    buffer: BufferToken,
+    buffer_allocator: MacBufferAllocator,
     seq_nr: u8,
     src_addr: &Address<[u8; 8]>,
     dst_addr: &Address<[u8; 8]>,
@@ -302,26 +290,9 @@ fn data_request(
 ) -> MacRequest {
     static IES: [IeRepr; 1] = [IeRepr::TschSynchronizationNestedIe];
     static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
-    static IE_LIST: IeListRepr<'static> = IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
-    const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
-        .with_frame_control(SeqNrRepr::Yes)
-        .with_addressing(AddressingRepr::new(
-            AddressingMode::Extended,
-            AddressingMode::Extended,
-            true,
-            PanIdCompressionRepr::Yes,
-        ))
-        .without_security()
-        .with_ies(IE_LIST);
-
-    let mut mpdu_writer = MPDU_REPR
-        .into_writer::<NrfRadioDriver>(
-            FrameVersion::Ieee802154,
-            FrameType::Data,
-            payload.len() as u16,
-            buffer,
-        )
-        .unwrap();
+    let mut mpdu_writer =
+        data_frame::<NrfRadioDriver>(Some(IE_REPR_LIST), payload.len() as u16, buffer_allocator)
+            .unwrap();
 
     mpdu_writer.set_sequence_number(seq_nr);
     mpdu_writer.set_ack_request(true);
