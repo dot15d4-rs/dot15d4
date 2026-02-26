@@ -9,7 +9,7 @@ use dot15d4_driver::{
     },
     timer::NsInstant,
 };
-use dot15d4_frame::mpdu::{CommandFrameIdentifier, MpduFrame};
+use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::ResponseToken;
 
 use crate::scheduler::{

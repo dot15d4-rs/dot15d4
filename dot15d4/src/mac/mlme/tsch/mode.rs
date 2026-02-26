@@ -50,7 +50,7 @@ impl<'task, RadioDriverImpl: DriverConfig> TschModeRequestTask<'task, RadioDrive
 }
 
 /// Final result of a data request task.
-pub(crate) enum TschModeConfirm {
+pub enum TschModeConfirm {
     Started,
     Stopped,
 }

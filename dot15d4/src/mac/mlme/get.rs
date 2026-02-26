@@ -2,8 +2,6 @@
 use core::marker::PhantomData;
 
 use dot15d4_driver::radio::{frame::Address, DriverConfig};
-#[cfg(feature = "tsch")]
-use dot15d4_driver::timer::NsInstant;
 
 use crate::{
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
