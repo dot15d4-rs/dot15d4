@@ -240,11 +240,11 @@ async fn upper_layer_task(
             nb_sent += 1;
 
             match mac_confirm {
-                dot15d4::mac::primitives::MacConfirm::McpsData(timestamp) => {
+                dot15d4::mac::primitives::MacConfirm::McpsData(_timestamp) => {
                     #[cfg(any(feature = "log", feature = "defmt"))]
                     {
                         let timestamp = timestamp.unwrap().ticks();
-                        info!("Tx Timestamp: {}", timestamp);
+                        info!("Tx Timestamp: {}", _timestamp);
                     }
                     unsafe {
                         timer

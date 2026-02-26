@@ -179,7 +179,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
     fn execute_receiving_frame(
         &mut self,
         event: SchedulerTaskEvent,
-        channel: Channel,
+        _channel: Channel,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {

@@ -290,7 +290,7 @@ async fn join_network_from_beacon(
 pub async fn scan(request_sender: &MacRequestSender<'static>) -> ScanConfirm {
     use crate::{
         driver::radio::config::Channel,
-        mac::primitives::{MacConfirm, MacRequest, ScanRequest, ScanType, TschModeRequest},
+        mac::primitives::{MacConfirm, MacRequest, ScanRequest, ScanType},
         scheduler::scan::ScanChannels,
     };
 

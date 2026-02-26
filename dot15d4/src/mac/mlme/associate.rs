@@ -309,7 +309,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
 
         // TODO: use in associate response. For now, assume we request
         //       address allocation
-        let capability_information = if payload.len() > 1 {
+        let _capability_information = if payload.len() > 1 {
             CapabilityInformation(payload[1])
         } else {
             CapabilityInformation(0)

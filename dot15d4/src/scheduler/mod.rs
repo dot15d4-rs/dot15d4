@@ -149,11 +149,8 @@ impl HasAddress<MessageType> for SchedulerRequest {
             SchedulerRequest::Reception(reception) => match reception {
                 ReceptionType::Data => matches!(*address, MessageType::Rx(ReceptionType::Data)),
                 ReceptionType::Beacon => matches!(*address, MessageType::Rx(ReceptionType::Beacon)),
-                ReceptionType::MacCommand(command) => {
-                    matches!(
-                        *address,
-                        MessageType::Rx(ReceptionType::MacCommand(command))
-                    )
+                ReceptionType::MacCommand(_) => {
+                    matches!(*address, MessageType::Rx(ReceptionType::MacCommand(..)))
                 }
             },
             SchedulerRequest::Command(_) => {

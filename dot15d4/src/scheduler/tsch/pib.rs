@@ -269,7 +269,7 @@ impl<Neighbor> TschPib<Neighbor> {
     ) -> Option<(&TschLink<Neighbor>, TschAsn)> {
         let mut best: Option<(&TschLink<Neighbor>, u64)> = None;
 
-        for (idx, link) in self.links.iter().enumerate() {
+        for link in self.links.iter() {
             if !filter(link) {
                 continue;
             }

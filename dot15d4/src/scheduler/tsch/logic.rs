@@ -5,13 +5,10 @@
 //! The scheduler wakes up slightly before each timeslot (guard time)
 //! to prepare for the operation.
 
-use core::{mem, time::Duration};
+use core::mem;
 
 use dot15d4_driver::{
-    radio::{
-        frame::{Address, FrameType},
-        DriverConfig,
-    },
+    radio::{frame::Address, DriverConfig},
     timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
@@ -126,11 +123,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         event: SchedulerTaskEvent,
     ) -> SchedulerTaskTransition {
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(_instant)) => {
                 self.state = TschState::Transmitting { response_token };
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(radio_frame, instant)) => todo!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(_radio_frame, _instant)) => {
+                todo!()
+            }
             _ => unreachable!(),
         }
     }
@@ -143,7 +142,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant, timesync_us)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant, _timesync_us)) => {
                 if let Some(response_token) = response_token {
                     let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
                         tx_frame.forget_size::<RadioDriverImpl>(),
@@ -151,7 +150,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     ));
                     // Acknowledgment-based synchronization
                     #[cfg(not(feature = "no-tsch-ack-sync"))]
-                    if let Some(timesync_us) = timesync_us {
+                    if let Some(timesync_us) = _timesync_us {
                         context.pib.tsch.sync_ack(timesync_us);
                     }
                     let action = self.go_idle(context);
@@ -247,7 +246,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     }
                 }
             }
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(rx_frame, instant)) => {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(rx_frame, _instant)) => {
                 self.put_rx_frame(rx_frame);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
@@ -386,7 +385,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 }
                 PibCommand::Reset => todo!(),
             },
-            SchedulerCommand::ScanCommand(scan_command) => todo!(),
+            SchedulerCommand::ScanCommand(_scan_command) => todo!(),
         }
     }
 }

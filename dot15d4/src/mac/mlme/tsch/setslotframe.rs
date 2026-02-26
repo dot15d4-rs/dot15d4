@@ -49,7 +49,7 @@ impl<'task, RadioDriverImpl: DriverConfig> SetSlotframeRequestTask<'task, RadioD
 }
 
 /// Final result of a data request task.
-pub(crate) enum SetSlotframeConfirm {
+pub enum SetSlotframeConfirm {
     Success,
     SlotframeNotFound,
     MaxSlotframesExceeded,

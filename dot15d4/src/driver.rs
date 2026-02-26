@@ -493,7 +493,6 @@ where
                     CompletedRadioTransition::Entered(RadioTransitionResult {
                         prev_task_result,
                         this_state,
-                        measured_entry,
                         ..
                     }) => {
                         let event =
@@ -814,7 +813,6 @@ where
                     CompletedRadioTransition::Entered(RadioTransitionResult {
                         prev_task_result: rx_task_result,
                         this_state: listening_rx_driver,
-                        measured_entry,
                         ..
                     }) => {
                         let event = handle_rx_task_result(self, rx_task_result, reception_type);
@@ -1390,9 +1388,7 @@ where
                     .await
                 {
                     CompletedRadioTransition::Entered(RadioTransitionResult {
-                        this_state,
-                        measured_entry,
-                        ..
+                        this_state, ..
                     }) => {
                         // Set the RX window end time if specified
                         self.rx_window_end.set(rx_window_end);

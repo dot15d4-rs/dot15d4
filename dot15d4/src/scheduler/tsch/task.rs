@@ -21,6 +21,7 @@ use crate::{
     scheduler::{tsch::TschLinkType, SchedulerContext},
 };
 
+#[cfg(feature = "tsch-coordinator")]
 use super::beacon::EnhancedBeaconBuilder;
 use super::pib::TschAsn;
 

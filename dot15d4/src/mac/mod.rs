@@ -13,7 +13,7 @@ pub use dot15d4_frame as frame;
 use paste::paste;
 
 #[cfg(feature = "tsch")]
-use self::mlme::associate::{AssociateConfirm, AssociateIndication};
+use self::mlme::associate::AssociateIndication;
 #[cfg(feature = "tsch")]
 use self::mlme::associate::{AssociateIndicationTask, AssociateRequestTask};
 #[cfg(feature = "tsch")]

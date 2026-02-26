@@ -55,7 +55,7 @@ impl<'task, RadioDriverImpl: DriverConfig> SetLinkRequestTask<'task, RadioDriver
 }
 
 /// Final result of a data request task.
-pub(crate) enum SetLinkConfirm {
+pub enum SetLinkConfirm {
     Success,
     UnknownLink,
     MaxLinksExceeded,
