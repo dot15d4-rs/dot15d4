@@ -235,7 +235,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                         .deallocate_buffer(radio_frame.into_buffer());
                 }
                 let response = match &completion {
-                    SchedulerTaskCompletion::SwitchToCsma => todo!(),
+                    SchedulerTaskCompletion::SwitchToCsma => {
+                        unreachable!()
+                    }
                     SchedulerTaskCompletion::SwitchToTsch => {
                         SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
                             TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
@@ -413,7 +415,9 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                     None,
                 )
             }
-            ScanCommand::StopScanning => todo!(),
+            ScanCommand::StopScanning => {
+                unreachable!()
+            }
         }
     }
 

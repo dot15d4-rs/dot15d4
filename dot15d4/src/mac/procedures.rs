@@ -135,11 +135,14 @@ pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
     let mut best_candidate = None;
     for descriptor in scan_confirm.pan_descriptor_list {
         let timestamp = descriptor.timestamp;
-        let parser = descriptor.mpdu.into_parser().parse_addressing().unwrap();
-        let parser = parser
-            .parse_security()
-            .parse_ies::<RadioDriverImpl>()
-            .unwrap();
+        let parser = match descriptor.mpdu.into_parser().parse_addressing() {
+            Ok(parser) => parser,
+            Err(_) => continue,
+        };
+        let parser = match parser.parse_security().parse_ies::<RadioDriverImpl>() {
+            Ok(parser) => parser,
+            Err(_) => continue,
+        };
         let ies = parser.ies_fields();
         let join_metric = ies.tsch_sync().map(|ts| ts.join_metric());
 
@@ -213,12 +216,16 @@ async fn join_network_from_beacon(
                 .send_request_awaiting_response(request_token, mac_request)
                 .await;
             for link in slotframe.links() {
+                let Some(link_options) = TschLinkOption::from_bits(link.options()) else {
+                    // Skip links with invalid option bits
+                    continue;
+                };
                 let request_token = request_sender.allocate_request_token().await;
                 let mac_request = MacRequest::MlmeSetLink(SetLinkRequest {
                     slotframe_handle: slotframe.handle(),
                     channel_offset: link.channel_offset(),
                     timeslot: link.timeslot(),
-                    link_options: TschLinkOption::from_bits(link.options()).unwrap(),
+                    link_options,
                     link_type: TschLinkType::Advertising,
                     neighbor: None,
                     advertise: true,
@@ -236,7 +243,12 @@ async fn join_network_from_beacon(
         }
 
         let request_token = request_sender.allocate_request_token().await;
-        let asn = ies.tsch_sync().unwrap().asn();
+        let Some(tsch_sync) = ies.tsch_sync() else {
+            // No TSCH Synchronization IE in beacon - cannot join
+            unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
+            return None;
+        };
+        let asn = tsch_sync.asn();
         let mac_request = MacRequest::MlmeSet(SetRequest::new(SetRequestAttribute::MacAsn(
             asn,
             rx_timestamp,
@@ -263,7 +275,10 @@ async fn join_network_from_beacon(
         let src_address = addressing.try_src_address().unwrap();
         let src_address = match src_address {
             Address::Extended(extended_address) => extended_address,
-            _ => unreachable!(),
+            _ => {
+                unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
+                return None;
+            }
         };
         let mut coord_address = [0u8; 8];
         coord_address.copy_from_slice(src_address.as_ref());

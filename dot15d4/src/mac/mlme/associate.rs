@@ -291,7 +291,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
         device_address.copy_from_slice(src_addr.as_ref());
         let mut coord_address = [0u8; 8];
         coord_address.copy_from_slice(dst_addr.as_ref());
-        let pan_id = fields.try_dst_pan_id().unwrap().into_u16();
+        let pan_id = fields.try_dst_pan_id()?.into_u16();
 
         // Second pass: parse through to get frame payload.
         let reader = rx_mpdu

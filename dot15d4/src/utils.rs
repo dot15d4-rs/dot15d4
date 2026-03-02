@@ -34,16 +34,13 @@ pub fn is_frame_valid_and_for_us(
         ..
     } = preliminary_frame_info;
 
-    if frame_control.is_none() || addressing_fields.is_none() {
+    let (Some(frame_control), Some(addressing_fields)) = (frame_control, addressing_fields) else {
         return false;
-    }
+    };
 
-    let frame_control = frame_control.as_ref().unwrap();
     if !frame_control.is_valid() {
         return false;
     }
-
-    let addressing_fields = addressing_fields.as_ref().unwrap();
 
     // Check destination PAN id.
     let dst_pan_id = addressing_fields
@@ -121,19 +118,31 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
             }
         }
         FrameType::MacCommand => {
-            // TODO: handle unwrap()
-            let reader = reader
+            let parsed = reader
                 .parse_addressing()
-                .unwrap()
-                .parse_security()
-                .parse_ies::<RadioDriverImpl>()
-                .unwrap();
-            let payload = reader.try_frame_payload().unwrap();
-            // TODO: use enum
-            let mac_command_type = match payload[0] {
-                0x01 => MacCommandType::AssociateRequest,
-                0x02 => MacCommandType::AssociateResponse,
-                _ => todo!(),
+                .ok()
+                .and_then(|r| r.parse_security().parse_ies::<RadioDriverImpl>().ok());
+
+            let Some(reader) = parsed else {
+                return Err(mpdu_frame
+                    .into_radio_frame::<RadioDriverImpl>()
+                    .forget_size::<RadioDriverImpl>());
+            };
+
+            let Some(payload) = reader.try_frame_payload() else {
+                return Err(mpdu_frame
+                    .into_radio_frame::<RadioDriverImpl>()
+                    .forget_size::<RadioDriverImpl>());
+            };
+
+            let mac_command_type = match payload.first() {
+                Some(0x01) => MacCommandType::AssociateRequest,
+                Some(0x02) => MacCommandType::AssociateResponse,
+                _ => {
+                    return Err(mpdu_frame
+                        .into_radio_frame::<RadioDriverImpl>()
+                        .forget_size::<RadioDriverImpl>())
+                }
             };
             // Association Request
             if let Some((token, _)) =
@@ -151,6 +160,11 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
                     .forget_size::<RadioDriverImpl>())
             }
         }
-        _ => todo!(),
+        _ => {
+            // Unsupported frame type: drop the frame
+            Err(mpdu_frame
+                .into_radio_frame::<RadioDriverImpl>()
+                .forget_size::<RadioDriverImpl>())
+        }
     }
 }

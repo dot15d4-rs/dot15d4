@@ -12,7 +12,7 @@ use dot15d4_driver::{
     timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::sync::ResponseToken;
+use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
@@ -96,7 +96,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 SchedulerRequest::Command(command) => {
                     self.on_scheduler_command(token, command, context)
                 }
-                SchedulerRequest::Reception(_reception_type) => todo!(),
+                SchedulerRequest::Reception(_) => {
+                    unreachable!()
+                }
             },
             // Timer expired: time to execute next operation in the upcoming timeslot
             SchedulerTaskEvent::TimerExpired => match self.pending_operations.last() {
@@ -181,8 +183,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                 } else {
-                    // TODO: Unicast Beacon ?
-                    todo!()
+                    // No response token (e.g. beacon NACK)
+                    let recovered = tx_frame.forget_size::<RadioDriverImpl>();
+                    unsafe {
+                        context
+                            .buffer_allocator
+                            .deallocate_buffer(recovered.into_buffer());
+                    }
+                    let action = self.go_idle(context);
+                    SchedulerTaskTransition::Execute(action, None)
                 }
             }
             _ => unreachable!(),
