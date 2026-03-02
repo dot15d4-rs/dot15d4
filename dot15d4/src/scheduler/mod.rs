@@ -19,7 +19,7 @@ pub mod tsch;
 use dot15d4_driver::{
     radio::{
         config::Channel as PhyChannel,
-        frame::{RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
+        frame::{Address, PanId, RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
     timer::NsInstant,
@@ -28,15 +28,25 @@ use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::sync::{Channel, HasAddress, Receiver, ResponseToken, Sender};
 use rand_core::RngCore;
 
-use crate::driver::{DriverEventReceiver, DriverRequestSender, DrvSvcEvent, DrvSvcRequest};
 use crate::mac::MacBufferAllocator;
 use crate::pib::Pib;
+use crate::{
+    driver::{DriverEventReceiver, DriverRequestSender, DrvSvcEvent, DrvSvcRequest},
+    mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute},
+};
 
 pub use self::command::{SchedulerCommand, SchedulerCommandResult};
 
 #[cfg(feature = "tsch")]
 use self::scan::ScanChannels;
-use self::{runner::run_task, task::RootSchedulerTask};
+use self::{
+    command::{
+        pib::{GetPibResult, PibCommand, ResetPibResult, SetPibResult},
+        PibCommandResult,
+    },
+    runner::run_task,
+    task::RootSchedulerTask,
+};
 
 pub const SCHEDULER_CHANNEL_CAPACITY: usize = 6;
 pub const SCHEDULER_CHANNEL_BACKLOG: usize = 6;
@@ -210,7 +220,77 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
         )
     }
 
-    fn try_receive_tx_request(&self) -> Option<(dot15d4_util::sync::ResponseToken, MpduFrame)> {
+    /// Process a PIB command and return the corresponding scheduler response
+    pub fn process_pib_command(&mut self, cmd: PibCommand) -> SchedulerResponse {
+        let result = match cmd {
+            PibCommand::Set(attribute) => {
+                let set_result = match attribute {
+                    SetRequestAttribute::MacExtendedAddress(addr) => {
+                        self.pib.extended_address = Address::from_le_bytes(&addr);
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacCoordExtendedAddress(addr) => {
+                        self.pib.coord_extended_address = Address::from_le_bytes(&addr);
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacAssociationPermit(permit) => {
+                        self.pib.association_permit = permit;
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacPanId(pan_id) => {
+                        self.pib.pan_id = PanId::new_owned(pan_id.to_le_bytes());
+                        SetPibResult::Success
+                    }
+                    SetRequestAttribute::MacShortAddress(short_addr) => {
+                        self.pib.short_address = short_addr;
+                        SetPibResult::Success
+                    }
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacAsn(asn, instant) => {
+                        self.pib.tsch.sync_asn(asn, instant);
+                        SetPibResult::Success
+                    }
+                };
+                PibCommandResult::Set(set_result)
+            }
+            PibCommand::Get(attribute) => {
+                let get_result = match attribute {
+                    GetRequestAttribute::MacExtendedAddress => {
+                        GetPibResult::MacExtendedAddress(self.pib.extended_address)
+                    }
+                    GetRequestAttribute::MacCoordExtendedAddress => {
+                        GetPibResult::MacCoordExtendedAddress(self.pib.coord_extended_address)
+                    }
+                    GetRequestAttribute::MacAssociationPermit => {
+                        GetPibResult::MacAssociationPermit(self.pib.association_permit)
+                    }
+                    GetRequestAttribute::MacPanId => {
+                        GetPibResult::MacPanId(self.pib.pan_id.into_u16())
+                    }
+                    GetRequestAttribute::MacShortAddress => {
+                        GetPibResult::MacShortAddress(self.pib.short_address)
+                    }
+                    _ => GetPibResult::InvalidParameter,
+                };
+                PibCommandResult::Get(get_result)
+            }
+            PibCommand::Reset => {
+                let addr_bytes: [u8; 8] = match &self.pib.extended_address {
+                    Address::Extended(ext) => ext
+                        .as_ref()
+                        .try_into()
+                        .expect("extended address is 8 bytes"),
+                    _ => [0u8; 8],
+                };
+                self.pib = Pib::new(&addr_bytes);
+                PibCommandResult::Reset(ResetPibResult::Success)
+            }
+        };
+
+        SchedulerResponse::Command(SchedulerCommandResult::PibCommand(result))
+    }
+
+    fn try_receive_tx_request(&self) -> Option<(ResponseToken, MpduFrame)> {
         match self.request_receiver.try_receive_request(&MessageType::Tx) {
             Some((token, SchedulerRequest::Transmission(mpdu))) => Some((token, mpdu)),
             _ => None,

@@ -8,7 +8,7 @@
 use core::mem;
 
 use dot15d4_driver::{
-    radio::{frame::Address, DriverConfig},
+    radio::DriverConfig,
     timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
@@ -18,11 +18,7 @@ use dot15d4_util::sync::ResponseToken;
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
-    mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute},
-    scheduler::{
-        command::pib::{GetPibResult, SetPibResult},
-        SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition,
-    },
+    scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
 };
 use crate::{
     scheduler::{
@@ -331,60 +327,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // CSMA commands not handled in TSCH mode
                 todo!()
             }
-            SchedulerCommand::PibCommand(cmd) => match cmd {
-                PibCommand::Set(attribute) => {
-                    let result = match attribute {
-                        SetRequestAttribute::MacShortAddress(short_addr) => {
-                            context.pib.short_address = short_addr;
-                            SetPibResult::Success
-                        }
-                        SetRequestAttribute::MacCoordExtendedAddress(addr) => {
-                            context.pib.coord_extended_address = Address::from_le_bytes(&addr);
-                            SetPibResult::Success
-                        }
-                        // NOTE: we do not need/support other attributes in
-                        //       TSCH mode for now.
-                        _ => unreachable!(),
-                    };
-                    let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
-                        PibCommandResult::Set(result),
-                    ));
-                    SchedulerTaskTransition::Execute(
-                        SchedulerAction::SelectDriverEventOrRequest,
-                        Some((token, resp)),
-                    )
-                }
-                PibCommand::Get(attribute) => {
-                    let result = match attribute {
-                        GetRequestAttribute::MacExtendedAddress => {
-                            GetPibResult::MacExtendedAddress(context.pib.extended_address)
-                        }
-                        GetRequestAttribute::MacCoordExtendedAddress => {
-                            GetPibResult::MacCoordExtendedAddress(
-                                context.pib.coord_extended_address,
-                            )
-                        }
-                        GetRequestAttribute::MacAssociationPermit => {
-                            GetPibResult::MacAssociationPermit(context.pib.association_permit)
-                        }
-                        GetRequestAttribute::MacPanId => {
-                            GetPibResult::MacPanId(context.pib.pan_id.into_u16())
-                        }
-                        GetRequestAttribute::MacShortAddress => {
-                            GetPibResult::MacShortAddress(context.pib.short_address)
-                        }
-                        _ => todo!(),
-                    };
-                    let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
-                        PibCommandResult::Get(result),
-                    ));
-                    SchedulerTaskTransition::Execute(
-                        SchedulerAction::SelectDriverEventOrRequest,
-                        Some((token, resp)),
-                    )
-                }
-                PibCommand::Reset => todo!(),
-            },
+            SchedulerCommand::PibCommand(cmd) => {
+                let response = context.process_pib_command(cmd);
+                let deadline = self.peek_deadline(context);
+                SchedulerTaskTransition::Execute(
+                    SchedulerAction::WaitForTimeoutOrSchedulerRequest { deadline },
+                    Some((token, response)),
+                )
+            }
             SchedulerCommand::ScanCommand(_scan_command) => todo!(),
         }
     }

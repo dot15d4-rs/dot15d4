@@ -5,7 +5,7 @@
 use dot15d4_driver::{
     radio::{
         config,
-        frame::{Address, PanId, RadioFrame, RadioFrameSized, RadioFrameUnsized},
+        frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
     timer::RadioTimerApi,
@@ -15,6 +15,10 @@ use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::scan::ScanCommand;
+use crate::scheduler::{
+    command::pib::PibCommand, SchedulerCommandResult, SchedulerContext, SchedulerRequest,
+    SchedulerResponse, SchedulerTransmissionResult,
+};
 #[cfg(feature = "tsch")]
 use crate::scheduler::{command::tsch::UseTschCommandResult, SchedulerTaskCompletion};
 #[cfg(feature = "tsch")]
@@ -24,16 +28,8 @@ use crate::scheduler::{
 };
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
-    mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute},
     scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
     utils,
-};
-use crate::{
-    pib::Pib,
-    scheduler::{
-        command::pib::*, SchedulerCommandResult, SchedulerContext, SchedulerRequest,
-        SchedulerResponse, SchedulerTransmissionResult,
-    },
 };
 
 use super::task::{CsmaState, CsmaTask, Pipelined};
@@ -385,92 +381,18 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 
     /// Handle PIB attribute commands.
     ///
-    /// Processes Set and Reset commands for PAN Information Base attributes.
+    /// Delegates to the centralised handler on [`SchedulerContext`].
     fn on_pib_cmd(
         &mut self,
         token: ResponseToken,
         cmd: PibCommand,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        match cmd {
-            PibCommand::Set(attribute) => {
-                let result = match attribute {
-                    SetRequestAttribute::MacExtendedAddress(addr) => {
-                        context.pib.extended_address = Address::from_le_bytes(&addr);
-                        SetPibResult::Success
-                    }
-                    SetRequestAttribute::MacCoordExtendedAddress(addr) => {
-                        context.pib.coord_extended_address = Address::from_le_bytes(&addr);
-                        SetPibResult::Success
-                    }
-                    SetRequestAttribute::MacAssociationPermit(permit) => {
-                        context.pib.association_permit = permit;
-                        SetPibResult::Success
-                    }
-                    SetRequestAttribute::MacPanId(pan_id) => {
-                        context.pib.pan_id = PanId::new_owned(pan_id.to_le_bytes());
-                        SetPibResult::Success
-                    }
-                    SetRequestAttribute::MacShortAddress(short_addr) => {
-                        context.pib.short_address = short_addr;
-                        SetPibResult::Success
-                    }
-                    #[cfg(feature = "tsch")]
-                    SetRequestAttribute::MacAsn(asn, instant) => {
-                        context.pib.tsch.sync_asn(asn, instant);
-                        SetPibResult::Success
-                    }
-                };
-                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
-                    PibCommandResult::Set(result),
-                ));
-                SchedulerTaskTransition::Execute(
-                    SchedulerAction::SelectDriverEventOrRequest,
-                    Some((token, resp)),
-                )
-            }
-            PibCommand::Get(attribute) => {
-                let result = match attribute {
-                    GetRequestAttribute::MacExtendedAddress => {
-                        GetPibResult::MacExtendedAddress(context.pib.extended_address)
-                    }
-                    GetRequestAttribute::MacAssociationPermit => {
-                        GetPibResult::MacAssociationPermit(context.pib.association_permit)
-                    }
-                    GetRequestAttribute::MacPanId => {
-                        GetPibResult::MacPanId(context.pib.pan_id.into_u16())
-                    }
-                    GetRequestAttribute::MacShortAddress => {
-                        GetPibResult::MacShortAddress(context.pib.short_address)
-                    }
-                    _ => todo!(),
-                };
-                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
-                    PibCommandResult::Get(result),
-                ));
-                SchedulerTaskTransition::Execute(
-                    SchedulerAction::SelectDriverEventOrRequest,
-                    Some((token, resp)),
-                )
-            }
-            PibCommand::Reset => {
-                let addr_bytes: [u8; 8] = match &context.pib.extended_address {
-                    Address::Extended(ext) => ext
-                        .as_ref()
-                        .try_into()
-                        .expect("extended address is 8 bytes"),
-                    _ => [0u8; 8], // fallback to zero address if somehow not extended
-                };
-                context.pib = Pib::new(&addr_bytes);
-                let resp = SchedulerResponse::Command(SchedulerCommandResult::PibCommand(
-                    PibCommandResult::Reset(ResetPibResult::Success),
-                ));
-                SchedulerTaskTransition::Execute(
-                    SchedulerAction::SelectDriverEventOrRequest,
-                    Some((token, resp)),
-                )
-            }
-        }
+        let response = context.process_pib_command(cmd);
+        SchedulerTaskTransition::Execute(
+            SchedulerAction::SelectDriverEventOrRequest,
+            Some((token, response)),
+        )
     }
 
     #[cfg(feature = "tsch")]
