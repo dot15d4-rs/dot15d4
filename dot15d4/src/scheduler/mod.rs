@@ -250,6 +250,11 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                         self.pib.tsch.sync_asn(asn, instant);
                         SetPibResult::Success
                     }
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacTimeslotTemplate(timings) => {
+                        self.pib.tsch.timeslot_timings = timings;
+                        SetPibResult::Success
+                    }
                 };
                 PibCommandResult::Set(set_result)
             }

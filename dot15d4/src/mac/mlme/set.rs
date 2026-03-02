@@ -13,6 +13,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "tsch")]
+use crate::mac::frame::fields::TschTimeslotTimings;
+
 #[cfg(feature = "rtos-trace")]
 use crate::trace::MAC_REQUEST;
 
@@ -31,6 +34,8 @@ pub enum SetRequestAttribute {
     MacShortAddress(u16),
     #[cfg(feature = "tsch")]
     MacAsn(u64, NsInstant),
+    #[cfg(feature = "tsch")]
+    MacTimeslotTemplate(TschTimeslotTimings),
 }
 
 /// MLME-SET.request primitive

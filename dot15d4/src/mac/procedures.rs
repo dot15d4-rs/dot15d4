@@ -57,6 +57,7 @@ pub async fn get_coordinator_extended_address(
 pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender: &MacRequestSender<'static>,
     timer: RadioTimerImpl,
+    timeslot_timings: Option<dot15d4_frame::fields::TschTimeslotTimings>,
 ) {
     use crate::scheduler::tsch::TschLinkType;
 
@@ -70,6 +71,18 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
         },
         primitives::{MacRequest, TschModeRequest},
     };
+
+    // If custom timeslot timings are provided, set them before configuring
+    // the schedule so that the beacon will contain them.
+    if let Some(timings) = timeslot_timings {
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacTimeslotTemplate(timings),
+        ));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+    }
 
     // We create a single slotframe with handle 0 and size 100
     let request_token = request_sender.allocate_request_token().await;
@@ -256,7 +269,36 @@ async fn join_network_from_beacon(
         request_sender
             .send_request_awaiting_response(request_token, mac_request)
             .await;
-        // info!("ASN:{} rx_timestamp:{}", asn, (rx_timestamp.ticks()));
+
+        // Extract timeslot timings from the Enhanced Beacon's Timeslot IE
+        // and apply them to our PIB so we use the coordinator's timing template.
+        if let Some(timeslot_ie) = ies.tsch_timeslot() {
+            if !timeslot_ie.is_reduced() {
+                use dot15d4_frame::fields::TschTimeslotTimings;
+
+                let mut timings = TschTimeslotTimings::new(timeslot_ie.timeslot_id(), 0);
+                timings.set_cca_offset(timeslot_ie.cca_offset().unwrap());
+                timings.set_cca(timeslot_ie.cca().unwrap());
+                timings.set_tx_offset(timeslot_ie.tx_offset().unwrap());
+                timings.set_rx_offset(timeslot_ie.rx_offset().unwrap());
+                timings.set_rx_ack_delay(timeslot_ie.rx_ack_delay().unwrap());
+                timings.set_tx_ack_delay(timeslot_ie.tx_ack_delay().unwrap());
+                timings.set_rx_wait(timeslot_ie.rx_wait().unwrap());
+                timings.set_ack_wait(timeslot_ie.ack_wait().unwrap());
+                timings.set_rx_tx(timeslot_ie.rx_tx().unwrap());
+                timings.set_max_ack(timeslot_ie.max_ack().unwrap());
+                timings.set_max_tx(timeslot_ie.max_tx().unwrap());
+                timings.set_timeslot_length(timeslot_ie.timeslot_length().unwrap());
+
+                let request_token = request_sender.allocate_request_token().await;
+                let mac_request = MacRequest::MlmeSet(SetRequest::new(
+                    SetRequestAttribute::MacTimeslotTemplate(timings),
+                ));
+                request_sender
+                    .send_request_awaiting_response(request_token, mac_request)
+                    .await;
+            }
+        }
 
         // TODO: join metric
 

@@ -203,7 +203,7 @@ async fn upper_layer_task(
 
     #[cfg(feature = "tsch")]
     if is_coord {
-        tsch_start_pan(&request_sender, timer).await;
+        tsch_start_pan(&request_sender, timer, None).await;
     } else {
         let scan_confirm = scan(&request_sender).await;
 

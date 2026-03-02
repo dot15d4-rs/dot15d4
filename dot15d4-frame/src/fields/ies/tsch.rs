@@ -15,7 +15,7 @@ use bitflags::bitflags;
 /// | ID | CCA offset | CCA | TX offset | RX offset | RX ACK delay | TX ACK delay | RX wait | ACK wait | RX/TX | Max ACK | Max TX | Timeslot length |
 /// +----+------------+-----+-----------+-----------+--------------+--------------+---------+----------+-------+---------+--------+------------------+
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TschTimeslotTimings {
     id: u8,
     /// Offset from the start of the timeslot to the start of the CCA in
@@ -79,6 +79,43 @@ impl TschTimeslotTimings {
             max_ack: 2400,
             max_tx: 4256,
             timeslot_length: 10000,
+        }
+    }
+
+    /// Create timeslot timings from a full TSCH Timeslot IE received in an
+    /// Enhanced Beacon.
+    ///
+    /// If the IE uses the reduced format (timeslot ID only), returns `None`
+    /// since a full timing template is required.
+    pub fn from_full_ie(
+        id: u8,
+        cca_offset: u16,
+        cca: u16,
+        tx_offset: u16,
+        rx_offset: u16,
+        rx_ack_delay: u16,
+        tx_ack_delay: u16,
+        rx_wait: u16,
+        ack_wait: u16,
+        rx_tx: u16,
+        max_ack: u16,
+        max_tx: u16,
+        timeslot_length: u16,
+    ) -> Self {
+        Self {
+            id,
+            cca_offset,
+            cca,
+            tx_offset,
+            rx_offset,
+            rx_ack_delay,
+            tx_ack_delay,
+            rx_wait,
+            ack_wait,
+            rx_tx,
+            max_ack,
+            max_tx,
+            timeslot_length,
         }
     }
 
