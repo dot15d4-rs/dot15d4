@@ -159,7 +159,6 @@ pub(crate) struct ScanRequestTask<'task, RadioDriverImpl: DriverConfig> {
     /// Duration per channel in nanoseconds.
     duration_per_channel: NsDuration,
     results: ScanConfirm<MAX_PAN_DESCRIPTORS>,
-    max_pan_descriptors: usize,
     _task: PhantomData<&'task ()>,
     _radio: PhantomData<RadioDriverImpl>,
 }
@@ -170,12 +169,10 @@ impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImp
         //TODO: handle scan_duration exponent instead of arbitrary value
         let duration_per_channel = NsDuration::secs(4);
         let scan_type = request.scan_type;
-        let max_pan_descriptors = request.max_pan_descriptors;
         Self {
             state: ScanState::Initial(request),
             duration_per_channel,
             results: ScanConfirm::new(scan_type),
-            max_pan_descriptors,
             _task: PhantomData,
             _radio: PhantomData,
         }
@@ -231,12 +228,26 @@ where
                             beacon_frame,
                             timestamp,
                         )) => {
-                            // A frame was received - check if it's a beacon
-                            self.process_received_frame(beacon_frame, timestamp)
+                            // Always request next beacon — the scheduler decides when to stop.
+                            MacTaskTransition::SchedulerRequest(
+                                self.process_received_frame(beacon_frame, timestamp),
+                                SchedulerRequest::Reception(ReceptionType::Beacon),
+                                None,
+                            )
                         }
                         SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
-                            ScanCommandResult::StoppedScanning,
-                        )) => MacTaskTransition::Terminated(self.results),
+                            ScanCommandResult::StoppedScanning(reception_result),
+                        )) => {
+                            if let Some(SchedulerReceptionResult::Beacon(beacon_frame, timestamp)) =
+                                reception_result
+                            {
+                                MacTaskTransition::Terminated(
+                                    self.process_received_frame(beacon_frame, timestamp).results,
+                                )
+                            } else {
+                                MacTaskTransition::Terminated(self.results)
+                            }
+                        }
                         _ => unreachable!(),
                     },
                     _ => unreachable!(),
@@ -247,13 +258,14 @@ where
 }
 
 impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImpl> {
-    /// Process a received frame and extract beacon information if applicable.
+    /// Process a received beacon frame and always request the next one.
+    /// The scheduler is responsible for stopping when the limit is reached
+    /// or all channels have been scanned.
     fn process_received_frame(
         mut self,
         beacon_frame: RadioFrame<RadioFrameSized>,
         timestamp: NsInstant,
-    ) -> MacTaskTransition<Self> {
-        // Convert to MPDU and check frame type
+    ) -> Self {
         let mpdu = MpduFrame::from_radio_frame(beacon_frame);
         let descriptor = PanDescriptor {
             mpdu,
@@ -261,19 +273,8 @@ impl<'task, RadioDriverImpl: DriverConfig> ScanRequestTask<'task, RadioDriverImp
             link_quality: 0, // TODO: Get from PHY if available
         };
 
-        // Try to add to results (may fail if full)
-        if !self.results.add_pan_descriptor(descriptor) {
-            self.results.status = ScanStatus::LimitReached;
-        }
-        if self.results.pan_descriptor_list.len() == self.max_pan_descriptors {
-            MacTaskTransition::Terminated(self.results)
-        } else {
-            MacTaskTransition::SchedulerRequest(
-                self,
-                SchedulerRequest::Reception(ReceptionType::Beacon),
-                None,
-            )
-        }
+        let _ = self.results.add_pan_descriptor(descriptor);
+        self
     }
 }
 

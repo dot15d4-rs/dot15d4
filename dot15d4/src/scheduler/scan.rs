@@ -6,17 +6,16 @@ use dot15d4_driver::{
         frame::{self, FrameType, RadioFrame, RadioFrameSized, RadioFrameUnsized},
         DriverConfig,
     },
-    timer::{NsDuration, RadioTimerApi},
+    timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
+use dot15d4_util::allocator::IntoBuffer;
 
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, Timestamp},
     scheduler::{
-        command::scan::{ScanCommand, ScanCommandResult},
-        ReceptionType, SchedulerCommand, SchedulerCommandResult, SchedulerReceptionResult,
-        SchedulerRequest, SchedulerResponse,
+        command::scan::ScanCommandResult, ReceptionType, SchedulerCommandResult,
+        SchedulerReceptionResult, SchedulerResponse,
     },
 };
 
@@ -81,26 +80,26 @@ impl Iterator for ScanChannelsIter {
     }
 }
 
-/// Root scheduler state machine states.
+/// Scan task state machine states.
 pub enum ScanTaskState {
     Initial,
     ScanningChannel(Channel),
     ReceivingFrame(Channel),
-    Terminating(ResponseToken),
-    /// Placeholder
     Placeholder,
 }
 
-/// Root scheduler task that manages scheduler switching.
+/// Scheduler task for passive channel scanning.
 ///
-/// This is the top-level task that wraps the actual scheduler implementations.
-/// It handles mode switching requests and ensures proper initialization of
-/// new schedulers when switching.
+/// Iterates over the requested channels, listens for beacons on each, and
+/// forwards them to the MAC layer. Stops when the descriptor limit is
+/// reached or all channels have been scanned
 pub struct ScanTask<RadioDriverImpl: DriverConfig> {
     /// Current scheduler state
     pub state: ScanTaskState,
     pub channels: ScanChannelsIter,
     remaining_pan_descriptors: usize,
+    /// End time of the current channel's scan window.
+    channel_window_end: Option<NsInstant>,
     marker: PhantomData<RadioDriverImpl>,
 }
 
@@ -114,7 +113,6 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for ScanTask<
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        // Delegate to inner task
         match mem::replace(&mut self.state, ScanTaskState::Placeholder) {
             ScanTaskState::Initial => self.execute_initial(event, context),
             ScanTaskState::ScanningChannel(channel) => {
@@ -122,9 +120,6 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for ScanTask<
             }
             ScanTaskState::ReceivingFrame(channel) => {
                 self.execute_receiving_frame(event, channel, context)
-            }
-            ScanTaskState::Terminating(response_token) => {
-                self.execute_terminating(event, response_token, context)
             }
             _ => unreachable!(),
         }
@@ -138,6 +133,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
             channels: channels.iter(),
             marker: PhantomData,
             remaining_pan_descriptors: max_pan_descriptors,
+            channel_window_end: None,
         }
     }
 
@@ -148,7 +144,8 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         debug_assert!(matches!(event, SchedulerTaskEvent::Entry));
 
-        self.next_transition(None, context, None)
+        let rx_frame = context.allocate_frame();
+        self.advance_to_next_channel(context, Err(rx_frame))
     }
 
     fn execute_scanning_channel(
@@ -163,15 +160,12 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     self.state = ScanTaskState::ReceivingFrame(channel);
                     SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
                 }
-                DrvSvcEvent::RxWindowEnded(radio_frame) => {
-                    // No beacon received duration channel scan, continue with next channel
-                    self.next_transition(Some(radio_frame), context, None)
+                DrvSvcEvent::RxWindowEnded(recovered_rx_frame) => {
+                    // Channel scan window expired, advance to next channel
+                    self.advance_to_next_channel(context, Err(recovered_rx_frame))
                 }
                 _ => unreachable!(),
             },
-            SchedulerTaskEvent::SchedulerRequest { token, request } => {
-                self.received_request(request, token)
-            }
             _ => unreachable!(),
         }
     }
@@ -179,7 +173,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
     fn execute_receiving_frame(
         &mut self,
         event: SchedulerTaskEvent,
-        _channel: Channel,
+        channel: Channel,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
@@ -187,96 +181,20 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                 DrvSvcEvent::Received(radio_frame, instant) => {
                     match self.validate_rx_frame(radio_frame) {
                         Ok(beacon_frame) => {
-                            if let Some((response_token, _)) =
-                                context.try_receive_rx_request(ReceptionType::Beacon)
-                            {
-                                let response = SchedulerResponse::Reception(
-                                    SchedulerReceptionResult::Beacon(beacon_frame, instant),
-                                );
-                                self.remaining_pan_descriptors -= 1;
-                                self.next_transition(
-                                    None,
-                                    context,
-                                    Some((response_token, response)),
-                                )
-                            } else {
-                                self.next_transition(
-                                    Some(beacon_frame.forget_size::<RadioDriverImpl>()),
-                                    context,
-                                    None,
-                                )
-                            }
+                            self.handle_valid_beacon(beacon_frame, instant, channel, context)
                         }
-                        Err(recoved_rx_frame) => {
-                            self.next_transition(Some(recoved_rx_frame), context, None)
+                        Err(recovered_rx_frame) => {
+                            // Not a beacon, continue listening on same channel
+                            self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                         }
                     }
                 }
                 DrvSvcEvent::CrcError(recovered_rx_frame, _) => {
-                    // Received packet is invalid, continue with next channel
-                    self.next_transition(Some(recovered_rx_frame), context, None)
+                    // CRC error, continue listening on same channel
+                    self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                 }
                 _ => unreachable!(),
             },
-            SchedulerTaskEvent::SchedulerRequest { token, request } => {
-                self.received_request(request, token)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn execute_terminating(
-        &mut self,
-        event: SchedulerTaskEvent,
-        response_token: ResponseToken,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> SchedulerTaskTransition {
-        let recovered_rx_frame = match event {
-            SchedulerTaskEvent::DriverEvent(event) => match event {
-                DrvSvcEvent::FrameStarted => {
-                    self.state = ScanTaskState::Terminating(response_token);
-                    return SchedulerTaskTransition::Execute(
-                        SchedulerAction::WaitForDriverEvent,
-                        None,
-                    );
-                }
-                DrvSvcEvent::Received(radio_frame, _) => {
-                    radio_frame.forget_size::<RadioDriverImpl>()
-                }
-                DrvSvcEvent::RxWindowEnded(radio_frame) | DrvSvcEvent::CrcError(radio_frame, _) => {
-                    radio_frame
-                }
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
-        };
-        unsafe {
-            context
-                .buffer_allocator
-                .deallocate_buffer(recovered_rx_frame.into_buffer());
-        }
-        let resp = SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
-            ScanCommandResult::StoppedScanning,
-        ));
-        SchedulerTaskTransition::Completed(
-            SchedulerTaskCompletion::SwitchToCsma,
-            Some((response_token, resp)),
-        )
-    }
-
-    fn received_request(
-        &mut self,
-        request: SchedulerRequest,
-        response_token: ResponseToken,
-    ) -> SchedulerTaskTransition {
-        match request {
-            SchedulerRequest::Command(SchedulerCommand::ScanCommand(ScanCommand::StopScanning)) => {
-                self.state = ScanTaskState::Terminating(response_token);
-                SchedulerTaskTransition::Execute(
-                    SchedulerAction::SendDriverRequestThenWait(DrvSvcRequest::CompleteThenGoIdle),
-                    None,
-                )
-            }
             _ => unreachable!(),
         }
     }
@@ -301,42 +219,186 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
             .forget_size::<RadioDriverImpl>())
     }
 
-    fn next_transition(
+    /// Handle a valid beacon frame: forward to MAC if possible, then either
+    /// continue listening or finish the scan.
+    fn handle_valid_beacon(
         &mut self,
-        radio_frame: Option<RadioFrame<RadioFrameUnsized>>,
+        beacon_frame: RadioFrame<RadioFrameSized>,
+        instant: NsInstant,
+        channel: Channel,
         context: &mut SchedulerContext<RadioDriverImpl>,
-        response: Option<(ResponseToken, SchedulerResponse)>,
     ) -> SchedulerTaskTransition {
+        self.remaining_pan_descriptors -= 1;
+        // Forward the beacon to the MAC.
+        let reception_result = SchedulerReceptionResult::Beacon(beacon_frame, instant);
         if self.remaining_pan_descriptors > 0 {
-            if let Some(next_channel) = self.channels.next() {
-                self.state = ScanTaskState::ScanningChannel(next_channel);
-                let radio_frame = match radio_frame {
-                    Some(radio_frame) => radio_frame,
-                    None => context.allocate_frame(),
-                };
-                let current_time = context.timer.now();
-                let request = DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
-                    start: Timestamp::BestEffort,
-                    radio_frame,
-                    channel: Some(next_channel),
-                    rx_window_end: Some(current_time + NsDuration::secs(SCAN_DURATION)),
-                    expected_rx_framestart: None,
-                });
+            self.continue_on_channel(channel, context, Ok(reception_result))
+        } else {
+            // Limit already reached , respond StoppedScanning.
+            self.stopped_scanning_response(context, Ok(reception_result))
+        }
+    }
 
-                return SchedulerTaskTransition::Execute(
-                    SchedulerAction::SendDriverRequestThenSelect(request),
-                    response,
-                );
+    fn rx_request_transition(
+        &self,
+        reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
+        channel: Channel,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        let (radio_frame, reception_result) = match reception_result {
+            Ok(reception_result) => (context.allocate_frame(), Some(reception_result)),
+            Err(recovered_rx_frame) => (recovered_rx_frame, None),
+        };
+
+        let request = DrvSvcRequest::CompleteThenStartRx(DrvSvcTaskRx {
+            start: Timestamp::BestEffort,
+            radio_frame,
+            channel: Some(channel),
+            rx_window_end: self.channel_window_end,
+            expected_rx_framestart: None,
+        });
+
+        let response = if let Some(reception_result) = reception_result {
+            if let Some((response_token, _)) = context.try_receive_rx_request(ReceptionType::Beacon)
+            {
+                Some((
+                    response_token,
+                    SchedulerResponse::Reception(reception_result),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        SchedulerTaskTransition::Execute(
+            SchedulerAction::SendDriverRequestThenSelect(request),
+            response,
+        )
+    }
+
+    /// Continue listening on the same channel for the remainder of the scan
+    /// window. If the window has already expired, advance to the next channel.
+    /// Before restarting RX, check whether the scan should stop.
+    fn continue_on_channel(
+        &mut self,
+        // radio_frame: RadioFrame<RadioFrameUnsized>,
+        channel: Channel,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+        reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
+    ) -> SchedulerTaskTransition {
+        // If the limit has been reached and the MAC posted its follow-up
+        // request, respond StoppedScanning immediately.
+        if self.remaining_pan_descriptors == 0 {
+            return self.stopped_scanning_response(context, reception_result);
+        }
+
+        if let Some(window_end) = self.channel_window_end {
+            let now = context.timer.now();
+            if now < window_end {
+                self.state = ScanTaskState::ScanningChannel(channel);
+                self.rx_request_transition(reception_result, channel, context)
+            } else {
+                // TODO: check
+                self.advance_to_next_channel(context, reception_result)
+            }
+        } else {
+            // Window expired , advance to next channel
+            self.advance_to_next_channel(context, reception_result)
+        }
+    }
+
+    /// Advance to the next channel in the scan list. If no more channels
+    /// remain (or the descriptor limit is reached), finish the scan.
+    fn advance_to_next_channel(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+        reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
+    ) -> SchedulerTaskTransition {
+        // If the limit has been reached and the MAC posted its follow-up
+        // request, respond StoppedScanning immediately.
+        if self.remaining_pan_descriptors == 0 {
+            self.stopped_scanning_response(context, reception_result)
+        } else if let Some(next_channel) = self.channels.next() {
+            self.state = ScanTaskState::ScanningChannel(next_channel);
+            let current_time = context.timer.now();
+            let window_end = current_time + NsDuration::secs(SCAN_DURATION);
+            self.channel_window_end = Some(window_end);
+            self.rx_request_transition(reception_result, next_channel, context)
+        } else {
+            self.finish_scan(context, reception_result)
+        }
+    }
+
+    fn stopped_scanning_response(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+        reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
+    ) -> SchedulerTaskTransition {
+        if let Some((response_token, _)) = context.try_receive_rx_request(ReceptionType::Beacon) {
+            match reception_result {
+                Ok(reception_result) => {
+                    let response = SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+                        ScanCommandResult::StoppedScanning(Some(reception_result)),
+                    ));
+                    return SchedulerTaskTransition::Completed(
+                        SchedulerTaskCompletion::SwitchToCsma,
+                        Some((response_token, response)),
+                    );
+                }
+                Err(recovered_rx_frame) => unsafe {
+                    context
+                        .buffer_allocator
+                        .deallocate_buffer(recovered_rx_frame.into_buffer());
+
+                    let response = SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+                        ScanCommandResult::StoppedScanning(None),
+                    ));
+                    return SchedulerTaskTransition::Completed(
+                        SchedulerTaskCompletion::SwitchToCsma,
+                        Some((response_token, response)),
+                    );
+                },
             }
         }
-        // Maximum PAN descriptors reached or scan finished
-        if let Some(recovered_rx_frame) = radio_frame {
-            unsafe {
-                context
-                    .buffer_allocator
-                    .deallocate_buffer(recovered_rx_frame.into_buffer());
+        unreachable!()
+    }
+
+    /// Complete the scan: deallocate any leftover frame buffer, check for a
+    /// pending beacon Rx request from the MAC and respond with
+    /// StoppedScanning, then switch back to CSMA.
+    fn finish_scan(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+        reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
+    ) -> SchedulerTaskTransition {
+        if let Some((response_token, _)) = context.try_receive_rx_request(ReceptionType::Beacon) {
+            match reception_result {
+                Ok(reception_result) => {
+                    let response = SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+                        ScanCommandResult::StoppedScanning(Some(reception_result)),
+                    ));
+                    return SchedulerTaskTransition::Completed(
+                        SchedulerTaskCompletion::SwitchToCsma,
+                        Some((response_token, response)),
+                    );
+                }
+                Err(recovered_rx_frame) => unsafe {
+                    context
+                        .buffer_allocator
+                        .deallocate_buffer(recovered_rx_frame.into_buffer());
+
+                    let response = SchedulerResponse::Command(SchedulerCommandResult::ScanCommand(
+                        ScanCommandResult::StoppedScanning(None),
+                    ));
+                    return SchedulerTaskTransition::Completed(
+                        SchedulerTaskCompletion::SwitchToCsma,
+                        Some((response_token, response)),
+                    );
+                },
             }
         }
-        SchedulerTaskTransition::Completed(SchedulerTaskCompletion::SwitchToCsma, response)
+        unreachable!()
     }
 }

@@ -174,7 +174,9 @@ pub mod tsch {
 
 #[cfg(feature = "tsch")]
 pub mod scan {
+
     use crate::scheduler::scan::ScanChannels;
+    use crate::scheduler::SchedulerReceptionResult;
 
     /// TSCH-specific commands.
     pub enum ScanCommand {
@@ -188,6 +190,6 @@ pub mod scan {
         /// TSCH mode was successfully started.
         StartedScanning,
         /// TSCH mode was successfully stopped.
-        StoppedScanning,
+        StoppedScanning(Option<SchedulerReceptionResult>),
     }
 }
