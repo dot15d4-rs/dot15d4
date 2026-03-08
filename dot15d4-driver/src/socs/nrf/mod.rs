@@ -37,12 +37,23 @@ pub enum LfClockSource {
 }
 
 pub fn start_hf_oscillator(clock: &CLOCK) {
-    debug_assert!(!clock.hfclkstat.read().src().is_xtal());
+    if clock.hfclkstat.read().src().is_xtal() {
+        return;
+    }
+
     clock
         .tasks_hfclkstart
         .write(|w| w.tasks_hfclkstart().set_bit());
     while clock.events_hfclkstarted.read().bits() != 1 {}
     clock.events_hfclkstarted.reset();
+}
+
+pub fn stop_hf_oscillator(clock: &CLOCK) {
+    if clock.hfclkstat.read().src().is_xtal() {
+        clock
+            .tasks_hfclkstop
+            .write(|w| w.tasks_hfclkstop().set_bit());
+    }
 }
 
 pub fn start_lf_clock(clock: &CLOCK, sleep_timer_clk_src: LfClockSource) {

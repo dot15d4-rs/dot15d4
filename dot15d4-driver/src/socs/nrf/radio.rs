@@ -39,7 +39,7 @@ use crate::{
 
 use super::{
     executor::{nrf_interrupt_executor, NrfInterruptPriority},
-    timer::NrfRadioSleepTimer,
+    timer::{release_hfclk, request_hfclk, NrfRadioSleepTimer},
 };
 
 use self::executor::NrfInterruptExecutor;
@@ -118,6 +118,7 @@ const T_BACKOFF_PERIOD: NsDuration = T_CCA.checked_add(T_TURNAROUND).unwrap();
 #[derive(Clone, Copy, Debug)]
 pub struct NrfRadioDriver {
     executor: NrfInterruptExecutor,
+    radio_hfclk_requested: bool,
 }
 
 const FCS_LEN: u8 = Phy::<OQpsk250KBit>::fcs_length();
@@ -226,6 +227,22 @@ pub struct NrfRadioTracingConfig {
 static mut STATE: RadioDriverState<NrfRadioDriver> = RadioDriverState::new();
 
 impl<Task> RadioDriver<NrfRadioDriver, Task> {
+    fn request_radio_hfclk(&mut self) {
+        let state = self.state();
+        if !state.inner().radio_hfclk_requested {
+            request_hfclk();
+            state.inner().radio_hfclk_requested = true;
+        }
+    }
+
+    fn release_radio_hfclk(&mut self) {
+        let state = self.state();
+        if state.inner().radio_hfclk_requested {
+            release_hfclk();
+            state.inner().radio_hfclk_requested = false;
+        }
+    }
+
     fn state(&mut self) -> &'static mut RadioDriverState<NrfRadioDriver> {
         // Safety:
         // - We ensure that there only ever is a single instance of the radio
@@ -294,6 +311,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
                 #[cfg(feature = "executor-trace")]
                 executor_trace_channel,
             ),
+            radio_hfclk_requested: false,
         };
         driver.state().init(inner, sleep_timer);
 
@@ -561,6 +579,7 @@ impl RadioState<NrfRadioDriver, TaskOff> for RadioDriver<NrfRadioDriver, TaskOff
             .poll_event(HardwareEvent::RadioDisabled)
             .ok_or_else(|| self.scheduling_error());
         state.stop_timer();
+        self.release_radio_hfclk();
         entry
     }
 
@@ -611,42 +630,51 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             }
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
-                let timed_rx_enable = self.start.map(timed_rx_enable);
-                let timer = self
-                    .driver
-                    .state()
-                    .start_timer(timed_rx_enable.map(|ts| ts.instant).into())?;
-                if let Some(timed_rx_enable) = timed_rx_enable {
-                    timer.schedule_timed_signal(timed_rx_enable)?;
+                self.driver.request_radio_hfclk();
+                let result = (|| {
+                    let timed_rx_enable = self.start.map(timed_rx_enable);
+                    let timer = self
+                        .driver
+                        .state()
+                        .start_timer(timed_rx_enable.map(|ts| ts.instant).into())?;
+                    if let Some(timed_rx_enable) = timed_rx_enable {
+                        timer.schedule_timed_signal(timed_rx_enable)?;
+                    }
+                    timer
+                        .observe_event(HardwareEvent::RadioRxEnabled)?
+                        .observe_event(HardwareEvent::RadioFrameStarted)?;
+
+                    let r = radio();
+
+                    if let Some(channel) = self.channel {
+                        let channel: u8 = channel.into();
+                        let frequency_offset = (channel - 10) * 5;
+                        r.frequency
+                            .write(|w| w.frequency().variant(frequency_offset).map().default());
+                    }
+
+                    // Ramp up the receiver and start frame reception immediately.
+                    let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
+                    r.packetptr.write(|w| w.packetptr().variant(packetptr));
+
+                    dma_start_fence();
+                    r.shorts.write(|w| {
+                        w.rxready_start().enabled();
+                        w.framestart_bcstart().enabled()
+                    });
+
+                    if self.start.is_none() {
+                        r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
+                    }
+
+                    Ok(self.start)
+                })();
+
+                if result.is_err() {
+                    self.driver.release_radio_hfclk();
                 }
-                timer
-                    .observe_event(HardwareEvent::RadioRxEnabled)?
-                    .observe_event(HardwareEvent::RadioFrameStarted)?;
 
-                let r = radio();
-
-                if let Some(channel) = self.channel {
-                    let channel: u8 = channel.into();
-                    let frequency_offset = (channel - 10) * 5;
-                    r.frequency
-                        .write(|w| w.frequency().variant(frequency_offset).map().default());
-                }
-
-                // Ramp up the receiver and start frame reception immediately.
-                let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
-                r.packetptr.write(|w| w.packetptr().variant(packetptr));
-
-                dma_start_fence();
-                r.shorts.write(|w| {
-                    w.rxready_start().enabled();
-                    w.framestart_bcstart().enabled()
-                });
-
-                if self.start.is_none() {
-                    r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
-                }
-
-                Ok(self.start)
+                result
             }
 
             fn on_completed(&mut self) -> Result<(), SchedulingError> {
@@ -697,54 +725,63 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
             }
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
-                let cca = self.tx_task.cca;
-                let timed_tx_enable = self.at.map(|instant| timed_tx_enable(instant, cca));
-                let timer = self
-                    .driver
-                    .state()
-                    .start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
-                if let Some(timed_tx_enable) = timed_tx_enable {
-                    timer.schedule_timed_signal(timed_tx_enable)?;
-                }
-                timer.observe_event(HardwareEvent::RadioFrameStarted)?;
-
-                let r = radio();
-
-                if let Some(channel) = self.channel {
-                    let channel: u8 = channel.into();
-                    let frequency_offset = (channel - 10) * 5;
-                    r.frequency
-                        .write(|w| w.frequency().variant(frequency_offset).map().default());
-                }
-
-                let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
-                r.packetptr.write(|w| w.packetptr().variant(packetptr));
-
-                let is_best_effort = self.at.is_none();
-                dma_start_fence();
-                if cca {
-                    r.shorts.write(|w| {
-                        // Start CCA immediately after the receiver ramped up.
-                        w.rxready_ccastart().enabled();
-                        // If the channel is idle, then ramp up the transmitter and start tx
-                        // immediately.
-                        w.ccaidle_txen().enabled();
-                        w.txready_start().enabled();
-                        // If the channel is busy, then disable the receiver.
-                        w.ccabusy_disable().enabled()
-                    });
-
-                    if is_best_effort {
-                        r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
+                self.driver.request_radio_hfclk();
+                let result = (|| {
+                    let cca = self.tx_task.cca;
+                    let timed_tx_enable = self.at.map(|instant| timed_tx_enable(instant, cca));
+                    let timer = self
+                        .driver
+                        .state()
+                        .start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
+                    if let Some(timed_tx_enable) = timed_tx_enable {
+                        timer.schedule_timed_signal(timed_tx_enable)?;
                     }
-                } else {
-                    r.shorts.write(|w| w.txready_start().enabled());
-                    if is_best_effort {
-                        r.tasks_txen.write(|w| w.tasks_txen().set_bit());
+                    timer.observe_event(HardwareEvent::RadioFrameStarted)?;
+
+                    let r = radio();
+
+                    if let Some(channel) = self.channel {
+                        let channel: u8 = channel.into();
+                        let frequency_offset = (channel - 10) * 5;
+                        r.frequency
+                            .write(|w| w.frequency().variant(frequency_offset).map().default());
                     }
+
+                    let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
+                    r.packetptr.write(|w| w.packetptr().variant(packetptr));
+
+                    let is_best_effort = self.at.is_none();
+                    dma_start_fence();
+                    if cca {
+                        r.shorts.write(|w| {
+                            // Start CCA immediately after the receiver ramped up.
+                            w.rxready_ccastart().enabled();
+                            // If the channel is idle, then ramp up the transmitter and start tx
+                            // immediately.
+                            w.ccaidle_txen().enabled();
+                            w.txready_start().enabled();
+                            // If the channel is busy, then disable the receiver.
+                            w.ccabusy_disable().enabled()
+                        });
+
+                        if is_best_effort {
+                            r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
+                        }
+                    } else {
+                        r.shorts.write(|w| w.txready_start().enabled());
+                        if is_best_effort {
+                            r.tasks_txen.write(|w| w.tasks_txen().set_bit());
+                        }
+                    }
+
+                    Ok(self.at)
+                })();
+
+                if result.is_err() {
+                    self.driver.release_radio_hfclk();
                 }
 
-                Ok(self.at)
+                result
             }
 
             fn on_completed(&mut self) -> Result<(), SchedulingError> {

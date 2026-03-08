@@ -206,6 +206,17 @@ struct State {
     ///         from all contexts while active.
     timer_epoch: Cell<NsInstant>,
 
+    /// Whether the configured LF sleep clock depends on the HF clock.
+    ///
+    /// This is the case for the synthesized LF clock source. In that mode, the
+    /// HFXO cannot be power-gated while the sleep timer is meant to keep
+    /// running.
+    sleep_clock_uses_hfclk: AtomicU8,
+
+    /// Counter of active HFXO "users" managed by this driver while the LF sleep
+    /// clock does not itself require HFCLK.
+    hfclk_active_use: AtomicUsize,
+
     /// GPIOTE channel used for GPIO signal triggering.
     ///
     /// Will only be accessed from scheduling context but is atomic to satisfy
@@ -281,6 +292,8 @@ impl State {
             half_period: AtomicU32::new(0),
             alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
             timer_epoch: Cell::new(NsInstant::from_ticks(0)),
+            sleep_clock_uses_hfclk: AtomicU8::new(0),
+            hfclk_active_use: AtomicUsize::new(0),
             #[cfg(feature = "timer-trace")]
             gpiote_out_channel: AtomicUsize::new(0),
             #[cfg(feature = "timer-trace")]
@@ -306,6 +319,11 @@ impl State {
     fn timer() -> TIMER0 {
         // We own the TIMER peripheral exclusively.
         unsafe { Peripherals::steal() }.TIMER0
+    }
+
+    fn clock() -> CLOCK {
+        // We own the CLOCK peripheral exclusively.
+        unsafe { Peripherals::steal() }.CLOCK
     }
 
     fn ppi() -> PPI {
@@ -340,7 +358,13 @@ impl State {
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::instrument();
 
-        super::start_hf_oscillator(&config.clock);
+        let sleep_clock_uses_hfclk =
+            matches!(config.sleep_timer_clk_src, super::LfClockSource::Synth);
+        self.sleep_clock_uses_hfclk
+            .store(sleep_clock_uses_hfclk as u8, Ordering::Relaxed);
+        if sleep_clock_uses_hfclk {
+            super::start_hf_oscillator(&config.clock);
+        }
         super::start_lf_clock(&config.clock, config.sleep_timer_clk_src);
 
         let [ppi_channel1, ppi_channel2] = config.ppi_channels;
@@ -472,6 +496,32 @@ impl State {
             self.init_state.load(Ordering::Acquire),
             InitializationState::Initialized as u8
         );
+    }
+
+    fn sleep_clock_uses_hfclk(&self) -> bool {
+        self.sleep_clock_uses_hfclk.load(Ordering::Relaxed) != 0
+    }
+
+    fn hfclk_request(&self) {
+        if self.sleep_clock_uses_hfclk() {
+            return;
+        }
+
+        if self.hfclk_active_use.fetch_add(1, Ordering::Relaxed) == 0 {
+            super::start_hf_oscillator(&Self::clock());
+        }
+    }
+
+    fn hfclk_release(&self) {
+        if self.sleep_clock_uses_hfclk() {
+            return;
+        }
+
+        let prev = self.hfclk_active_use.fetch_sub(1, Ordering::Relaxed);
+        assert!(prev > 0);
+        if prev == 1 {
+            super::stop_hf_oscillator(&Self::clock());
+        }
     }
 
     /// Sets an RTC alarm's tick value.
@@ -1962,32 +2012,42 @@ impl RadioTimerApi for NrfRadioSleepTimer {
         STATE.assert_initialized();
 
         STATE.rtc_try_acquire_alarm(AlarmChannel::HighPrecisionTimer)?;
+        STATE.hfclk_request();
 
-        if let Some(at) = at.into() {
-            // We need to start at least two timer ticks earlier so we can
-            // schedule signals at non-zero ticks even accounting for a one-tick
-            // PPI delay.
-            const TIMER_OFFSET: NsDuration = TickConversion::timer_ticks_to_duration(2)
-                // Adding 1ns to avoid rounding errors.
-                .checked_add(NsDuration::from_ticks(1))
-                .unwrap();
+        let result = (|| {
+            if let Some(at) = at.into() {
+                // We need to start at least two timer ticks earlier so we can
+                // schedule signals at non-zero ticks even accounting for a one-tick
+                // PPI delay.
+                const TIMER_OFFSET: NsDuration = TickConversion::timer_ticks_to_duration(2)
+                    // Adding 1ns to avoid rounding errors.
+                    .checked_add(NsDuration::from_ticks(1))
+                    .unwrap();
 
-            let rtc_tick = TickConversion::instant_to_rtc_tick(at - TIMER_OFFSET);
+                let rtc_tick = TickConversion::instant_to_rtc_tick(at - TIMER_OFFSET);
 
-            #[cfg(feature = "rtos-trace")]
-            crate::timer::trace::record_start_hp_timer(at, rtc_tick as u32);
+                #[cfg(feature = "rtos-trace")]
+                crate::timer::trace::record_start_hp_timer(at, rtc_tick as u32);
 
-            STATE
-                .timer_try_start_at_rtc_tick(rtc_tick)
-                .map_err(|_| RadioTimerError::Overdue(at))?;
-        } else {
-            STATE.timer_start_at_next_rtc_tick();
+                STATE
+                    .timer_try_start_at_rtc_tick(rtc_tick)
+                    .map_err(|_| RadioTimerError::Overdue(at))?;
+            } else {
+                STATE.timer_start_at_next_rtc_tick();
+            }
+
+            // The high-precision timer will automatically be stopped and the
+            // corresponding alarm channel released when dropping the running
+            // radio timer instance.
+            Ok(NrfRadioHighPrecisionTimer { _inner: () })
+        })();
+
+        if result.is_err() {
+            STATE.hfclk_release();
+            STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer);
         }
 
-        // The high-precision timer will automatically be stopped and the
-        // corresponding alarm channel released when dropping the running
-        // radio timer instance.
-        Ok(NrfRadioHighPrecisionTimer { _inner: () })
+        result
     }
 }
 
@@ -2277,6 +2337,17 @@ impl Drop for NrfRadioHighPrecisionTimer {
         self.reset();
 
         // Atomically de-allocate the high precision timer.
-        STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer)
+        STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer);
+        STATE.hfclk_release();
     }
+}
+
+pub(crate) fn request_hfclk() {
+    STATE.assert_initialized();
+    STATE.hfclk_request();
+}
+
+pub(crate) fn release_hfclk() {
+    STATE.assert_initialized();
+    STATE.hfclk_release();
 }
