@@ -255,6 +255,15 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                         self.pib.tsch.timeslot_timings = timings;
                         SetPibResult::Success
                     }
+                    SetRequestAttribute::MacHoppingSequenceList(seq) => {
+			// TODO: handle Seq Id only
+                        if seq.is_empty() {
+                            SetPibResult::InvalidParameter
+                        } else {
+                            self.pib.hopping_sequence = seq;
+                            SetPibResult::Success
+                        }
+                    }
                 };
                 PibCommandResult::Set(set_result)
             }

@@ -35,12 +35,17 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
     /// - TSCH Synchronization IE
     /// - Full TSCH Timeslot IE
     /// - TSCH Slotframe and Link IE
+    /// - Channel Hopping IE (full format, up to 16 channels)
     pub const fn new() -> Self {
         static SLOTFRAMES: [u8; 1] = [1];
-        static IES: [IeRepr; 3] = [
+        static IES: [IeRepr; 4] = [
             IeRepr::TschSynchronizationNestedIe,
             IeRepr::FullTschTimeslotNestedIe,
             IeRepr::TschSlotframeAndLinkNestedIe(&SLOTFRAMES),
+            IeRepr::FullChannelHoppingNestedIe(
+                crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH as u8,
+                false,
+            ),
         ];
         static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
         static IE_LIST: IeListRepr<'static> = IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
@@ -138,6 +143,24 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 timeslot_ie.set_max_ack(timings.max_ack());
                 timeslot_ie.set_max_tx(timings.max_tx());
                 timeslot_ie.set_timeslot_length(timings.timeslot_length());
+            }
+
+            // Set Channel Hopping IE from PIB hopping sequence
+            if let Some(mut ch_hop_ie) = ies.channel_hopping_mut() {
+                let seq = &pib.hopping_sequence;
+                ch_hop_ie.set_hopping_sequence_id(0);
+                ch_hop_ie.set_channel_page(0); // page 0 = 2.4 GHz O-QPSK
+                ch_hop_ie.set_num_channels(16); // 16 channels on page 0 (ch 11-26)
+                ch_hop_ie.set_phy_configuration(0);
+                ch_hop_ie.set_hopping_sequence_length(seq.len() as u16);
+                ch_hop_ie.set_current_hop(0);
+
+                // Write channel numbers as single-byte indices
+                let mut ch_bytes = [0u8; crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH];
+                for (i, ch) in seq.iter().enumerate() {
+                    ch_bytes[i] = u8::from(*ch);
+                }
+                ch_hop_ie.set_hopping_sequence_list(&ch_bytes[..seq.len()]);
             }
         }
 

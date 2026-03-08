@@ -498,6 +498,45 @@ impl<Bytes: AsRef<[u8]>> ChannelHoppingIe<Bytes> {
             None
         }
     }
+
+    /// Hopping sequence length (full format only).
+    ///
+    /// Number of entries in the hopping sequence list.
+    #[inline]
+    pub fn hopping_sequence_length(&self) -> Option<u16> {
+        let b = self.bytes.as_ref();
+        if b.len() >= 10 {
+            Some(u16::from_le_bytes([b[8], b[9]]))
+        } else {
+            None
+        }
+    }
+
+    /// Current hop index (full format only).
+    #[inline]
+    pub fn current_hop(&self) -> Option<u16> {
+        let b = self.bytes.as_ref();
+        if b.len() >= 12 {
+            Some(u16::from_le_bytes([b[10], b[11]]))
+        } else {
+            None
+        }
+    }
+
+    /// Hopping sequence list (full format only).
+    ///
+    /// Returns the raw channel number bytes. Each entry is a single-byte
+    /// channel index for 2.4 GHz O-QPSK (channels 11–26).
+    #[inline]
+    pub fn hopping_sequence_list(&self) -> Option<&[u8]> {
+        let b = self.bytes.as_ref();
+        let len = self.hopping_sequence_length()? as usize;
+        if b.len() >= 12 + len {
+            Some(&b[12..12 + len])
+        } else {
+            None
+        }
+    }
 }
 
 impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> ChannelHoppingIe<Bytes> {
@@ -527,6 +566,38 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> ChannelHoppingIe<Bytes> {
         let b = self.bytes.as_mut();
         if b.len() >= 8 {
             b[4..8].copy_from_slice(&config.to_le_bytes());
+        }
+    }
+
+    /// Set hopping sequence length (full format only).
+    #[inline]
+    pub fn set_hopping_sequence_length(&mut self, len: u16) {
+        let b = self.bytes.as_mut();
+        if b.len() >= 10 {
+            b[8..10].copy_from_slice(&len.to_le_bytes());
+        }
+    }
+
+    /// Set current hop index (full format only).
+    #[inline]
+    pub fn set_current_hop(&mut self, hop: u16) {
+        let b = self.bytes.as_mut();
+        if b.len() >= 12 {
+            b[10..12].copy_from_slice(&hop.to_le_bytes());
+        }
+    }
+
+    /// Set hopping sequence list entries (full format only).
+    ///
+    /// Writes channel numbers starting at byte 12. The caller must ensure
+    /// the buffer was allocated with enough room (see
+    /// [`IeRepr::FullChannelHoppingNestedIe`]).
+    #[inline]
+    pub fn set_hopping_sequence_list(&mut self, channels: &[u8]) {
+        let b = self.bytes.as_mut();
+        let end = 12 + channels.len();
+        if b.len() >= end {
+            b[12..end].copy_from_slice(channels);
         }
     }
 }

@@ -1,7 +1,7 @@
 use dot15d4_driver::radio::frame::Address;
 #[cfg(feature = "tsch")]
 use dot15d4_driver::{
-    radio::DriverConfig,
+    radio::{config::Channel, DriverConfig},
     timer::{NsInstant, RadioTimerApi},
 };
 #[cfg(feature = "tsch")]
@@ -58,6 +58,15 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender: &MacRequestSender<'static>,
     timer: RadioTimerImpl,
     timeslot_timings: Option<dot15d4_frame::fields::TschTimeslotTimings>,
+    hopping_sequence: Option<
+        heapless::Vec<
+            Channel,
+            {
+                use crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH;
+                MAC_HOPPING_SEQUENCE_MAX_LENGTH
+            },
+        >,
+    >,
 ) {
     use crate::scheduler::tsch::TschLinkType;
 
@@ -78,6 +87,18 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
         let request_token = request_sender.allocate_request_token().await;
         let mac_request = MacRequest::MlmeSet(SetRequest::new(
             SetRequestAttribute::MacTimeslotTemplate(timings),
+        ));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+    }
+
+    // If a custom hopping sequence is provided, set it before configuring
+    // the schedule so that the beacon's Channel Hopping IE reflects it.
+    if let Some(seq) = hopping_sequence {
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacHoppingSequenceList(seq),
         ));
         request_sender
             .send_request_awaiting_response(request_token, mac_request)
@@ -297,6 +318,35 @@ async fn join_network_from_beacon(
                 request_sender
                     .send_request_awaiting_response(request_token, mac_request)
                     .await;
+            }
+        }
+
+        // Extract channel hopping sequence from the Enhanced Beacon's
+        // Channel Hopping IE and apply it to our PIB.
+        if let Some(ch_hop_ie) = ies.channel_hopping() {
+            if !ch_hop_ie.is_reduced() {
+                use dot15d4_driver::radio::config::Channel;
+
+                if let Some(hop_list) = ch_hop_ie.hopping_sequence_list() {
+                    let mut seq = heapless::Vec::<
+                        Channel,
+                        { crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH },
+                    >::new();
+                    for &ch_byte in hop_list {
+                        if let Ok(ch) = Channel::try_from(ch_byte) {
+                            let _ = seq.push(ch);
+                        }
+                    }
+                    if !seq.is_empty() {
+                        let request_token = request_sender.allocate_request_token().await;
+                        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+                            SetRequestAttribute::MacHoppingSequenceList(seq),
+                        ));
+                        request_sender
+                            .send_request_awaiting_response(request_token, mac_request)
+                            .await;
+                    }
+                }
             }
         }
 

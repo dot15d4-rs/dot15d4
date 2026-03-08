@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 use core::marker::PhantomData;
 
+use dot15d4_driver::radio::config::Channel;
 use dot15d4_driver::radio::DriverConfig;
 #[cfg(feature = "tsch")]
 use dot15d4_driver::timer::NsInstant;
+use heapless::Vec;
 
 use crate::{
+    constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH,
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
         command::pib::{PibCommand, PibCommandResult, SetPibResult},
@@ -36,6 +39,8 @@ pub enum SetRequestAttribute {
     MacAsn(u64, NsInstant),
     #[cfg(feature = "tsch")]
     MacTimeslotTemplate(TschTimeslotTimings),
+    /// Hopping sequence list used for TSCH channel hopping.
+    MacHoppingSequenceList(Vec<Channel, MAC_HOPPING_SEQUENCE_MAX_LENGTH>),
 }
 
 /// MLME-SET.request primitive
