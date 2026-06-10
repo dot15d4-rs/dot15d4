@@ -59,6 +59,7 @@ pub mod export {
 ///   or a pointer derived from it due to the !Copy and "no-move" semantics
 ///   of this buffer.
 #[derive(Debug, PartialEq, Eq)]
+#[must_use = "Buffer tokens are linear and must be returned to the allocator, not dropped."]
 pub struct BufferToken(
     // Note: We keep a slice (fat pointer) rather than a reference to an array
     //       (thin pointer). This costs us extra bytes for a usize but allows us
