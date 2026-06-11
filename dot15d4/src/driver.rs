@@ -113,7 +113,6 @@ pub struct DrvSvcTaskRx {
     /// received or a subsequent TX/idle request is sent.
     pub rx_window_end: Option<NsInstant>,
     /// Optional Expected RX framestart instant, i.e. RX RMARKER.
-    #[cfg(feature = "tsch")]
     pub expected_rx_framestart: Option<NsInstant>,
 }
 
@@ -164,6 +163,7 @@ pub enum DrvSvcEvent {
     Sent(RadioFrame<RadioFrameSized>, NsInstant, Option<i16>),
     Received(RadioFrame<RadioFrameSized>, NsInstant),
     RxWindowEnded(RadioFrame<RadioFrameUnsized>),
+    ReceptionAborted,
     SchedulingFailed(RadioFrame<RadioFrameSized>),
     CrcError(
         RadioFrame<RadioFrameUnsized>,
@@ -235,7 +235,8 @@ pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
 
     // Expected RX frame start (i.e. RMARKER) of scheduled RX. When set, used
     // for Time Correction IE when sending Enh-Ack using TSCH.
-    #[cfg(feature = "tsch")]
+    //
+    // Kept unconditional; only the TSCH logic that reads it is gated.
     expected_rx_framestart: Cell<Option<NsInstant>>,
 }
 
@@ -715,8 +716,7 @@ where
                     channel,
                     fallback_on_nack,
                 } = tx_task;
-                // Channel setting shall be performed only from off radio state
-                assert!(channel.is_none());
+                debug_assert!(channel.is_none());
                 match receiving_rx_driver
                     .schedule_tx(
                         RadioTaskTx {
@@ -794,16 +794,12 @@ where
                     radio_frame,
                     channel,
                     rx_window_end,
-                    #[cfg(feature = "tsch")]
                     expected_rx_framestart,
                 } = rx_task;
 
                 // Frames may only be received back-to-back with best-effort
-                // timing.
-                assert!(matches!(start, Timestamp::BestEffort));
-
-                // Channel must be the same since the radio must go off to set channel
-                assert!(channel.is_none());
+                debug_assert!(matches!(start, Timestamp::BestEffort));
+                debug_assert!(channel.is_none());
 
                 match receiving_rx_driver
                     .schedule_rx(RadioTaskRx { radio_frame }, Some(next_ifs), false)
@@ -958,6 +954,10 @@ where
                 self.outbound_ack_frame
                     .set(Some(recovered_outbound_ack_task.radio_frame));
 
+                self.event_sender
+                    .send(DrvSvcEvent::ReceptionAborted)
+                    .await;
+
                 DriverState::WaitingForFrame(listening_rx_driver)
             }
             // Safety: Scheduling ACK cannot fall back as it does no CCA.
@@ -1044,6 +1044,7 @@ where
                         .validate_and_receive_frame(
                             receiving_rx_driver,
                             &hardware_address,
+                            #[cfg(feature = "tsch")]
                             rx_instant,
                         )
                         .await;
@@ -1072,6 +1073,9 @@ where
                                 Ok(result) => result,
                                 Err((_, recovered_rx_driver)) => {
                                     listening_rx_driver = recovered_rx_driver;
+                                    let old_request =
+                                        self.pending_request.replace(Some(request));
+                                    debug_assert!(old_request.is_none());
                                     continue;
                                 }
                             };
@@ -1090,6 +1094,7 @@ where
                                         .validate_and_receive_frame(
                                             receiving_rx_driver,
                                             &hardware_address,
+                                            #[cfg(feature = "tsch")]
                                             rx_instant,
                                         )
                                         .await;
@@ -1113,9 +1118,22 @@ where
                             self.rx_window_end.set(None);
                             self.expected_rx_framestart.set(None);
 
+                            let hardware_address = listening_rx_driver.ieee802154_address();
                             match listening_rx_driver.stop_listening(None.into()).await {
                                 Ok(result) => match result {
-                                    StopListeningResult::FrameStarted(_instant, _) => todo!(),
+                                    StopListeningResult::FrameStarted(
+                                        rx_instant,
+                                        receiving_rx_driver,
+                                    ) => {
+                                        return self
+                                            .validate_and_receive_frame(
+                                                receiving_rx_driver,
+                                                &hardware_address,
+                                                #[cfg(feature = "tsch")]
+                                                rx_instant,
+                                            )
+                                            .await;
+                                    }
                                     StopListeningResult::RxWindowEnded(radio_transition_result) => {
                                         match radio_transition_result.prev_task_result {
                                             RxResult::RxWindowEnded(radio_frame) => {
@@ -1133,7 +1151,11 @@ where
                                 Err((_, _)) => unreachable!(),
                             }
                         }
-                        _ => unreachable!(),
+                        DrvSvcRequest::CompleteThenStartRx(_) => {
+                            let old_request = self.pending_request.replace(Some(request));
+                            debug_assert!(old_request.is_none());
+                            continue;
+                        }
                     }
                 }
             };
@@ -1463,7 +1485,7 @@ fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                 {
                     // TODO: Is it too permissive to accept valid Enhanced
                     // Ack if we are not supposed to support TSCH ?
-                    true
+                    (true, None)
                 }
             }
             // Unknown frame version
