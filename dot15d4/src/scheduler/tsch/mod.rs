@@ -9,5 +9,6 @@ mod tests;
 
 pub use self::pib::{ScheduleError, TschAsn, TschLink, TschLinkType, TschPib, TschSlotframe};
 pub use self::task::{
-    BeaconConfig, TschOperation, TschState, TschTask, INFINITE_DEADLINE, TIMESLOT_GUARD_TIME_US,
+    BeaconConfig, TschCsmaBackoff, TschOperation, TschState, TschTask, INFINITE_DEADLINE,
+    TIMESLOT_GUARD_TIME_US,
 };

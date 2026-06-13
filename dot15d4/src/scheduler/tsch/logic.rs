@@ -8,11 +8,16 @@
 use core::mem;
 
 use dot15d4_driver::{
-    radio::DriverConfig,
-    timer::{NsDuration, RadioTimerApi},
+    radio::{
+        frame::{RadioFrame, RadioFrameSized},
+        DriverConfig,
+    },
+    timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
+#[cfg(not(feature = "tsch-coordinator"))]
+use dot15d4_util::allocator::IntoBuffer;
+use dot15d4_util::sync::ResponseToken;
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
@@ -28,7 +33,7 @@ use crate::{
     utils,
 };
 
-use super::task::{TschOperation, TschState, TschTask};
+use super::task::{TschCsmaBackoff, TschOperation, TschState, TschTask};
 
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<RadioDriverImpl> {
     fn step(
@@ -38,12 +43,16 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
     ) -> SchedulerTaskTransition {
         match mem::replace(&mut self.state, TschState::Placeholder) {
             TschState::Idle => self.execute_idle(event, context),
-            TschState::WaitingForTxStart { response_token } => {
-                self.execute_waiting_for_tx_start(response_token, event)
-            }
-            TschState::Transmitting { response_token } => {
-                self.execute_transmitting(response_token, event, context)
-            }
+            TschState::WaitingForTxStart {
+                response_token,
+                shared,
+                backoff,
+            } => self.execute_waiting_for_tx_start(response_token, shared, backoff, event, context),
+            TschState::Transmitting {
+                response_token,
+                shared,
+                backoff,
+            } => self.execute_transmitting(response_token, shared, backoff, event, context),
             TschState::Listening => self.execute_listening(event, context),
             TschState::Receiving => self.execute_receiving(event, context),
             _ => unreachable!(),
@@ -118,17 +127,86 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     fn execute_waiting_for_tx_start(
         &mut self,
         response_token: Option<ResponseToken>,
+        shared: bool,
+        backoff: TschCsmaBackoff,
         event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(_instant)) => {
-                self.state = TschState::Transmitting { response_token };
+                self.state = TschState::Transmitting {
+                    response_token,
+                    shared,
+                    backoff,
+                };
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(_radio_frame, _instant)) => {
-                todo!()
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(radio_frame, _instant)) => {
+                // CCA reported the channel busy before the frame went out.
+                self.handle_tx_start_failure(radio_frame, shared, backoff, response_token, context)
             }
-            _ => unreachable!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::SchedulingFailed(radio_frame)) => {
+                // The driver could not schedule the transmission (timer rejection,
+                // deadline in the past, or guard-time overrun). The frame never
+                // went out, so handle it like a CCA-busy failure instead of
+                // aborting.
+                self.handle_tx_start_failure(radio_frame, shared, backoff, response_token, context)
+            }
+            // WaitingForTxStart legitimately only sees the events above; recover
+            // to idle rather than aborting.
+            _ => {
+                dot15d4_util::warn!("TSCH: unexpected event in WaitingForTxStart; recovering to idle.");
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
+        }
+    }
+
+    /// Handle a pre-transmission failure in `WaitingForTxStart`: CCA reported the
+    /// channel busy, or the driver could not schedule the TX. Both mean the frame
+    /// never went out, so they are handled identically: a shared link applies the
+    /// CSMA-CA backoff, a dedicated link reports channel-access failure to the
+    /// upper layer, and a beacon restores the frame and reschedules the
+    /// advertisement.
+    fn handle_tx_start_failure(
+        &mut self,
+        radio_frame: RadioFrame<RadioFrameSized>,
+        shared: bool,
+        backoff: TschCsmaBackoff,
+        response_token: Option<ResponseToken>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match response_token {
+            // A frame that never went out (CCA busy or scheduling failure)
+            // retries on both shared and dedicated links, up to
+            // macMaxFrameRetries; only the backoff delay and BE increase are
+            // shared-specific. The dedicated and early-attempt cases add no delay
+            // and leave BE unchanged.
+            Some(response_token) => self.handle_tx_failure(
+                radio_frame,
+                backoff,
+                response_token,
+                None,
+                shared,
+                context,
+            ),
+            // Beacon: restore the frame and reschedule the advertisement.
+            None => {
+                #[cfg(feature = "tsch-coordinator")]
+                {
+                    self.beacon_mpdu
+                        .set(Some(MpduFrame::from_radio_frame(radio_frame)));
+                    self.queue_next_beacon(context);
+                }
+                #[cfg(not(feature = "tsch-coordinator"))]
+                // Safety: the frame buffer was allocated by this
+                // allocator when the operation was queued.
+                unsafe {
+                    context
+                        .buffer_allocator
+                        .deallocate_buffer(radio_frame.into_buffer())
+                };
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
         }
     }
 
@@ -136,6 +214,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     fn execute_transmitting(
         &mut self,
         response_token: Option<ResponseToken>,
+        shared: bool,
+        backoff: TschCsmaBackoff,
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
@@ -175,27 +255,93 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 _request,
                 _timesync_us,
             )) => {
-                if let Some(response_token) = response_token {
-                    // TODO: reschedule retransmission
-                    let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::NoAck(
-                        tx_frame, instant,
-                    ));
-                    let action = self.go_idle(context);
-                    SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
-                } else {
-                    // No response token (e.g. beacon NACK)
-                    let recovered = tx_frame.forget_size::<RadioDriverImpl>();
-                    unsafe {
-                        context
-                            .buffer_allocator
-                            .deallocate_buffer(recovered.into_buffer());
+                match response_token {
+                    // Both shared and dedicated links retransmit on a missing
+                    // ACK, up to macMaxFrameRetries; the dedicated path adds no
+                    // delay and does not bump BE.
+                    Some(response_token) => self.handle_tx_failure(
+                        tx_frame,
+                        backoff,
+                        response_token,
+                        Some(instant),
+                        shared,
+                        context,
+                    ),
+                    // Beacon: restore the frame and reschedule the
+                    // advertisement.
+                    None => {
+                        #[cfg(feature = "tsch-coordinator")]
+                        {
+                            self.beacon_mpdu
+                                .set(Some(MpduFrame::from_radio_frame(tx_frame)));
+                            self.queue_next_beacon(context);
+                        }
+                        #[cfg(not(feature = "tsch-coordinator"))]
+                        // Safety: the frame buffer was allocated by this
+                        // allocator when the operation was queued.
+                        unsafe {
+                            context
+                                .buffer_allocator
+                                .deallocate_buffer(tx_frame.into_buffer())
+                        };
+                        SchedulerTaskTransition::Execute(self.go_idle(context), None)
                     }
-                    let action = self.go_idle(context);
-                    SchedulerTaskTransition::Execute(action, None)
                 }
             }
             _ => unreachable!(),
         }
+    }
+
+    fn handle_tx_failure(
+        &mut self,
+        tx_frame: RadioFrame<RadioFrameSized>,
+        backoff: TschCsmaBackoff,
+        response_token: ResponseToken,
+        noack_instant: Option<NsInstant>,
+        failed_on_shared: bool,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        let is_cca_busy = noack_instant.is_none();
+        let nb = backoff.nb.saturating_add(1);
+
+        if nb > context.pib.max_frame_retries {
+            let result = match noack_instant {
+                Some(instant) => SchedulerTransmissionResult::NoAck(tx_frame, instant),
+                None => SchedulerTransmissionResult::ChannelAccessFailure(tx_frame),
+            };
+            let action = self.go_idle(context);
+            return SchedulerTaskTransition::Execute(
+                action,
+                Some((response_token, SchedulerResponse::Transmission(result))),
+            );
+        }
+
+        let (be, backoff_remaining) = if failed_on_shared && !(is_cca_busy && backoff.nb == 0) {
+            // Shared-link retransmission: the delay window comes from the current
+            // BE, which is advanced afterwards for the next round.
+            let window = 1u32 << backoff.be.min(31);
+            let backoff_remaining = (context.rng.next_u32() % window) as u16;
+            let be = backoff
+                .be
+                .saturating_add(1)
+                .min(context.pib.tsch.tsch_max_be);
+            (be, backoff_remaining)
+        } else {
+            // First channel-access failure, or a dedicated-link failure: no wait,
+            // BE unchanged.
+            (backoff.be, 0)
+        };
+
+        let backoff = TschCsmaBackoff {
+            be,
+            nb,
+            backoff_remaining,
+        };
+        let mpdu = MpduFrame::from_radio_frame(tx_frame);
+        let current_asn = context.pib.tsch.asn_at(context.timer.now());
+        self.queue_tx_with_backoff(response_token, mpdu, current_asn, backoff, context);
+
+        SchedulerTaskTransition::Execute(self.go_idle(context), None)
     }
 
     /// Handle Listening state - RX window active, waiting for frames.
@@ -204,19 +350,30 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         event: SchedulerTaskEvent,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        let current_asn = context.pib.tsch.asn;
-        self.queue_next_rx(current_asn, context);
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
+                // The slot is not complete yet; do not queue the next RX here
+                // (that would over-queue duplicate ops). Queue it once the slot
+                // actually completes (RX window end or terminal RX event).
                 self.state = TschState::Receiving;
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(rx_frame)) => {
-                // No frame received in this slot
+                // No frame received in this slot: the slot is complete, so queue
+                // the next RX exactly once here.
                 self.put_rx_frame(rx_frame);
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
-            _ => unreachable!(),
+            // Listening legitimately only sees the two events above. Recover to
+            // idle rather than aborting.
+            _ => {
+                dot15d4_util::warn!("TSCH: unexpected event in Listening; recovering to idle.");
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
         }
     }
 
@@ -228,13 +385,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, rx_instant)) => {
+                // Slot complete: queue the next RX exactly once.
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
                 let action = self.go_idle(context);
 
                 // Frame-based synchronization
                 #[cfg(not(feature = "no-tsch-frame-sync"))]
                 if !self.is_coordinator {
                     let asn = context.pib.tsch.asn;
-                    context.pib.tsch.sync_asn(asn, rx_instant);
+                    // Only steer the local clock from frames received on a
+                    // time-keeping link (a designated time-source neighbor),
+                    // not from arbitrary RX links.
+                    if context.pib.tsch.rx_link_is_time_keeping(asn) {
+                        context.pib.tsch.sync_asn(asn, rx_instant);
+                    }
                 }
 
                 match utils::process_rx_frame(rx_frame, rx_instant, context) {
@@ -252,10 +417,30 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 }
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(rx_frame, _instant)) => {
+                // Slot complete: queue the next RX exactly once.
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
                 self.put_rx_frame(rx_frame);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
-            _ => unreachable!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::ReceptionAborted) => {
+                // The reception terminated without a frame (Enh-ACK CRC rollback
+                // or a frame starting as the window closed). The driver kept the
+                // RX buffer and resumed listening, so the slot is not complete:
+                // go back to Listening and wait for the next driver event (a new
+                // FrameStarted or the eventual RxWindowEnded) instead of aborting.
+                // The next RX is queued when the slot completes.
+                self.state = TschState::Listening;
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
+            // Receiving legitimately only sees the events above. Recover to idle
+            // rather than aborting.
+            _ => {
+                dot15d4_util::warn!("TSCH: unexpected event in Receiving; recovering to idle.");
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
         }
     }
 }
@@ -281,11 +466,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let current_time = context.timer.now();
         let current_asn = context.pib.tsch.asn_at(current_time);
 
-        if self.queue_tx(token, mpdu, current_asn, context) {
-            SchedulerTaskTransition::Execute(self.go_idle(context), None)
-        } else {
-            todo!()
-        }
+        // When no suitable link exists, queue_tx fails the request itself
+        // (ChannelAccessFailure), so the task simply returns to idle.
+        self.queue_tx(token, mpdu, current_asn, context);
+        SchedulerTaskTransition::Execute(self.go_idle(context), None)
     }
 
     /// Handle a command request (mode switching, configuration).
@@ -302,10 +486,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         match command {
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(tsch_cmd) => match tsch_cmd {
-                UseTsch(enabled, _cca) => {
+                UseTsch(enabled, cca) => {
                     use crate::scheduler::{
                         command::tsch::TschCommandResult::UseTsch, SchedulerTaskCompletion,
                     };
+
+                    // Keep macTschCca in sync (the CSMA-side handler is the one
+                    // that takes effect on entry, but mirror it here too).
+                    context.pib.tsch.tsch_cca = cca;
 
                     let result = if enabled {
                         tsch::UseTschCommandResult::StartedTsch
@@ -368,11 +556,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 asn,
                 channel,
                 cca,
+                shared,
+                backoff,
                 response_token,
                 ..
             } => {
                 self.state = TschState::WaitingForTxStart {
                     response_token: Some(response_token),
+                    shared,
+                    backoff,
                 };
 
                 context.pib.tsch.update_timing(asn);
@@ -473,6 +665,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 self.state = TschState::WaitingForTxStart {
                     response_token: None,
+                    shared: false,
+                    backoff: TschCsmaBackoff::new(0),
                 };
 
                 // Calculate TX start time: timeslot start + macTsTxOffset
@@ -482,7 +676,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 let request = DrvSvcRequest::CompleteThenStartTx(DrvSvcTaskTx {
                     at: Timestamp::Scheduled(tx_instant),
                     mpdu: updated_frame,
-                    cca: false,
+                    cca: context.pib.tsch.tsch_cca,
                     channel: Some(channel),
                     fallback_on_nack: false,
                 });

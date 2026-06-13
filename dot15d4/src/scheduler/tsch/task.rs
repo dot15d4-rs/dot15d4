@@ -7,7 +7,7 @@ use core::{cell::Cell, marker::PhantomData};
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{FrameType, RadioFrame, RadioFrameUnsized},
+        frame::{RadioFrame, RadioFrameUnsized},
         DriverConfig,
     },
     timer::{NsDuration, NsInstant, RadioTimerApi},
@@ -18,7 +18,9 @@ use heapless::Vec;
 
 use crate::{
     constants::MAC_TSCH_MAX_PENDING_OPERATIONS,
-    scheduler::{tsch::TschLinkType, SchedulerContext},
+    scheduler::{
+        tsch::TschLinkType, SchedulerContext, SchedulerResponse, SchedulerTransmissionResult,
+    },
 };
 
 #[cfg(feature = "tsch-coordinator")]
@@ -31,6 +33,32 @@ pub const TIMESLOT_GUARD_TIME_US: u64 = 2000;
 /// Infinite deadline - used when no pending operations.
 pub const INFINITE_DEADLINE: NsInstant = NsInstant::from_ticks(u64::MAX);
 
+/// TSCH CSMA-CA retransmission backoff state.
+///
+/// Tracks the backoff exponent (BE), number of backoffs (NB), and remaining
+/// shared links to skip before retransmission. NB also counts the channel-access
+/// failures that precede the first missing acknowledgment.
+#[derive(Debug, Clone, Copy)]
+pub struct TschCsmaBackoff {
+    /// Backoff exponent (BE).
+    pub be: u8,
+    /// Number of backoffs (NB).
+    pub nb: u8,
+    /// Number of shared links remaining to skip before retransmission.
+    pub backoff_remaining: u16,
+}
+
+impl TschCsmaBackoff {
+    /// Create initial backoff state from PIB parameters.
+    pub fn new(min_be: u8) -> Self {
+        Self {
+            be: min_be,
+            nb: 0,
+            backoff_remaining: 0,
+        }
+    }
+}
+
 /// TSCH operation to be executed during a timeslot.
 #[derive(Debug)]
 pub enum TschOperation {
@@ -41,6 +69,10 @@ pub enum TschOperation {
         slotframe_handle: u8,
         channel: Channel,
         cca: bool,
+        /// Whether this TX is on a shared link.
+        shared: bool,
+        /// TSCH CSMA-CA backoff state for retransmissions on shared links.
+        backoff: TschCsmaBackoff,
         response_token: ResponseToken,
     },
     /// Reception slot.
@@ -125,10 +157,14 @@ pub enum TschState {
     /// TX slot - driver request sent, waiting for TxStarted.
     WaitingForTxStart {
         response_token: Option<ResponseToken>,
+        shared: bool,
+        backoff: TschCsmaBackoff,
     },
     /// TX slot - TxStarted received, waiting for Sent/Nack.
     Transmitting {
         response_token: Option<ResponseToken>,
+        shared: bool,
+        backoff: TschCsmaBackoff,
     },
     /// RX slot - driver request sent, waiting for FrameStarted/RxWindowEnded.
     Listening,
@@ -420,35 +456,84 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Select the TX link for a frame, returning plain link data
+    /// `(asn, slotframe_handle, channel, shared)`.
+    fn select_tx_link(
+        &self,
+        current_asn: TschAsn,
+        backoff: &TschCsmaBackoff,
+        context: &SchedulerContext<RadioDriverImpl>,
+    ) -> Option<(TschAsn, u8, Channel, bool)> {
+        let selected = if backoff.nb > 0 {
+            let shared = context.pib.tsch.select_nth_link(
+                current_asn,
+                backoff.backoff_remaining,
+                |l| {
+                    l.link_options.contains(TschLinkOption::Tx)
+                        && l.link_options.contains(TschLinkOption::Shared)
+                },
+            );
+            let dedicated = context.pib.tsch.select_next_link(current_asn, |l| {
+                l.link_options.contains(TschLinkOption::Tx)
+                    && !l.link_options.contains(TschLinkOption::Shared)
+            });
+            match (shared, dedicated) {
+                // Dedicated link preempts the remaining shared-link wait on a
+                // tie or when it occurs no later than the skipped shared slot.
+                (Some((sl, sa)), Some((dl, da))) => {
+                    if da <= sa {
+                        Some((dl, da))
+                    } else {
+                        Some((sl, sa))
+                    }
+                }
+                (Some(link), None) => Some(link),
+                (None, Some(link)) => Some(link),
+                (None, None) => None,
+            }
+        } else {
+            context
+                .pib
+                .tsch
+                .select_next_link(current_asn, |l| l.link_options.contains(TschLinkOption::Tx))
+        };
+
+        selected.map(|(link, asn)| {
+            let channel =
+                context
+                    .pib
+                    .tsch
+                    .channel_for_link(asn, link, &context.pib.hopping_sequence);
+            let shared = link.link_options.contains(TschLinkOption::Shared);
+            (asn, link.slotframe_handle, channel, shared)
+        })
+    }
+
+    /// Build the TX operation for a frame at the next suitable link.
+    ///
+    /// Returns the frame and response token unconsumed when no suitable link
+    /// exists so that the caller can fail the request properly (dropping a
+    /// `ResponseToken` is not allowed).
     pub fn next_tx_operation(
         &self,
         current_asn: TschAsn,
         mpdu: MpduFrame,
         response_token: ResponseToken,
+        backoff: TschCsmaBackoff,
         context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> Option<TschOperation> {
-        match context.pib.tsch.select_next_link(current_asn, |l| {
-            matches!(l.link_type, TschLinkType::Advertising)
-                && l.link_options.contains(TschLinkOption::Shared)
-        }) {
-            Some((link, asn)) => {
-                // Calculate channel
-                let channel =
-                    context
-                        .pib
-                        .tsch
-                        .channel_for_link(asn, link, &context.pib.hopping_sequence);
-                let slotframe_handle = link.slotframe_handle;
-                Some(TschOperation::TxSlot {
-                    mpdu,
-                    asn,
-                    slotframe_handle,
-                    channel,
-                    cca: false, // TODO
-                    response_token,
-                })
-            }
-            None => None,
+    ) -> Result<TschOperation, (MpduFrame, ResponseToken)> {
+        match self.select_tx_link(current_asn, &backoff, context) {
+            Some((asn, slotframe_handle, channel, shared)) => Ok(TschOperation::TxSlot {
+                mpdu,
+                asn,
+                slotframe_handle,
+                channel,
+                cca: context.pib.tsch.tsch_cca,
+                shared,
+                backoff,
+                response_token,
+            }),
+            None => Err((mpdu, response_token)),
         }
     }
 
@@ -488,9 +573,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             TschOperation::TxSlot {
                 mpdu,
                 asn,
+                backoff,
                 response_token,
                 ..
-            } => self.queue_tx(response_token, mpdu, asn, context),
+            } => self.queue_tx_with_backoff(response_token, mpdu, asn, backoff, context),
             TschOperation::RxSlot { asn, .. } => self.queue_next_rx(asn, context),
             #[cfg(feature = "tsch-coordinator")]
             TschOperation::AdvertisementSlot { .. } => self.queue_next_beacon(context),
@@ -513,6 +599,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// Queue a fresh transmission, starting the TSCH CSMA-CA state from the
+    /// PIB defaults.
+    ///
+    /// Returns `true` if the operation was queued. When no suitable link exists
+    /// the request is failed immediately and `false` is returned.
     pub fn queue_tx(
         &mut self,
         token: ResponseToken,
@@ -520,25 +611,70 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         from_asn: TschAsn,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
-        // Find appropriate link based on frame type
-        let operation = match mpdu.frame_control().frame_type() {
-            FrameType::Beacon => self.next_advertising_operation(from_asn, context),
-            _ => self.next_tx_operation(from_asn, mpdu, token, context),
-        };
+        let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
+        self.queue_tx_with_backoff(token, mpdu, from_asn, backoff, context)
+    }
 
-        match operation {
-            Some(op) => match self.push_operation(op) {
+    /// Queue a transmission carrying an explicit TSCH CSMA-CA backoff state
+    /// (fresh request, retransmission, or displaced operation).
+    ///
+    /// When no suitable link exists, the request is failed with
+    /// `ChannelAccessFailure` so that the response token is consumed and the
+    /// frame is returned to the upper layer.
+    pub fn queue_tx_with_backoff(
+        &mut self,
+        token: ResponseToken,
+        mpdu: MpduFrame,
+        from_asn: TschAsn,
+        backoff: TschCsmaBackoff,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> bool {
+        match self.next_tx_operation(from_asn, mpdu, token, backoff, context) {
+            Ok(op) => match self.push_operation(op) {
                 Ok(None) => true,
                 Ok(Some(op)) => self.reschedule_operation(op, context),
                 Err(op) => self.reschedule_operation(op, context),
             },
-            None => false,
+            Err((mpdu, token)) => {
+                self.fail_tx(mpdu, token, context);
+                false
+            }
         }
     }
 
+    /// Fail a transmission request outside of a state machine transition:
+    /// consume the response token with a `ChannelAccessFailure` carrying the
+    /// frame back to the upper layer.
+    fn fail_tx(
+        &self,
+        mpdu: MpduFrame,
+        token: ResponseToken,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) {
+        let frame = mpdu.into_radio_frame::<RadioDriverImpl>();
+        context.request_receiver.received(
+            token,
+            SchedulerResponse::Transmission(SchedulerTransmissionResult::ChannelAccessFailure(
+                frame,
+            )),
+        );
+    }
+
     /// Terminate TSCH scheduler by releasing resources owned by the scheduler,
-    /// i.e. buffers for beacons and RX frames.
+    /// i.e. buffers for beacons and RX frames, and by failing pending TX
+    /// operations so that their response tokens are consumed and the frames
+    /// are returned to the upper layer.
     pub fn terminate(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
+        while let Some(op) = self.pending_operations.pop() {
+            if let TschOperation::TxSlot {
+                mpdu,
+                response_token,
+                ..
+            } = op
+            {
+                self.fail_tx(mpdu, response_token, context);
+            }
+        }
         if let Some(radio_frame) = self.take_rx_frame() {
             unsafe {
                 context

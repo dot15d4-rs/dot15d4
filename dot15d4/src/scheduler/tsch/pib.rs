@@ -10,8 +10,8 @@ use dot15d4_driver::timer::{NsDuration, NsInstant};
 use heapless::Vec;
 
 use crate::constants::{
-    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_MAX_BE, MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES,
-    MAC_TSCH_MIN_BE,
+    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_MAX_BE, MAC_TSCH_MAX_LINKS,
+    MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 
@@ -115,17 +115,6 @@ impl TschSlotframe {
         }
     }
 
-    /// Calculate the next ASN for a link, strictly after current_asn.
-    /// TODO: remove, redundant
-    pub fn next_asn_for_link_after<Neighbor>(
-        &self,
-        link: &TschLink<Neighbor>,
-        current_asn: TschAsn,
-    ) -> TschAsn {
-        // Start search from the next ASN to ensure we get a strictly future occurrence
-        self.next_asn_for_link(link, current_asn.saturating_add(1).saturating_sub(1))
-    }
-
     /// Get the slotframe size.
     pub fn size(&self) -> u16 {
         self.size
@@ -145,6 +134,11 @@ pub struct TschPib<Neighbor> {
     pub tsch_min_be: u8,
     /// The maximum value of the BE in the TSCH-CA algorithm.
     pub tsch_max_be: u8,
+    /// Whether CCA is performed before a TSCH transmission (macTschCca, set via
+    /// MLME-TSCH-MODE.request). In TSCH, CCA only guards against non-802.15.4
+    /// interferers; intra-network contenders are slot-aligned and cannot be
+    /// detected by it. Defaults to off.
+    pub tsch_cca: bool,
     /// Time (in timeslots) to send Disassociate frames before disconnecting.
     pub disconnect_time: u16,
     /// Metric used when selecting and joining a TSCH network.
@@ -310,6 +304,55 @@ impl<Neighbor> TschPib<Neighbor> {
         best
     }
 
+    /// Select the Nth valid link (skipping `skip` occurrences) across all
+    /// slotframes that matches the given criteria.
+    ///
+    /// When `skip == 0`, this behaves identically to [`select_next_link`].
+    /// When `skip > 0`, the first `skip` matching link occurrences are
+    /// skipped and the (skip+1)th is returned. This is used by the TSCH
+    /// CSMA-CA retransmission backoff algorithm to skip a random number of
+    /// shared link slots before retransmitting.
+    pub fn select_nth_link(
+        &self,
+        current_asn: TschAsn,
+        skip: u16,
+        filter: impl Fn(&TschLink<Neighbor>) -> bool,
+    ) -> Option<(&TschLink<Neighbor>, TschAsn)> {
+        let mut search_asn = current_asn;
+        let mut result = None;
+        for _ in 0..=skip {
+            result = self.select_next_link(search_asn, &filter);
+            match result {
+                Some((_, asn)) => search_asn = asn,
+                None => return None,
+            }
+        }
+        result
+    }
+
+    /// Returns whether the RX link active at `asn` is a time-keeping link,
+    /// i.e. whether its neighbor is a designated time source.
+    ///
+    /// Frame-based synchronization must only steer the local clock from frames
+    /// received on such links; adjusting from an arbitrary RX link lets any
+    /// neighbour drag the node's notion of time. A link is "active at
+    /// `asn`" when its assigned timeslot matches the timeslot `asn` maps to in
+    /// the link's slotframe.
+    pub fn rx_link_is_time_keeping(&self, asn: TschAsn) -> bool {
+        self.links.iter().any(|link| {
+            if !link
+                .link_options
+                .contains(TschLinkOption::Rx | TschLinkOption::TimeKeeping)
+            {
+                return false;
+            }
+            match self.get_slotframe(link.slotframe_handle) {
+                Some(slotframe) => slotframe.timeslot(asn) == link.timeslot,
+                None => false,
+            }
+        })
+    }
+
     /// Calculate the channel for a given ASN and link.
     pub fn channel_for_link(
         &self,
@@ -317,6 +360,10 @@ impl<Neighbor> TschPib<Neighbor> {
         link: &TschLink<Neighbor>,
         hopping_sequence: &[Channel],
     ) -> Channel {
+        if hopping_sequence.is_empty() {
+            dot15d4_util::warn!("TSCH hopping sequence is empty; falling back to the default channel.");
+            return Channel::default();
+        }
         let channel_index =
             ((asn + link.channel_offset as u64) % hopping_sequence.len() as u64) as usize;
         hopping_sequence[channel_index]
@@ -433,7 +480,8 @@ impl<Neighbor> Default for TschPib<Neighbor> {
     fn default() -> Self {
         Self {
             tsch_min_be: MAC_TSCH_MIN_BE,
-            tsch_max_be: MAC_MAX_BE,
+            tsch_max_be: MAC_TSCH_MAX_BE,
+            tsch_cca: false,
             disconnect_time: MAC_DISCONNECT_TIME,
             join_metric: MAC_JOIN_METRIC,
             slotframes: Vec::new(),
