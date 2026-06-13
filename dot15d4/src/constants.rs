@@ -4,6 +4,10 @@ pub use customizable::*;
 #[cfg(test)]
 mod customizable {
     #![allow(dead_code)]
+    // Test-only config, intentionally outside the standard ranges: MIN_BE=0
+    // forces a zero first backoff and the large MAX_CSMA_BACKOFFS lets the
+    // retry tests step through many attempts. The range checks in build.rs
+    // apply to the generated (non-test) config only.
     pub const MAC_MIN_BE: u8 = 0;
     pub const MAC_MAX_BE: u8 = 8;
     pub const MAC_MAX_CSMA_BACKOFFS: u8 = 16;

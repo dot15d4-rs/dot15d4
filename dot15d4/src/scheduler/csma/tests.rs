@@ -103,7 +103,9 @@ mod single_tx_tests {
         let mpdu = create_test_mpdu_with_ack(&runner.context.buffer_allocator);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         assert!(matches!(runner.state(), CsmaState::WaitingForTxStart));
-        assert!(runner.last_tx_is_best_effort());
+        let scheduled = runner.last_tx_scheduled_instant();
+        assert!(scheduled.is_some());
+        assert!(scheduled.unwrap() >= runner.base_time());
 
         // Simulate driver returning RX frame before starting TX
         let rx_ended = runner.create_rx_window_ended_event();

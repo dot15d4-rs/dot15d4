@@ -103,7 +103,12 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 let req = self.build_rx_request(frame, None);
                 self.send_driver_request_and_wait(req)
             }
-            _ => unreachable!(),
+            // Any other driver event while merely listening is unexpected; keep
+            // selecting rather than aborting.
+            _ => {
+                dot15d4_util::warn!("CSMA: unexpected event in Listening; continuing to select.");
+                SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
+            }
         }
     }
 
@@ -141,7 +146,21 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.state = CsmaState::Listening;
                 SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
             }
-            _ => unreachable!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::ReceptionAborted) => {
+                // The reception terminated without a frame (Enh-ACK CRC rollback
+                // or a frame starting as the window closed). The driver kept the
+                // RX buffer and resumed listening, so we just return to Listening
+                // and keep selecting, instead of aborting.
+                self.state = CsmaState::Listening;
+                SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
+            }
+            // Receiving legitimately only sees the events above; recover to
+            // listening rather than aborting.
+            _ => {
+                dot15d4_util::warn!("CSMA: unexpected event in Receiving; recovering to listening.");
+                self.state = CsmaState::Listening;
+                SchedulerTaskTransition::Execute(SchedulerAction::SelectDriverEventOrRequest, None)
+            }
         }
     }
 
@@ -165,7 +184,19 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.rx_frame = Some(radio_frame);
                 SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
             }
-            _ => unreachable!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::SchedulingFailed(frame)) => {
+                // The driver could not schedule the transmission (timer rejection
+                // / deadline in the past). Route it through the same backoff path
+                // as a CCA-busy result so the frame is retried or surfaced as a
+                // channel-access failure, instead of aborting.
+                self.backoff_or_fail(frame, context)
+            }
+            // WaitingForTxStart legitimately only sees the events above; keep
+            // waiting rather than aborting.
+            _ => {
+                dot15d4_util::warn!("CSMA: unexpected event in WaitingForTxStart; continuing to wait.");
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
         }
     }
 
@@ -184,7 +215,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                     frame.forget_size::<RadioDriverImpl>(),
                     instant,
                 ));
-                self.continue_with_pipelined((token, resp))
+                self.continue_with_pipelined((token, resp), context)
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(frame, instant, recovered, _)) => {
                 self.base_time = instant;
@@ -208,12 +239,28 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                         let resp = SchedulerResponse::Transmission(
                             SchedulerTransmissionResult::NoAck(frame, instant),
                         );
-                        self.continue_with_pipelined((token, resp))
+                        self.continue_with_pipelined((token, resp), context)
                     }
-                    _ => unreachable!(),
+                    // Any other recovered request kind is unexpected; surface the
+                    // TX as failed (consuming the frame) rather than aborting.
+                    _ => {
+                        dot15d4_util::warn!(
+                            "CSMA: unexpected recovered request on Nack; reporting TX failure."
+                        );
+                        let token = self.take_tx_token();
+                        let resp = SchedulerResponse::Transmission(
+                            SchedulerTransmissionResult::NoAck(frame, instant),
+                        );
+                        self.continue_with_pipelined((token, resp), context)
+                    }
                 }
             }
-            _ => unreachable!(),
+            // Transmitting legitimately only sees Sent / Nack; keep waiting for a
+            // terminal TX event rather than aborting.
+            _ => {
+                dot15d4_util::warn!("CSMA: unexpected event in Transmitting; continuing to wait.");
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
         }
     }
 
@@ -441,7 +488,11 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         };
 
         match cmd {
-            TschCommand::UseTsch(enabled, _) => {
+            TschCommand::UseTsch(enabled, cca) => {
+                // Record macTschCca (MLME-TSCH-MODE.request). This handler runs
+                // before the mode switch, so it is the one that takes effect for
+                // the upcoming TSCH session.
+                tsch.tsch_cca = cca;
                 if enabled {
                     self.state = CsmaState::Terminating(SchedulerTaskCompletion::SwitchToTsch);
                     self.tx_token = Some(token);
@@ -569,8 +620,10 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         self.tx_token = Some(token);
         self.tx_retries = 0;
 
-        // FIXME: fix scheduled timings
-        let at = Timestamp::BestEffort;
+        // The random(2^BE-1) unit-backoff delay precedes every CCA, including
+        // the first. `base_time` was just set to `now()`, so schedule the first
+        // attempt at now + backoff.
+        let at = Timestamp::Scheduled(self.backoff_time(context.rng));
         let fallback = self.tx_retries < context.pib.max_frame_retries;
         let req = self.build_tx_request(mpdu, at, Some(self.channel), fallback);
 
@@ -584,12 +637,18 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     fn continue_with_pipelined(
         &mut self,
         response: (ResponseToken, SchedulerResponse),
+        context: &SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         match self.pipelined.take() {
             Some(Pipelined::Tx(token)) => {
                 self.state = CsmaState::WaitingForTxStart;
                 self.tx_token = Some(token);
                 self.tx_retries = 0;
+                // The pipelined frame is a new transmission attempt and must
+                // start the CSMA-CA algorithm from scratch (NB=0, BE=macMinBe);
+                // inheriting the previous frame's backoff would let one busy CCA
+                // trigger a spurious CHANNEL_ACCESS_FAILURE with inflated BE.
+                self.backoff.reset(context.pib.min_be);
                 SchedulerTaskTransition::Execute(
                     SchedulerAction::WaitForDriverEvent,
                     Some(response),

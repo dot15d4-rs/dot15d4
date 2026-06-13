@@ -12,9 +12,9 @@ fn const_config(out_dir: &Path) {
     // (Variable, Type, Default value)
     // TODO: Set the default PAN ID to 0xffff once we implement association.
     let mut const_config: HashMap<&str, (&str, &str)> = HashMap::from([
-        ("MAC_MIN_BE", ("u8", "0")),
-        ("MAC_MAX_BE", ("u8", "8")),
-        ("MAC_MAX_CSMA_BACKOFFS", ("u8", "16")),
+        ("MAC_MIN_BE", ("u8", "3")),
+        ("MAC_MAX_BE", ("u8", "5")),
+        ("MAC_MAX_CSMA_BACKOFFS", ("u8", "4")),
         ("MAC_MAX_FRAME_RETRIES", ("u8", "3")),
         ("MAC_PAN_ID", ("u16", "0xbeef")),
         ("MAC_IMPLICIT_BROADCAST", ("bool", "false")),
@@ -54,6 +54,15 @@ fn const_config(out_dir: &Path) {
     for (name, (ty, value)) in const_config.iter() {
         writeln!(data, "pub const {name}: {ty} = {value};").unwrap();
     }
+
+    data.push_str(concat!(
+        "const _: () = assert!(MAC_MIN_BE <= MAC_MAX_BE, \"MAC_MIN_BE must be <= MAC_MAX_BE\");\n",
+        "const _: () = assert!(MAC_MAX_BE >= 3 && MAC_MAX_BE <= 8, \"MAC_MAX_BE must be in 3..=8\");\n",
+        "const _: () = assert!(MAC_MAX_CSMA_BACKOFFS <= 5, \"MAC_MAX_CSMA_BACKOFFS must be in 0..=5\");\n",
+        "const _: () = assert!(MAC_MAX_FRAME_RETRIES <= 7, \"MAC_MAX_FRAME_RETRIES must be in 0..=7\");\n",
+        "const _: () = assert!(MAC_TSCH_MIN_BE <= MAC_TSCH_MAX_BE, \"MAC_TSCH_MIN_BE must be <= MAC_TSCH_MAX_BE\");\n",
+        "const _: () = assert!(MAC_TSCH_MAX_BE >= 3 && MAC_TSCH_MAX_BE <= 8, \"MAC_TSCH_MAX_BE must be in 3..=8\");\n",
+    ));
 
     // Now that we have the code of the configuration, actually write it to a file
     let out_file = out_dir.join("config.rs");
