@@ -143,10 +143,27 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateRequestTask<'_, RadioDr
                                 None,
                             )
                         }
-                        Err(_) => todo!(),
+                        Err(_) => {
+                            // The associate-request frame could not be built
+                            // (e.g. the buffer allocator was exhausted). Fail the
+                            // association gracefully instead of panicking. The Err
+                            // path hands out no buffer, so there is nothing to
+                            // deallocate.
+                            dot15d4_util::warn!(
+                                "MLME associate: failed to build associate-request frame."
+                            );
+                            MacTaskTransition::Terminated(AssociateConfirm::ChannelAccessFailure)
+                        }
                     }
                 }
-                _ => unreachable!(),
+                // Any other event/PIB result while awaiting the extended address
+                // is unexpected; fail gracefully rather than aborting.
+                _ => {
+                    dot15d4_util::warn!(
+                        "MLME associate: unexpected event while awaiting PIB result."
+                    );
+                    MacTaskTransition::Terminated(AssociateConfirm::ChannelAccessFailure)
+                }
             },
             AssociateRequestState::SendingRequest => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Transmission(result)) => {
@@ -183,55 +200,85 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateRequestTask<'_, RadioDr
                         }
                     }
                 }
-                _ => unreachable!(),
+                // Any other scheduler response while awaiting the TX result is
+                // unexpected; fail gracefully rather than aborting.
+                _ => {
+                    dot15d4_util::warn!(
+                        "MLME associate: unexpected response while sending request."
+                    );
+                    MacTaskTransition::Terminated(AssociateConfirm::ChannelAccessFailure)
+                }
             },
             AssociateRequestState::WaitingForResponse => match event {
-                MacTaskEvent::SchedulerResponse(SchedulerResponse::Reception(
-                    SchedulerReceptionResult::Command(radio_frame, _instant),
-                )) => {
-                    // Parse the association response command frame.
-                    let rx_mpdu = MpduFrame::from_radio_frame(radio_frame);
+                MacTaskEvent::SchedulerResponse(SchedulerResponse::Reception(reception)) => {
+                    match reception {
+                        SchedulerReceptionResult::Command(radio_frame, _instant) => {
+                            // Parse the association response command frame.
+                            let rx_mpdu = MpduFrame::from_radio_frame(radio_frame);
 
-                    // Extract payload data before consuming the frame.
-                    let assoc_result = {
-                        rx_mpdu
-                            .reader()
-                            .parse_addressing()
-                            .ok()
-                            .and_then(|r| r.parse_security().parse_ies::<RadioDriverImpl>().ok())
-                            .and_then(|r| {
-                                let payload = r.try_frame_payload()?;
-                                // Association response payload:
-                                //   [0] = command frame identifier (0x02)
-                                //   [1..3] = short address (little-endian)
-                                //   [3] = association status
-                                if payload.len() >= 4 {
-                                    Some((
-                                        ShortAddress::new_owned([payload[1], payload[2]]),
-                                        AssociationStatus::from(payload[3]),
-                                    ))
-                                } else {
-                                    None
-                                }
+                            // Extract payload data before consuming the frame.
+                            let assoc_result = {
+                                rx_mpdu
+                                    .reader()
+                                    .parse_addressing()
+                                    .ok()
+                                    .and_then(|r| {
+                                        r.parse_security().parse_ies::<RadioDriverImpl>().ok()
+                                    })
+                                    .and_then(|r| {
+                                        let payload = r.try_frame_payload()?;
+                                        // Association response payload:
+                                        //   [0] = command frame identifier (0x02)
+                                        //   [1..3] = short address (little-endian)
+                                        //   [3] = association status
+                                        if payload.len() >= 4 {
+                                            Some((
+                                                ShortAddress::new_owned([payload[1], payload[2]]),
+                                                AssociationStatus::from(payload[3]),
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                            };
+
+                            let (short_address, status) = assoc_result.unwrap_or((
+                                ShortAddress::new_owned([0xff, 0xff]),
+                                AssociationStatus::PanAccessDenied,
+                            ));
+
+                            unsafe {
+                                self.buffer_allocator
+                                    .deallocate_buffer(rx_mpdu.into_buffer())
+                            };
+
+                            MacTaskTransition::Terminated(AssociateConfirm::Completed {
+                                status,
+                                short_address,
                             })
-                    };
-
-                    let (short_address, status) = assoc_result.unwrap_or((
-                        ShortAddress::new_owned([0xff, 0xff]),
-                        AssociationStatus::PanAccessDenied,
-                    ));
-
-                    unsafe {
-                        self.buffer_allocator
-                            .deallocate_buffer(rx_mpdu.into_buffer())
-                    };
-
-                    MacTaskTransition::Terminated(AssociateConfirm::Completed {
-                        status,
-                        short_address,
-                    })
+                        }
+                        // A non-command frame matched the reception slot, which is
+                        // not a valid association response. Return its buffer and
+                        // report no usable response instead of aborting.
+                        SchedulerReceptionResult::Data(radio_frame, _)
+                        | SchedulerReceptionResult::Beacon(radio_frame, _) => {
+                            let rx_mpdu = MpduFrame::from_radio_frame(radio_frame);
+                            unsafe {
+                                self.buffer_allocator
+                                    .deallocate_buffer(rx_mpdu.into_buffer())
+                            };
+                            MacTaskTransition::Terminated(AssociateConfirm::NoAck)
+                        }
+                    }
                 }
-                _ => unreachable!(),
+                // Any other scheduler response in this state is unexpected; report
+                // NoAck rather than aborting.
+                _ => {
+                    dot15d4_util::warn!(
+                        "MLME associate: unexpected response while awaiting association response."
+                    );
+                    MacTaskTransition::Terminated(AssociateConfirm::NoAck)
+                }
             },
         }
     }
@@ -386,7 +433,39 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
                         }
                     }
                 }
-                _ => unreachable!(),
+                // A non-command reception is not a valid association request;
+                // return its buffer and keep listening instead of aborting
+                //.
+                MacTaskEvent::SchedulerResponse(SchedulerResponse::Reception(
+                    SchedulerReceptionResult::Data(radio_frame, _)
+                    | SchedulerReceptionResult::Beacon(radio_frame, _),
+                )) => {
+                    let mpdu = MpduFrame::from_radio_frame(radio_frame);
+                    unsafe { self.buffer_allocator.deallocate_buffer(mpdu.into_buffer()) };
+                    self.state = AssociateIndicationState::WaitingForRequest;
+                    MacTaskTransition::SchedulerRequest(
+                        self,
+                        SchedulerRequest::Reception(ReceptionType::MacCommand(
+                            MacCommandType::AssociateRequest,
+                        )),
+                        None,
+                    )
+                }
+                // Any other response is unexpected; resume listening rather than
+                // aborting the coordinator's indication task.
+                _ => {
+                    dot15d4_util::warn!(
+                        "MLME associate (indication): unexpected response while awaiting request."
+                    );
+                    self.state = AssociateIndicationState::WaitingForRequest;
+                    MacTaskTransition::SchedulerRequest(
+                        self,
+                        SchedulerRequest::Reception(ReceptionType::MacCommand(
+                            MacCommandType::AssociateRequest,
+                        )),
+                        None,
+                    )
+                }
             },
             AssociateIndicationState::SendingResponse => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Transmission(result)) => {
@@ -440,7 +519,21 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
                         }
                     }
                 }
-                _ => unreachable!(),
+                // Any other response while sending the association response is
+                // unexpected; resume listening rather than aborting.
+                _ => {
+                    dot15d4_util::warn!(
+                        "MLME associate (indication): unexpected response while sending response."
+                    );
+                    self.state = AssociateIndicationState::WaitingForRequest;
+                    MacTaskTransition::SchedulerRequest(
+                        self,
+                        SchedulerRequest::Reception(ReceptionType::MacCommand(
+                            MacCommandType::AssociateRequest,
+                        )),
+                        None,
+                    )
+                }
             },
         }
     }

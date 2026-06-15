@@ -164,9 +164,15 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     // Channel scan window expired, advance to next channel
                     self.advance_to_next_channel(context, Err(recovered_rx_frame))
                 }
-                _ => unreachable!(),
+                _ => {
+                    dot15d4_util::warn!("scan: unexpected driver event while scanning; advancing channel.");
+                    self.advance_to_next_channel(context, Err(context.allocate_frame()))
+                }
             },
-            _ => unreachable!(),
+            _ => {
+                dot15d4_util::warn!("scan: unexpected event while scanning a channel; advancing channel.");
+                self.advance_to_next_channel(context, Err(context.allocate_frame()))
+            }
         }
     }
 
@@ -193,9 +199,20 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     // CRC error, continue listening on same channel
                     self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                 }
-                _ => unreachable!(),
+                DrvSvcEvent::RxWindowEnded(recovered_rx_frame) => {
+                    self.advance_to_next_channel(context, Err(recovered_rx_frame))
+                }
+                _ => {
+                    dot15d4_util::warn!(
+                        "scan: unexpected driver event while receiving a frame; advancing channel."
+                    );
+                    self.advance_to_next_channel(context, Err(context.allocate_frame()))
+                }
             },
-            _ => unreachable!(),
+            _ => {
+                dot15d4_util::warn!("scan: unexpected event while receiving a frame; advancing channel.");
+                self.advance_to_next_channel(context, Err(context.allocate_frame()))
+            }
         }
     }
 
