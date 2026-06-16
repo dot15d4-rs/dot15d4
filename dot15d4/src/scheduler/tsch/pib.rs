@@ -431,7 +431,8 @@ impl<Neighbor> TschPib<Neighbor> {
                 ((expected_elapsed_time - elapsed_time).to_nanos() / delta_asn) as i32
             };
 
-            self.drift_ns = measured_drift_ns;
+            let max_drift_ns = (self.timeslot_length_us().saturating_mul(1000) / 2) as i32;
+            self.drift_ns = measured_drift_ns.clamp(-max_drift_ns, max_drift_ns);
         }
     }
 
@@ -440,9 +441,9 @@ impl<Neighbor> TschPib<Neighbor> {
     pub fn sync_ack(&mut self, timesync_us: i16) {
         let asn = self.asn;
         if timesync_us < 0 {
-            self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
-        } else {
             self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
+        } else {
+            self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
         }
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, self.last_base_time);

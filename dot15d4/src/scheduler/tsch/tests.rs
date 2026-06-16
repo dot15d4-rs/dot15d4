@@ -1037,7 +1037,9 @@ mod ack_sync_tests {
         ));
 
         assert!(runner.last_response_is_sent());
-        assert_eq!(runner.last_base_time(), bt_before - NsDuration::micros(50));
+        // The Time Correction IE is applied additively, so a positive value
+        // pushes last_base_time forward.
+        assert_eq!(runner.last_base_time(), bt_before + NsDuration::micros(50));
         runner.terminate();
     }
 
@@ -1061,7 +1063,8 @@ mod ack_sync_tests {
             Some(-30i16),
         ));
 
-        assert_eq!(runner.last_base_time(), bt_before + NsDuration::micros(30));
+        // Additive application: a negative value pulls last_base_time back.
+        assert_eq!(runner.last_base_time(), bt_before - NsDuration::micros(30));
         runner.terminate();
     }
 
@@ -1774,7 +1777,8 @@ mod idle_request_tests {
             Some(800i16),
         ));
 
-        assert_eq!(runner.last_base_time(), bt_before - NsDuration::micros(800));
+        // Additive application of the Time Correction IE.
+        assert_eq!(runner.last_base_time(), bt_before + NsDuration::micros(800));
         runner.terminate();
     }
 
@@ -1798,7 +1802,8 @@ mod idle_request_tests {
             Some(-500i16),
         ));
 
-        assert_eq!(runner.last_base_time(), bt_before + NsDuration::micros(500));
+        // Additive application of the Time Correction IE.
+        assert_eq!(runner.last_base_time(), bt_before - NsDuration::micros(500));
         runner.terminate();
     }
 }

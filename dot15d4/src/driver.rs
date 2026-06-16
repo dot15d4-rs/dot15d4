@@ -899,9 +899,9 @@ where
                     let delta = match self.expected_rx_framestart.get() {
                         Some(expected_rx_framestart) => {
                             if expected_rx_framestart > rx_instant {
-                                -((expected_rx_framestart - rx_instant).to_micros() as i16)
+                                (expected_rx_framestart - rx_instant).to_micros() as i16
                             } else {
-                                (rx_instant - expected_rx_framestart).to_micros() as i16
+                                -((rx_instant - expected_rx_framestart).to_micros() as i16)
                             }
                         }
                         None => 0i16,
