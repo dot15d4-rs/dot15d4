@@ -19,11 +19,13 @@ use dot15d4_frame::{
     repr::{MpduRepr, SeqNrRepr},
     MpduWithIes,
 };
+use dot15d4_util::allocator::IntoBuffer;
 
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, Timestamp};
 use crate::mac::MacBufferAllocator;
 use crate::scheduler::command::pib::PibCommand;
 use crate::scheduler::command::tsch::TschCommand;
+use crate::scheduler::command::{CsmaCommandResult, UseCsmaResult};
 use crate::scheduler::tests::{
     create_sized_radio_frame, create_test_allocator, create_test_mpdu_with_ack,
     create_unsized_radio_frame, get_scheduler_channel, ActionType, DeterministicRng,
@@ -31,9 +33,10 @@ use crate::scheduler::tests::{
     DRIVER_EVENT_CHANNEL, DRIVER_REQUEST_CHANNEL,
 };
 use crate::scheduler::tsch::{
-    TschLink, TschLinkType, TschOperation, TschState, TschTask, INFINITE_DEADLINE,
+    TschCsmaBackoff, TschLink, TschLinkType, TschOperation, TschState, TschTask, INFINITE_DEADLINE,
     TIMESLOT_GUARD_TIME_US,
 };
+use crate::scheduler::SchedulerCommandResult;
 use crate::scheduler::{
     SchedulerAction, SchedulerCommand, SchedulerContext, SchedulerRequest, SchedulerResponse,
     SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition,
@@ -84,6 +87,27 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
         self.task.pending_operation_count()
     }
 
+    /// Return `(be, nb)` of the pending TX operation's TSCH CSMA-CA backoff
+    /// state, if any.
+    pub fn pending_tx_backoff(&self) -> Option<(u8, u8)> {
+        self.task.pending_operations.iter().find_map(|op| match op {
+            TschOperation::TxSlot { backoff, .. } => Some((backoff.be, backoff.nb)),
+            _ => None,
+        })
+    }
+
+    /// Return `(be, nb, backoff_remaining)` of the pending TX operation's TSCH
+    /// CSMA-CA backoff state, if any. `backoff_remaining` is the number of
+    /// shared TX links the retransmission still has to skip.
+    pub fn pending_tx_backoff_full(&self) -> Option<(u8, u8, u16)> {
+        self.task.pending_operations.iter().find_map(|op| match op {
+            TschOperation::TxSlot { backoff, .. } => {
+                Some((backoff.be, backoff.nb, backoff.backoff_remaining))
+            }
+            _ => None,
+        })
+    }
+
     pub fn last_asn(&self) -> TschAsn {
         self.context.pib.tsch.asn
     }
@@ -105,6 +129,27 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
     }
 
     pub fn terminate(&mut self) {
+        while let Some(op) = self.task.pending_operations.pop() {
+            if let TschOperation::TxSlot {
+                mpdu,
+                response_token,
+                ..
+            } = op
+            {
+                // Safety: the buffer was allocated from this allocator.
+                unsafe {
+                    self.context
+                        .buffer_allocator
+                        .deallocate_buffer(mpdu.into_buffer())
+                };
+                self.context.request_receiver.received(
+                    response_token,
+                    SchedulerResponse::Command(SchedulerCommandResult::CsmaCommand(
+                        CsmaCommandResult::UseCsma(UseCsmaResult::Success),
+                    )),
+                );
+            }
+        }
         self.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::TschCommand(
             TschCommand::UseTsch(false, false),
         )));
@@ -234,6 +279,74 @@ fn setup_short_schedule(pib: &mut TschPib<()>) {
     assert!(pib.add_link(link).is_ok());
 }
 
+/// Schedule with a single shared TX-only link at timeslot 0 (no RX links).
+///
+/// Used by TSCH CSMA-CA tests that step through several TX attempts: with no
+/// RX links, every timer expiry pops the TX operation, without interleaved
+/// RX slots between retransmission attempts.
+fn setup_shared_tx_only_schedule(pib: &mut TschPib<()>) {
+    assert!(pib.create_slotframe(0, 100).is_ok());
+    let link = TschLink {
+        slotframe_handle: 0,
+        timeslot: 0,
+        channel_offset: 0,
+        link_options: TschLinkOption::Tx | TschLinkOption::Shared,
+        link_type: TschLinkType::Advertising,
+        neighbor: None,
+        link_advertise: true,
+    };
+    assert!(pib.add_link(link).is_ok());
+}
+
+/// Schedule with a dedicated (non-shared) TX link at timeslot 10.
+/// Used to test non-shared link behavior where NACK is reported directly.
+fn setup_dedicated_tx_link_schedule(pib: &mut TschPib<()>) {
+    assert!(pib.create_slotframe(0, 100).is_ok());
+    // Dedicated TX link (not shared): NACK should produce NoAck response
+    let tx_link = TschLink {
+        slotframe_handle: 0,
+        timeslot: 10,
+        channel_offset: 0,
+        link_options: TschLinkOption::Tx,
+        link_type: TschLinkType::Advertising,
+        neighbor: None,
+        link_advertise: true,
+    };
+    assert!(pib.add_link(tx_link).is_ok());
+    // RX link at timeslot 50
+    let rx_link = TschLink {
+        slotframe_handle: 0,
+        timeslot: 50,
+        channel_offset: 0,
+        link_options: TschLinkOption::Rx | TschLinkOption::TimeKeeping,
+        link_type: TschLinkType::Normal,
+        neighbor: None,
+        link_advertise: false,
+    };
+    assert!(pib.add_link(rx_link).is_ok());
+}
+
+/// Schedule with a single dedicated (non-shared) TX-only link at timeslot 0
+/// (no RX links).
+///
+/// Counterpart to [`setup_shared_tx_only_schedule`] for dedicated-link
+/// retransmission tests: with no RX link, every timer expiry pops the TX
+/// operation, so consecutive retransmission attempts are not interleaved with
+/// RX slots.
+fn setup_dedicated_tx_only_schedule(pib: &mut TschPib<()>) {
+    assert!(pib.create_slotframe(0, 100).is_ok());
+    let link = TschLink {
+        slotframe_handle: 0,
+        timeslot: 0,
+        channel_offset: 0,
+        link_options: TschLinkOption::Tx,
+        link_type: TschLinkType::Advertising,
+        neighbor: None,
+        link_advertise: true,
+    };
+    assert!(pib.add_link(link).is_ok());
+}
+
 // ============================================================================
 // Frame Creation Helpers
 // ============================================================================
@@ -242,11 +355,19 @@ fn create_test_data_frame(allocator: &MacBufferAllocator) -> MpduFrame {
     create_test_mpdu_with_ack(allocator)
 }
 
+/// Create a well-formed data radio frame, as handed back by the driver in
+/// `Sent`/`Nack`/`CcaBusy` events.
+///
+/// Built through the MPDU writer rather than from a raw sized buffer: the
+/// test allocator recycles buffers across tests, and a raw frame would expose
+/// stale bytes as its frame control field (e.g. a spurious "IE present" bit),
+/// breaking frames that round-trip through `MpduFrame::from_radio_frame` on
+/// the TSCH CSMA-CA requeue path.
 fn create_data_radio_frame(
     allocator: &MacBufferAllocator,
-    size: u16,
+    _size: u16,
 ) -> RadioFrame<RadioFrameSized> {
-    create_sized_radio_frame(allocator, size)
+    create_test_data_frame(allocator).into_radio_frame::<FakeDriverConfig>()
 }
 
 // ============================================================================
@@ -636,6 +757,8 @@ mod single_tx_tests {
 
     #[test]
     fn test_tx_nack_returns_no_ack_response() {
+        // With TSCH CSMA-CA, NACK on a shared link re-queues the frame (no NoAck
+        // response). NoAck is only produced on dedicated links.
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
@@ -654,7 +777,9 @@ mod single_tx_tests {
         ));
 
         assert!(runner.is_idle());
-        assert!(runner.last_response_is_no_ack());
+        // Shared link: frame re-queued for CSMA-CA retransmission, no response to upper layer
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
         runner.terminate();
     }
 
@@ -707,8 +832,9 @@ mod single_tx_tests {
 
     #[test]
     fn test_tx_cca_disabled() {
+        // CCA is disabled on dedicated (non-shared) links. Shared links use CCA.
         let mut runner = setup();
-        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        setup_dedicated_tx_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
 
         let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
@@ -1738,7 +1864,11 @@ mod idle_request_tests {
     #[test]
     fn test_nack_response_type() {
         let mut runner = setup();
-        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        // Dedicated link; with the retry budget pinned to zero the first NACK
+        // exhausts it immediately and surfaces a NoAck response (F3 made
+        // dedicated links retry by default, so without this they would re-queue).
+        setup_dedicated_tx_link_schedule(&mut runner.context.pib.tsch);
+        runner.set_max_frame_retries(0);
         runner.enter_as_device();
 
         let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
@@ -2006,5 +2136,784 @@ mod clock_drift_tests {
             expected_slot_start_with_drift(NsInstant::from_ticks(1_000_000_000), 100, 200, 300);
         assert_eq!(pib.asn, 200);
         assert_eq!(pib.last_base_time, expected_base);
+    }
+}
+
+// ============================================================================
+// TSCH CSMA-CA Retransmission Algorithm Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tsch_csma_ca_tests {
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // Shared link CCA enabled
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_link_tx_enables_cca() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+        runner.context.pib.tsch.tsch_cca = true;
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+
+        // Shared link with macTschCca on must request CCA.
+        assert!(runner.last_request().unwrap().cca_enabled());
+
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+        ));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_dedicated_link_tx_disables_cca() {
+        let mut runner = setup();
+        setup_dedicated_tx_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+
+        assert!(!runner.last_request().unwrap().cca_enabled());
+
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+        ));
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // Shared link NACK retransmission
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_link_nack_requeues_frame() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+
+        // Shared link NACK should NOT produce a response to upper layer
+        assert!(!runner.last_action_has_response());
+        assert!(runner.is_idle());
+        // Frame was re-queued for retransmission
+        assert!(runner.has_pending_operations());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_dedicated_link_nack_reports_no_ack() {
+        let mut runner = setup();
+        setup_dedicated_tx_only_schedule(&mut runner.context.pib.tsch);
+        let min_be = runner.context.pib.tsch.tsch_min_be;
+        let max_retries = runner.context.pib.max_frame_retries as u64; // default: 3
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        let mut time_base = 1_000_000_000u64;
+        for nb in 1..=(max_retries + 1) {
+            runner.step_timer_expired();
+            runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(time_base)));
+            let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+            runner.step_driver_event(DrvSvcEvent::Nack(
+                frame,
+                NsInstant::from_ticks(time_base + 1_000_000),
+                None,
+                None,
+            ));
+
+            if nb <= max_retries {
+                // Re-queued: no response, BE unchanged (dedicated), NB counts up.
+                assert!(!runner.last_action_has_response());
+                assert!(runner.has_pending_operations());
+                assert_eq!(runner.pending_tx_backoff(), Some((min_be, nb as u8)));
+            }
+            time_base += 20_000_000_000;
+        }
+
+        // Budget exhausted (NB > macMaxFrameRetries): NoAck reported, queue empty.
+        assert!(runner.last_action_has_response());
+        assert!(runner.last_response_is_no_ack());
+        assert!(!runner.has_pending_operations());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_shared_link_nack_retransmission_at_later_asn() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // Execute the first TX attempt at ASN 100
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+
+        // Frame was re-queued: the retransmission ASN must be > 100
+        assert!(runner.has_pending_operations());
+        let next_deadline = runner.last_deadline().unwrap();
+        let first_tx_deadline = expected_deadline(NsInstant::from_ticks(0), 0, 100);
+        assert!(next_deadline > first_tx_deadline);
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // CCA busy retransmission
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_link_cca_busy_requeues_frame() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+
+        // CCA busy on shared link
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+
+        // No response to upper layer, frame re-queued
+        assert!(!runner.last_action_has_response());
+        assert!(runner.is_idle());
+        assert!(runner.has_pending_operations());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_dedicated_link_cca_busy_reports_failure() {
+        let mut runner = setup();
+        setup_dedicated_tx_only_schedule(&mut runner.context.pib.tsch);
+        // CCA only runs when macTschCca is on; enable it for this scenario.
+        runner.context.pib.tsch.tsch_cca = true;
+        let min_be = runner.context.pib.tsch.tsch_min_be;
+        let max_retries = runner.context.pib.max_frame_retries as u64; // default: 3
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        let mut time_base = 1_000_000_000u64;
+        for nb in 1..=(max_retries + 1) {
+            runner.step_timer_expired();
+            let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+            runner.step_driver_event(DrvSvcEvent::CcaBusy(
+                frame,
+                NsInstant::from_ticks(time_base),
+            ));
+
+            if nb <= max_retries {
+                assert!(!runner.last_action_has_response());
+                assert!(runner.has_pending_operations());
+                assert_eq!(runner.pending_tx_backoff(), Some((min_be, nb as u8)));
+            }
+            time_base += 20_000_000_000;
+        }
+
+        // Budget exhausted: ChannelAccessFailure reported, queue empty.
+        assert!(runner.last_action_has_response());
+        assert!(runner.last_response_is_channel_access_failure());
+        assert!(!runner.has_pending_operations());
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // Backoff state transitions
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_backoff_be_increments_on_each_failure() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let min_be = runner.context.pib.tsch.tsch_min_be; // default: 1
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First TX attempt: NACK
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+        // After first failure: BE = min_be + 1, NB = 1
+        assert_eq!(runner.pending_tx_backoff(), Some((min_be + 1, 1)));
+
+        // Second TX attempt: NACK
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(3_001_000_000),
+            None,
+            None,
+        ));
+        // After second failure: BE = min_be + 2, NB = 2
+        assert_eq!(runner.pending_tx_backoff(), Some((min_be + 2, 2)));
+
+        // Third TX attempt: success
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(5_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(5_001_000_000),
+            None,
+        ));
+        assert!(runner.last_response_is_sent());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_backoff_be_capped_at_max_be() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        // Allow enough retries to drive BE past its cap.
+        runner.set_max_frame_retries(15);
+        runner.enter_as_device();
+
+        let min_be = runner.context.pib.tsch.tsch_min_be; // default: 1
+        let max_be = runner.context.pib.tsch.tsch_max_be; // default: 7
+
+        // Generate enough failures to hit max BE
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        let mut time_base = 1_000_000_000u64;
+        for i in 0..(max_be as u64 + 2) {
+            runner.step_timer_expired();
+            runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(time_base)));
+            let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+            runner.step_driver_event(DrvSvcEvent::Nack(
+                frame,
+                NsInstant::from_ticks(time_base + 1_000_000),
+                None,
+                None,
+            ));
+            // BE grows by one per failure, capped at macTschMaxBe; NB counts
+            // every failure.
+            let expected_be = core::cmp::min(min_be as u64 + 1 + i, max_be as u64) as u8;
+            assert_eq!(
+                runner.pending_tx_backoff(),
+                Some((expected_be, i as u8 + 1))
+            );
+            time_base += 20_000_000_000; // big enough jump for next slot
+        }
+
+        // After max_be+2 failures, BE stayed capped and the frame is still
+        // re-queued (retry budget not exhausted).
+        assert!(runner.has_pending_operations());
+
+        // Final success to clean up
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(time_base)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(time_base + 1_000_000),
+            None,
+        ));
+        assert!(runner.last_response_is_sent());
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // select_nth_link PIB tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_select_nth_link_skip_zero_same_as_select_next() {
+        let mut pib: TschPib<()> = TschPib::new();
+        setup_one_link_schedule(&mut pib);
+
+        let next = pib.select_next_link(0, |l| l.link_options.contains(TschLinkOption::Tx));
+        let nth = pib.select_nth_link(0, 0, |l| l.link_options.contains(TschLinkOption::Tx));
+        assert_eq!(next.map(|(_, asn)| asn), nth.map(|(_, asn)| asn));
+    }
+
+    #[test]
+    fn test_select_nth_link_skip_one() {
+        let mut pib: TschPib<()> = TschPib::new();
+        setup_one_link_schedule(&mut pib);
+
+        // First occurrence at ASN 100 (timeslot 0, slotframe size 100)
+        let first = pib
+            .select_nth_link(0, 0, |l| l.link_options.contains(TschLinkOption::Tx))
+            .unwrap();
+        assert_eq!(first.1, 100);
+
+        // Skip 1 --> second occurrence at ASN 200
+        let second = pib
+            .select_nth_link(0, 1, |l| l.link_options.contains(TschLinkOption::Tx))
+            .unwrap();
+        assert_eq!(second.1, 200);
+    }
+
+    #[test]
+    fn test_select_nth_link_skip_multiple() {
+        let mut pib: TschPib<()> = TschPib::new();
+        setup_one_link_schedule(&mut pib);
+
+        // Skip 3 --> fourth occurrence at ASN 400
+        let fourth = pib
+            .select_nth_link(0, 3, |l| l.link_options.contains(TschLinkOption::Tx))
+            .unwrap();
+        assert_eq!(fourth.1, 400);
+    }
+
+    // -------------------------------------------------------------------
+    // TschCsmaBackoff unit tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_csma_backoff_new() {
+        let backoff = TschCsmaBackoff::new(3);
+        assert_eq!(backoff.be, 3);
+        assert_eq!(backoff.nb, 0);
+        assert_eq!(backoff.backoff_remaining, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Retry budget exhaustion
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_link_retries_exhausted_reports_no_ack() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.set_max_frame_retries(1);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First failure: NB = 1 <= macMaxFrameRetries, re-queued.
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
+
+        // Second failure: NB = 2 > macMaxFrameRetries, frame is dropped and
+        // NoAck is reported to the upper layer.
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(3_001_000_000),
+            None,
+            None,
+        ));
+        assert!(runner.last_action_has_response());
+        assert!(runner.last_response_is_no_ack());
+        assert!(!runner.has_pending_operations());
+        assert!(runner.is_idle());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_shared_link_retries_exhausted_on_cca_reports_failure() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.set_max_frame_retries(1);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First failure: CCA busy, re-queued.
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
+
+        // Second failure: CCA busy again, retry budget exhausted, the
+        // failure is reported as ChannelAccessFailure.
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(3_000_000_000),
+        ));
+        assert!(runner.last_action_has_response());
+        assert!(runner.last_response_is_channel_access_failure());
+        assert!(!runner.has_pending_operations());
+        assert!(runner.is_idle());
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // Retransmission eventually succeeds after backoff
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_shared_link_nack_then_success() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First attempt fails (NACK)
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
+
+        // Retransmission succeeds
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(2_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(2_001_000_000),
+            None,
+        ));
+
+        assert!(runner.last_response_is_sent());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_shared_link_cca_busy_then_success() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First attempt fails (CCA busy)
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
+
+        // Retransmission succeeds
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(2_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(2_001_000_000),
+            None,
+        ));
+
+        assert!(runner.last_response_is_sent());
+        runner.terminate();
+    }
+
+    // -------------------------------------------------------------------
+    // Mixed CCA and NACK failures
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_cca_busy_then_nack_then_success() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // CCA failure
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+        assert!(runner.has_pending_operations());
+
+        // NACK failure
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(3_001_000_000),
+            None,
+            None,
+        ));
+        assert!(runner.has_pending_operations());
+
+        // Success
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(5_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(5_001_000_000),
+            None,
+        ));
+        assert!(runner.last_response_is_sent());
+        runner.terminate();
+    }
+}
+
+#[cfg(test)]
+mod tsch_csma_ca_state_machine_tests {
+    use super::*;
+
+    #[test]
+    fn test_first_cca_busy_keeps_be_subsequent_bumps() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        // The channel-access/retransmission split is only observable when CCA runs.
+        runner.context.pib.tsch.tsch_cca = true;
+        let min_be = runner.context.pib.tsch.tsch_min_be; // default 1
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // First channel-access failure: NB advances to 1, BE stays at
+        // macTschMinBe, and no shared-link backoff window is drawn.
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.is_idle());
+        assert!(runner.has_pending_operations());
+        assert_eq!(runner.pending_tx_backoff_full(), Some((min_be, 1, 0)));
+
+        // Second channel-access failure (now NB > 0): BE advances to
+        // macTschMinBe + 1 and a window of 2^macTschMinBe is drawn.
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(3_000_000_000),
+        ));
+        assert!(!runner.last_action_has_response());
+        assert!(runner.has_pending_operations());
+        let (be, nb, rem) = runner.pending_tx_backoff_full().unwrap();
+        assert_eq!((be, nb), (min_be + 1, 2));
+        assert_eq!(rem, 1 % (1u16 << min_be));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_shared_link_nack_sets_backoff_remaining() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        let min_be = runner.context.pib.tsch.tsch_min_be; // default 1
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // A missing ACK is always a retransmission failure, even on the first
+        // attempt: the window is drawn from the entry BE (macTschMinBe) and BE is
+        // then advanced for the next round.
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+
+        let (be, nb, rem) = runner.pending_tx_backoff_full().unwrap();
+        assert_eq!((be, nb), (min_be + 1, 1));
+        assert_eq!(rem, 1 % (1u16 << min_be));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_dedicated_link_failures_never_backoff() {
+        let mut runner = setup();
+        setup_dedicated_tx_only_schedule(&mut runner.context.pib.tsch);
+        let min_be = runner.context.pib.tsch.tsch_min_be;
+        runner.set_max_frame_retries(3);
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        let mut time_base = 1_000_000_000u64;
+        for nb in 1..=3u8 {
+            runner.step_timer_expired();
+            runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(time_base)));
+            let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+            runner.step_driver_event(DrvSvcEvent::Nack(
+                frame,
+                NsInstant::from_ticks(time_base + 1_000_000),
+                None,
+                None,
+            ));
+            // BE stays at macTschMinBe, NB counts up, backoff_remaining stays 0.
+            assert_eq!(runner.pending_tx_backoff_full(), Some((min_be, nb, 0)));
+            time_base += 20_000_000_000;
+        }
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_first_cca_busy_then_nack_be_progression() {
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.tsch_cca = true;
+        let min_be = runner.context.pib.tsch.tsch_min_be;
+        runner.enter_as_device();
+
+        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // (1) First failure is a channel-access failure: BE unchanged.
+        runner.step_timer_expired();
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::CcaBusy(
+            frame,
+            NsInstant::from_ticks(1_000_000_000),
+        ));
+        assert_eq!(runner.pending_tx_backoff_full(), Some((min_be, 1, 0)));
+
+        // (2) Second failure is a missing ACK: BE advances and a window is drawn
+        //     from the current (still macTschMinBe) BE.
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(3_001_000_000),
+            None,
+            None,
+        ));
+        let (be, nb, rem) = runner.pending_tx_backoff_full().unwrap();
+        assert_eq!((be, nb), (min_be + 1, 2));
+        assert_eq!(rem, 1 % (1u16 << min_be));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_backoff_resets_for_new_frame() {
+        // The backoff is kept per frame: a fresh transmission must restart from
+        // the PIB defaults rather than inherit the previous frame's BE/NB.
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        let min_be = runner.context.pib.tsch.tsch_min_be;
+        runner.enter_as_device();
+
+        // Frame 1: one NACK (BE -> min_be + 1), then success.
+        let mpdu1 = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu1));
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+        assert_eq!(runner.pending_tx_backoff(), Some((min_be + 1, 1)));
+
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(2_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(2_001_000_000),
+            None,
+        ));
+        assert!(runner.last_response_is_sent());
+        assert!(!runner.has_pending_operations());
+        assert!(runner.is_idle());
+
+        // Frame 2: a brand-new transmission. Its first NACK must yield
+        // (min_be + 1, 1), proving the state did not carry over from frame 1.
+        let mpdu2 = create_test_data_frame(&runner.context.buffer_allocator);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu2));
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(3_001_000_000),
+            None,
+            None,
+        ));
+        assert_eq!(runner.pending_tx_backoff(), Some((min_be + 1, 1)));
+        runner.terminate();
     }
 }
