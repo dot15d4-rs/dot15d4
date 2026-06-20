@@ -902,14 +902,13 @@ impl State {
 
     // Called exclusively from interrupt context.
     fn rtc_increment_half_period(&self) {
-        let next_half_period = self.half_period.load(Ordering::Relaxed) + 1;
+        let next_half_period = self.half_period.fetch_add(1, Ordering::Relaxed) + 1;
         // Note: The acquire part of the fence protects the read to the alarm's
         //       RTC tick below. The release part ensures that the updated
         //       period becomes visible to all clients. Inside the interrupt
         //       this fence is not strictly necessary but we add it as it is
         //       essentially free, documents intent and protects us from UB.
         compiler_fence(Ordering::AcqRel);
-        self.half_period.store(next_half_period, Ordering::Relaxed);
         let next_half_period_start_tick = (next_half_period as u64) << 23;
 
         for channel in RTC_CHANNELS {
