@@ -36,5 +36,8 @@ cargo test -p dot15d4-frame --no-default-features --features=security,ies
 echo "TEST(workspace): std"
 cargo test --features=std
 
+echo "MATRIX(dot15d4): per-feature-combination compile check"
+./feature-matrix.sh
+
 echo "DOC(workspace)"
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
