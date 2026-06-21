@@ -569,6 +569,17 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         operation: TschOperation,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
+        if self.pending_operations.is_full() {
+            if let TschOperation::TxSlot {
+                mpdu,
+                response_token,
+                ..
+            } = operation
+            {
+                self.fail_tx(mpdu, response_token, context);
+            }
+            return false;
+        }
         match operation {
             TschOperation::TxSlot {
                 mpdu,

@@ -538,6 +538,41 @@ mod operation_queue_tests {
 
         runner.terminate();
     }
+
+    #[test]
+    fn test_queue_when_full_gives_up_instead_of_recursing() {
+        const CAP: usize = crate::constants::MAC_TSCH_MAX_PENDING_OPERATIONS;
+
+        let mut runner = setup();
+        // An RX link must exist so `next_rx_operation` keeps returning a
+        // candidate slot; otherwise the helper bails immediately and the
+        // recursion under test is never reached.
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.sort_links();
+
+        // Fill the queue to capacity. The filler ASNs (1..=CAP) deliberately do
+        // not coincide with the link's slot occurrences (multiples of the
+        // slotframe size), so the next queue attempt fails with "full" rather
+        // than a survivable conflict.
+        for asn in 1..=CAP as TschAsn {
+            runner
+                .task
+                .push_operation(TschOperation::RxSlot {
+                    asn,
+                    channel: Channel::_12,
+                    slotframe_handle: 0,
+                })
+                .unwrap();
+        }
+        assert_eq!(runner.pending_operation_count(), CAP);
+
+        // Would recurse without bound (stack overflow) prior to the fix.
+        let queued = runner.task.queue_next_rx(0, &mut runner.context);
+        assert!(!queued, "a full queue must reject, not re-queue endlessly");
+        assert_eq!(runner.pending_operation_count(), CAP);
+
+        runner.terminate();
+    }
 }
 
 // ============================================================================

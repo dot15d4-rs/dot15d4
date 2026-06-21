@@ -607,7 +607,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         match self.pop_operation() {
             TschOperation::RxSlot { asn, channel, .. } => {
                 context.pib.tsch.update_timing(asn);
-                let frame = self.take_rx_frame().expect("no rx_frame for TSCH RX slot");
+                let frame = self
+                    .take_rx_frame()
+                    .unwrap_or_else(|| context.allocate_frame());
 
                 self.state = TschState::Listening;
 
