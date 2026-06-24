@@ -15,7 +15,7 @@ use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU64;
 #[cfg(feature = "timer-trace")]
 use nrf52840_pac::GPIOTE;
-use nrf52840_pac::{interrupt, Peripherals, CLOCK, NVIC, PPI, RADIO, RTC0, TIMER0};
+use nrf52840_pac::{interrupt, Peripherals, CLOCK, NVIC, PPI, RADIO, RTC2, TIMER0};
 
 use crate::{
     socs::nrf::executor::NrfInterruptPriority,
@@ -277,7 +277,7 @@ impl State {
     const TIMER_CC0_RADIO_TXEN_CHANNEL: usize = 20;
     const TIMER_CC0_RADIO_RXEN_CHANNEL: usize = 21;
     const TIMER_CC1_RADIO_DISABLE_CHANNEL: usize = 22;
-    const RTC_CC0_TIMER_START_CHANNEL: usize = 31;
+    const RTC_CC0_TIMER_START_CHANNEL: usize = 19;
 
     const PPI_CHANNEL_MASK: u32 = 1 << Self::TIMER_CC0_RADIO_TXEN_CHANNEL
         | 1 << Self::TIMER_CC0_RADIO_RXEN_CHANNEL
@@ -311,9 +311,9 @@ impl State {
         unsafe { CorePeripherals::steal() }.NVIC
     }
 
-    fn rtc() -> RTC0 {
+    fn rtc() -> RTC2 {
         // We own the RTC peripheral exclusively.
-        unsafe { Peripherals::steal() }.RTC0
+        unsafe { Peripherals::steal() }.RTC2
     }
 
     fn timer() -> TIMER0 {
@@ -442,8 +442,24 @@ impl State {
             // Safety: The overflow protection channel is in range. Stop shorts start at bit 8.
             .write(|w| unsafe { w.bits(1 << (8 + Self::TIMER_OVERFLOW_PROTECTION_CHANNEL)) });
 
+        {
+            let ppi = Self::ppi();
+            ppi.ch[Self::RTC_CC0_TIMER_START_CHANNEL]
+                .eep
+                .write(|w| w.eep().variant(rtc.events_compare[0].as_ptr() as u32));
+            ppi.ch[Self::RTC_CC0_TIMER_START_CHANNEL]
+                .tep
+                .write(|w| w.tep().variant(timer.tasks_start.as_ptr() as u32));
+            ppi.fork[Self::RTC_CC0_TIMER_START_CHANNEL].tep.reset();
+        }
+
         rtc.tasks_stop.write(|w| w.tasks_stop().set_bit());
-        rtc.prescaler.reset();
+        loop {
+            rtc.prescaler.reset();
+            if rtc.prescaler.read().prescaler().bits() == 0 {
+                break;
+            }
+        }
 
         // CC3 and overflow events trigger half-period counting.
         rtc.cc[3].write(|w| w.compare().variant(0x800000));
@@ -471,14 +487,14 @@ impl State {
 
         let rtc_interrupt_priority = timer_interrupt_priority.one_lower().unwrap();
         // Safety: See the documented synchronization approach.
-        unsafe { nvic.set_priority(interrupt::RTC0, rtc_interrupt_priority.to_arm_nvic_repr()) };
+        unsafe { nvic.set_priority(interrupt::RTC2, rtc_interrupt_priority.to_arm_nvic_repr()) };
 
         // Clear and enable timer interrupts.
-        NVIC::unpend(interrupt::RTC0);
+        NVIC::unpend(interrupt::RTC2);
         NVIC::unpend(interrupt::TIMER0);
         // Safety: We're in early initialization, so there should be no
         //         concurrent critical sections.
-        unsafe { NVIC::unmask(interrupt::RTC0) };
+        unsafe { NVIC::unmask(interrupt::RTC2) };
         unsafe { NVIC::unmask(interrupt::TIMER0) };
 
         self.init_state
@@ -1714,7 +1730,7 @@ impl State {
 static STATE: State = State::new();
 
 #[interrupt]
-fn RTC0() {
+fn RTC2() {
     #[cfg(feature = "rtos-trace")]
     rtos_trace::trace::isr_enter();
 
@@ -1944,7 +1960,7 @@ pub struct NrfRadioTimerTracingConfig {
 }
 
 pub struct NrfRadioTimerConfig {
-    pub rtc: RTC0,
+    pub rtc: RTC2,
     pub timer: TIMER0,
     // We take ownership of the clock to enforce clock policy:
     // - The radio requires an external HF crystal oscillator.

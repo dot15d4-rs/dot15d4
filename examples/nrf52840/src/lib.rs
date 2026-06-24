@@ -208,7 +208,7 @@ pub fn config_peripherals(
     #[cfg(feature = "device-sync")]
     let sleep_timer_clk_src = LfClockSource::External;
     let timer_config = NrfRadioTimerConfig {
-        rtc: peripherals.RTC0,
+        rtc: peripherals.RTC2,
         timer: peripherals.TIMER0,
         clock: peripherals.CLOCK,
         sleep_timer_clk_src,
