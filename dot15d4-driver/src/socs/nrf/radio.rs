@@ -78,8 +78,9 @@ const _: () = {
 
 // Ozone/JRun/SystemView: 7
 // debug-embed: 10
+// probe-free, measured on Saleae (TXEN->TXREADY, n=25211 frames): 6
 const T_MEASURED_RAMP_UP_ERROR: NsDuration =
-    NsDuration::from_ticks(10 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+    NsDuration::from_ticks(6 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 // all: 5
 const T_MEASURED_RAMP_DOWN_ERROR: NsDuration =
     NsDuration::from_ticks(5 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
@@ -90,6 +91,15 @@ const T_MEASURED_TURNAROUND_ERROR: NsDuration =
 // all: 195
 const T_MEASURED_TX_FRAMESTART_ERROR: NsDuration =
     NsDuration::from_ticks(195 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+
+const T_RX_FRAMESTART_TO_RMARKER: NsDuration = OQpsk250KBit::T_PHR;
+const T_MEASURED_RX_FRAMESTART_ERROR: NsDuration = NsDuration::nanos(23_275);
+
+/// Convert a captured RX FRAMESTART event timestamp to the RMARKER instant.
+#[inline]
+fn framestart_to_rmarker(framestart: NsInstant) -> NsInstant {
+    framestart - (T_RX_FRAMESTART_TO_RMARKER + T_MEASURED_RX_FRAMESTART_ERROR)
+}
 
 // Disabled to tx idle duration
 const T_TXEN: NsDuration = NsDuration::micros(130)
@@ -214,6 +224,7 @@ const fn timed_off(at: NsInstant) -> TimedSignal {
     TimedSignal::new(at, HardwareSignal::RadioDisable)
 }
 
+/// PPI/GPIOTE routing for the radio-event trace pins.
 #[cfg(feature = "radio-trace")]
 pub struct NrfRadioTracingConfig {
     pub gpiote_frame_channel: usize,
@@ -322,7 +333,6 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             let ppi = unsafe { pac::Peripherals::steal().PPI };
             let gpiote = unsafe { pac::Peripherals::steal().GPIOTE };
 
-            // Route framestart and end events to the frame pin.
             let framestart_event = radio.events_framestart.as_ptr() as u32;
             let framestart_task =
                 gpiote.tasks_set[tracing_config.gpiote_frame_channel].as_ptr() as u32;
@@ -339,8 +349,7 @@ impl RadioDriver<NrfRadioDriver, TaskOff> {
             ch.tep.write(|w| w.tep().variant(frameend_task));
             ppi.fork[tracing_config.ppi_frameend_channel].tep.reset();
 
-            // Route ready and disabled events to the trx pin.
-            let trxstart_event = radio.events_ready.as_ptr() as u32;
+            let trxstart_event = radio.events_rxready.as_ptr() as u32;
             let trxstart_task = gpiote.tasks_set[tracing_config.gpiote_trx_channel].as_ptr() as u32;
             let ch = &ppi.ch[tracing_config.ppi_trxstart_channel];
             ch.eep.write(|w| w.eep().variant(trxstart_event));
@@ -884,7 +893,7 @@ impl RadioState<NrfRadioDriver, TaskRx> for RadioDriver<NrfRadioDriver, TaskRx> 
             .poll_event(entry_event)
             .map(|ts| match entry_event {
                 HardwareEvent::RadioRxEnabled => ts + OQpsk250KBit::T_SHR,
-                HardwareEvent::RadioFrameStarted => ts - OQpsk250KBit::T_PHR,
+                HardwareEvent::RadioFrameStarted => framestart_to_rmarker(ts),
                 _ => unreachable!(),
             })
             .ok_or_else(|| self.scheduling_error());
@@ -1082,10 +1091,12 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                 .await;
         }
 
-        let rx_rmarker = state
-            .timer()
-            .poll_event(HardwareEvent::RadioFrameStarted)
-            .unwrap();
+        let rx_rmarker = framestart_to_rmarker(
+            state
+                .timer()
+                .poll_event(HardwareEvent::RadioFrameStarted)
+                .unwrap(),
+        );
         state.set_rx_frame_started(rx_rmarker);
         rx_rmarker
     }
@@ -1112,14 +1123,17 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
 
         let r = radio();
 
-        let disable_at = latest_frame_start.map(|ts| ts + OQpsk250KBit::T_PHR);
+        let disable_at =
+            latest_frame_start.map(|ts| ts + T_RX_FRAMESTART_TO_RMARKER + T_MEASURED_RX_FRAMESTART_ERROR);
         let mut disabled = false;
         let mut should_disable = false;
         if let Some(disable_at) = disable_at {
             // Window widening is the responsibility of the client. Therefore,
             // the latest frame start designates an exact RMARKER in terms of
             // the local radio clock. The nRF driver's framestart event fires
-            // after the PHY header, i.e. one byte later.
+            // after the PHY header plus a measured radio delay
+            // (T_RX_FRAMESTART_TO_RMARKER + T_MEASURED_RX_FRAMESTART_ERROR), so
+            // the framestart must be awaited up to that instant before giving up.
             match timer.schedule_timed_signal_unless(
                 timed_off(disable_at),
                 HardwareEvent::RadioFrameStarted,
@@ -1207,10 +1221,12 @@ impl ListeningRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
         } else {
             debug_assert!(r.events_disabled.read().events_disabled().bit_is_clear());
 
-            let rx_rmarker = state
-                .timer()
-                .poll_event(HardwareEvent::RadioFrameStarted)
-                .unwrap();
+            let rx_rmarker = framestart_to_rmarker(
+                state
+                    .timer()
+                    .poll_event(HardwareEvent::RadioFrameStarted)
+                    .unwrap(),
+            );
             state.stop_timer();
             state.set_rx_frame_started(rx_rmarker);
             StopListeningResult::FrameStarted(rx_rmarker, self)
