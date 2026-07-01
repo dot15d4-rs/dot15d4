@@ -10,13 +10,96 @@ use dot15d4_driver::timer::{NsDuration, NsInstant};
 use heapless::Vec;
 
 use crate::constants::{
-    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_MAX_BE, MAC_TSCH_MAX_LINKS,
-    MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
+    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_DRIFT_BUFFER_LEN, MAC_TSCH_MAX_BE,
+    MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 
 /// Type alias for Absolute Slot Number.
 pub type TschAsn = u64;
+
+#[derive(Clone, Copy)]
+struct DriftSample {
+    dev_ns: i64,
+    delta_asn: u32,
+}
+
+struct DriftEstimator<const N: usize> {
+    buf: [Option<DriftSample>; N],
+    head: usize,
+}
+
+impl<const N: usize> DriftEstimator<N> {
+    const fn new() -> Self {
+        Self {
+            buf: [None; N],
+            head: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buf = [None; N];
+        self.head = 0;
+    }
+
+    fn push(&mut self, dev_ns: i64, delta_asn: u32, timeslot_length_us: u64) {
+        if delta_asn == 0 {
+            return;
+        }
+        let max = (delta_asn as i64).saturating_mul((timeslot_length_us.saturating_mul(1000) / 2) as i64);
+        let dev_ns = dev_ns.clamp(-max, max);
+        self.buf[self.head] = Some(DriftSample { dev_ns, delta_asn });
+        self.head = (self.head + 1) % N;
+    }
+
+    /// Returns `(sum(dev_ns), sum(delta_asn))` over the filled part of the window.
+    fn sums(&self) -> (i64, u64) {
+        let mut num = 0i64;
+        let mut den = 0u64;
+        for sample in self.buf.iter().flatten() {
+            num += sample.dev_ns;
+            den += sample.delta_asn as u64;
+        }
+        (num, den)
+    }
+
+    /// Mean per-slot drift in nanoseconds (0 with no samples). Used for logging;
+    /// the slot-start math uses [`Self::compensation_ns`] so it does not multiply
+    /// a rounded value again.
+    fn per_slot_ns(&self) -> i32 {
+        let (num, den) = self.sums();
+        if den == 0 {
+            0
+        } else {
+            (num / den as i64) as i32
+        }
+    }
+
+    fn compensation_ns(&self, slots_diff: u32) -> i64 {
+        let (num, den) = self.sums();
+        if den == 0 {
+            0
+        } else {
+            ((slots_diff as i128 * num as i128) / den as i128) as i64
+        }
+    }
+
+    /// Reset the window to a single sample that means `ns` per slot. Used to set a
+    /// known drift (tests, or a direct override).
+    fn set_per_slot(&mut self, ns: i32, timeslot_length_us: u64) {
+        self.clear();
+        self.push(ns as i64, 1, timeslot_length_us);
+    }
+}
+
+/// `a - b` in nanoseconds, signed (fugit durations are unsigned).
+fn signed_delta_ns(a: NsInstant, b: NsInstant) -> i64 {
+    if a >= b {
+        (a - b).to_nanos() as i64
+    } else {
+        -((b - a).to_nanos() as i64)
+    }
+}
 
 /// Schedule operation errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,8 +238,9 @@ pub struct TschPib<Neighbor> {
     pub last_base_time: NsInstant,
     /// RMARKER and ASN of last received frame
     pub last_rx: Option<(NsInstant, TschAsn)>,
-    /// Estimated drift per timeslot in nanoseconds
-    pub drift_ns: i32,
+    /// Sliding-window estimate of the per-slot clock drift against the time
+    /// source.
+    drift: DriftEstimator<MAC_TSCH_DRIFT_BUFFER_LEN>,
 }
 
 impl<Neighbor> TschPib<Neighbor> {
@@ -376,15 +460,33 @@ impl<Neighbor> TschPib<Neighbor> {
         self.asn = asn;
     }
 
+    /// Current per-slot drift estimate in nanoseconds (mean of the window). A
+    /// positive value means the local clock runs a bit slow against the time
+    /// source.
+    pub fn drift_ns(&self) -> i32 {
+        self.drift.per_slot_ns()
+    }
+
+    /// Set the drift estimate to a known per-slot value and drop the current
+    /// window. Same as recording one `ns`-per-slot sample.
+    pub fn set_drift_ns(&mut self, ns: i32) {
+        let timeslot_length_us = self.timeslot_length_us();
+        self.drift.set_per_slot(ns, timeslot_length_us);
+    }
+
     /// Calculate expected slot start time for given ASN.
+    ///
+    /// The drift correction is applied as the exact fraction over the whole
+    /// `asn - self.asn` span instead of a rounded per-slot duration multiplied
+    /// out, so the error does not build up with distance from the anchor.
     pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
-        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-        let adjusted_slot_duration =
-            NsDuration::nanos(((timeslot_length_us * 1000) as i32 - self.drift_ns) as u64);
-        #[cfg(feature = "no-tsch-drift-adjustment")]
-        let adjusted_slot_duration = NsDuration::micros(timeslot_length_us);
         let slots_diff = asn.saturating_sub(self.asn) as u32;
-        self.last_base_time + slots_diff * adjusted_slot_duration
+        let nominal_ns = (timeslot_length_us.saturating_mul(1000) as i64).saturating_mul(slots_diff as i64);
+        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
+        let total_ns = nominal_ns - self.drift.compensation_ns(slots_diff);
+        #[cfg(feature = "no-tsch-drift-adjustment")]
+        let total_ns = nominal_ns;
+        self.last_base_time + NsDuration::nanos(total_ns.max(0) as u64)
     }
 
     /// Calculate current ASN from timestamp.
@@ -400,9 +502,10 @@ impl<Neighbor> TschPib<Neighbor> {
 
     /// Synchronize an ASN to an observed RMARKER.
     pub fn sync_asn(&mut self, asn: TschAsn, instant: NsInstant) {
-        self.asn = asn;
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
         let timeslot_start = instant - NsDuration::micros(tx_offset_us);
+
+        self.asn = asn;
         self.last_base_time = timeslot_start;
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, timeslot_start);
@@ -421,18 +524,12 @@ impl<Neighbor> TschPib<Neighbor> {
                 return;
             }
 
-            let elapsed_time = timeslot_start - last_slot_start;
-            let expected_elapsed_time = NsDuration::micros(delta_asn * self.timeslot_length_us());
-
-            // Drift per slot in nanoseconds
-            let measured_drift_ns = if elapsed_time > expected_elapsed_time {
-                -(((elapsed_time - expected_elapsed_time).to_nanos() / delta_asn) as i32)
-            } else {
-                ((expected_elapsed_time - elapsed_time).to_nanos() / delta_asn) as i32
-            };
-
-            let max_drift_ns = (self.timeslot_length_us().saturating_mul(1000) / 2) as i32;
-            self.drift_ns = measured_drift_ns.clamp(-max_drift_ns, max_drift_ns);
+            let elapsed_ns = signed_delta_ns(timeslot_start, last_slot_start);
+            let expected_ns =
+                (delta_asn.saturating_mul(self.timeslot_length_us()).saturating_mul(1000)) as i64;
+            let dev_ns = expected_ns - elapsed_ns;
+            let timeslot_length_us = self.timeslot_length_us();
+            self.drift.push(dev_ns, delta_asn as u32, timeslot_length_us);
         }
     }
 
@@ -491,7 +588,7 @@ impl<Neighbor> Default for TschPib<Neighbor> {
             asn: 0,
             last_base_time: NsInstant::from_ticks(0),
             last_rx: None,
-            drift_ns: 0,
+            drift: DriftEstimator::new(),
         }
     }
 }

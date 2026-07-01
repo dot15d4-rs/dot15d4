@@ -117,7 +117,7 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
     }
 
     pub fn drift_ns(&self) -> i32 {
-        self.context.pib.tsch.drift_ns
+        self.context.pib.tsch.drift_ns()
     }
 
     pub fn set_timer_time(&mut self, instant: NsInstant) {
@@ -2002,12 +2002,12 @@ mod clock_drift_tests {
     #[test]
     fn test_first_sync_does_not_update_drift() {
         let mut pib: TschPib<()> = TschPib::new();
-        assert_eq!(pib.drift_ns, 0);
+        assert_eq!(pib.drift_ns(), 0);
         assert!(pib.last_rx.is_none());
 
         pib.sync_asn(100, rmarker_for_slot_start(1_000_000_000));
 
-        assert_eq!(pib.drift_ns, 0);
+        assert_eq!(pib.drift_ns(), 0);
         assert!(pib.last_rx.is_some());
     }
 
@@ -2018,7 +2018,7 @@ mod clock_drift_tests {
         // First sync at ASN 100
         let slot_start_1: u64 = 1_000_000_000;
         pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
-        assert_eq!(pib.drift_ns, 0);
+        assert_eq!(pib.drift_ns(), 0);
 
         // Second sync at ASN 300, with 60µs less elapsed than expected.
         // delta_asn = 200, expected = 200 * 10_000µs = 2_000_000µs
@@ -2027,7 +2027,7 @@ mod clock_drift_tests {
         let slot_start_2: u64 = slot_start_1 + 1_999_940_000;
         pib.sync_asn(300, rmarker_for_slot_start(slot_start_2));
 
-        assert_eq!(pib.drift_ns, 300);
+        assert_eq!(pib.drift_ns(), 300);
     }
 
     #[test]
@@ -2041,7 +2041,7 @@ mod clock_drift_tests {
         let slot_start_2: u64 = slot_start_1 + 2_000_060_000;
         pib.sync_asn(300, rmarker_for_slot_start(slot_start_2));
 
-        assert_eq!(pib.drift_ns, -300);
+        assert_eq!(pib.drift_ns(), -300);
     }
 
     #[test]
@@ -2055,24 +2055,24 @@ mod clock_drift_tests {
         let slot_start_2: u64 = slot_start_1 + 2_000_000_000;
         pib.sync_asn(300, rmarker_for_slot_start(slot_start_2));
 
-        assert_eq!(pib.drift_ns, 0);
+        assert_eq!(pib.drift_ns(), 0);
     }
 
     #[test]
-    fn test_drift_overwritten_on_each_sync() {
+    fn test_drift_averages_recent_samples() {
         let mut pib: TschPib<()> = TschPib::new();
 
-        // First pair: establish +300 drift
+        // First pair: establish +300 drift (one sample of 60_000ns over 200 slots).
         pib.sync_asn(100, rmarker_for_slot_start(1_000_000_000));
         pib.sync_asn(300, rmarker_for_slot_start(1_000_000_000 + 1_999_940_000));
-        assert_eq!(pib.drift_ns, 300);
+        assert_eq!(pib.drift_ns(), 300);
 
-        // Second pair: now clocks are perfectly aligned -> drift becomes 0
-        // last_rx is (slot_start of ASN 300, 300)
-        // New sync at ASN 500: delta = 200, expect 2_000_000_000ns
+        // Second pair: clocks now perfectly aligned -> a 0ns sample over 200 slots.
+        // The estimate is the interval-weighted mean of both samples, not just
+        // the latest one: (60_000 + 0) / (200 + 200) = 150 ns/slot.
         let last_slot_start = 1_000_000_000 + 1_999_940_000;
         pib.sync_asn(500, rmarker_for_slot_start(last_slot_start + 2_000_000_000));
-        assert_eq!(pib.drift_ns, 0);
+        assert_eq!(pib.drift_ns(), 150);
     }
 
     #[test]
@@ -2087,7 +2087,7 @@ mod clock_drift_tests {
         let slot_start_2: u64 = slot_start_1 + 49_997_500;
         pib.sync_asn(105, rmarker_for_slot_start(slot_start_2));
 
-        assert_eq!(pib.drift_ns, 500);
+        assert_eq!(pib.drift_ns(), 500);
     }
 
     #[test]
@@ -2095,7 +2095,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = 0;
+        pib.set_drift_ns(0);
 
         let result = pib.expected_slot_start(200, TIMESLOT_LENGTH_US);
         let expected = expected_slot_start(NsInstant::from_ticks(1_000_000_000), 100, 200);
@@ -2107,7 +2107,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = 300;
+        pib.set_drift_ns(300);
 
         let result = pib.expected_slot_start(200, TIMESLOT_LENGTH_US);
         let nominal = expected_slot_start(NsInstant::from_ticks(1_000_000_000), 100, 200);
@@ -2125,7 +2125,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = -300;
+        pib.set_drift_ns(-300);
 
         let result = pib.expected_slot_start(200, TIMESLOT_LENGTH_US);
         let nominal = expected_slot_start(NsInstant::from_ticks(1_000_000_000), 100, 200);
@@ -2139,7 +2139,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 0;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = 100;
+        pib.set_drift_ns(100);
 
         // 1000 slots ahead: 1000 * 100ns = 100µs total correction
         let result = pib.expected_slot_start(1000, TIMESLOT_LENGTH_US);
@@ -2152,7 +2152,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = 500; // drift should not matter for zero distance
+        pib.set_drift_ns(500); // drift should not matter for zero distance
 
         let result = pib.expected_slot_start(100, TIMESLOT_LENGTH_US);
         assert_eq!(result, NsInstant::from_ticks(1_000_000_000));
@@ -2163,7 +2163,7 @@ mod clock_drift_tests {
         let mut pib: TschPib<()> = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
-        pib.drift_ns = 300;
+        pib.set_drift_ns(300);
 
         pib.update_timing(200);
 

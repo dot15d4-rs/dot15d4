@@ -26,6 +26,7 @@ fn const_config(out_dir: &Path) {
         ("MAC_TSCH_MAX_SLOTFRAMES", ("usize", "1")),
         ("MAC_TSCH_MAX_PENDING_OPERATIONS", ("usize", "5")),
         ("MAC_HOPPING_SEQUENCE_MAX_LENGTH", ("usize", "16")),
+        ("MAC_TSCH_DRIFT_BUFFER_LEN", ("usize", "8")),
     ]);
 
     // Make sure we get rerun if needed

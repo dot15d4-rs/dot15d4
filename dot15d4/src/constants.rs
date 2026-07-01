@@ -25,6 +25,7 @@ mod customizable {
     pub const MAC_TSCH_MAX_LINKS: usize = 5;
     pub const MAC_TSCH_MAX_SLOTFRAMES: usize = 1;
     pub const MAC_TSCH_MAX_PENDING_OPERATIONS: usize = 5;
+    pub const MAC_TSCH_DRIFT_BUFFER_LEN: usize = 8;
 }
 
 #[cfg(not(test))]
