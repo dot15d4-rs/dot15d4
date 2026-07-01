@@ -66,6 +66,11 @@ no-tsch-frame-sync = []
 # Disable clock drift adjustment in TSCH network
 no-tsch-drift-adjustment = []
 
+# Log the per-resync TSCH sync error (predicted minus measured slot start, in
+# nanoseconds, stamped with the ASN) on both the frame and ACK paths. Needs a
+# logging backend (log/defmt) to produce output.
+sync-error-log = []
+
 # Tracing
 executor-trace = ["dot15d4-driver/executor-trace"]
 timer-trace = ["dot15d4-driver/timer-trace"]

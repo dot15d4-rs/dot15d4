@@ -505,6 +505,13 @@ impl<Neighbor> TschPib<Neighbor> {
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
         let timeslot_start = instant - NsDuration::micros(tx_offset_us);
 
+        #[cfg(feature = "sync-error-log")]
+        if self.last_rx.is_some() {
+            let predicted = self.expected_slot_start(asn, self.timeslot_length_us());
+            let err_ns = signed_delta_ns(predicted, timeslot_start);
+            dot15d4_util::info!("tsch sync asn={=u64} src=frame err_ns={=i64}", asn, err_ns);
+        }
+
         self.asn = asn;
         self.last_base_time = timeslot_start;
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
@@ -537,6 +544,12 @@ impl<Neighbor> TschPib<Neighbor> {
     #[cfg(not(feature = "no-tsch-ack-sync"))]
     pub fn sync_ack(&mut self, timesync_us: i16) {
         let asn = self.asn;
+        #[cfg(feature = "sync-error-log")]
+        dot15d4_util::info!(
+            "tsch sync asn={=u64} src=ack err_ns={=i64}",
+            asn,
+            (timesync_us as i64) * 1000
+        );
         if timesync_us < 0 {
             self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
         } else {
