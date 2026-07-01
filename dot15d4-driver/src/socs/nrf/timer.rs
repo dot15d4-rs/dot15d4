@@ -97,6 +97,12 @@ enum AlarmState {
     /// The alarm has fired and exclusive ownership was transferred back to the
     /// scheduling context.
     Fired,
+    /// The alarm is a borrowed HFXO pre-warm compare driving HFCLKSTART via PPI.
+    /// Owned by scheduling context; its compare interrupt is enabled so it frees
+    /// itself early. Release is decided by a `PreWarm -> Unused` compare-exchange
+    /// (interrupt early-release vs token drop), so the overflow ISR must handle it
+    /// specially rather than as a normal alarm.
+    PreWarm,
 }
 
 // Resources shared and synchronized between scheduling context and RTC
@@ -279,6 +285,10 @@ impl State {
     const TIMER_CC1_RADIO_DISABLE_CHANNEL: usize = 22;
     const RTC_CC0_TIMER_START_CHANNEL: usize = 19;
 
+    const RTC_HFCLKSTART_PPI_CHANNEL: usize = 18;
+
+    const HFXO_PREWARM_LEAD_TICKS: u64 = 16;
+
     const PPI_CHANNEL_MASK: u32 = 1 << Self::TIMER_CC0_RADIO_TXEN_CHANNEL
         | 1 << Self::TIMER_CC0_RADIO_RXEN_CHANNEL
         | 1 << Self::TIMER_CC1_RADIO_DISABLE_CHANNEL
@@ -451,6 +461,19 @@ impl State {
                 .tep
                 .write(|w| w.tep().variant(timer.tasks_start.as_ptr() as u32));
             ppi.fork[Self::RTC_CC0_TIMER_START_CHANNEL].tep.reset();
+
+            // HFXO pre-warm: a borrowed sleep COMPARE -> CLOCK TASKS_HFCLKSTART.
+            // TEP is fixed; EEP is set per-arm in arrange_hfclk_prewarm() and the
+            // channel is on only while a borrow is active.
+            // Safety: CLOCK is owned only by this subsystem; we just take the
+            // address of its HFCLKSTART task register.
+            let hfclkstart = unsafe { &*nrf52840_pac::CLOCK::ptr() }
+                .tasks_hfclkstart
+                .as_ptr() as u32;
+            ppi.ch[Self::RTC_HFCLKSTART_PPI_CHANNEL]
+                .tep
+                .write(|w| w.tep().variant(hfclkstart));
+            ppi.fork[Self::RTC_HFCLKSTART_PPI_CHANNEL].tep.reset();
         }
 
         rtc.tasks_stop.write(|w| w.tasks_stop().set_bit());
@@ -523,9 +546,16 @@ impl State {
             return;
         }
 
-        if self.hfclk_active_use.fetch_add(1, Ordering::Relaxed) == 0 {
-            super::start_hf_oscillator(&Self::clock());
+        self.hfclk_active_use.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Start the HFXO now and block until it is running.
+    fn hfclk_start_blocking(&self) {
+        if self.sleep_clock_uses_hfclk() {
+            return;
         }
+        super::start_hf_oscillator(&Self::clock());
+        super::wait_hf_oscillator_ready(&Self::clock());
     }
 
     fn hfclk_release(&self) {
@@ -537,6 +567,101 @@ impl State {
         assert!(prev > 0);
         if prev == 1 {
             super::stop_hf_oscillator(&Self::clock());
+        }
+    }
+
+    /// Make sure the HFXO is running by the time the timer starts at
+    /// `timer_start_tick` (RTC2 CC0).
+    fn arrange_hfclk_prewarm(&self, timer_start_tick: u64) -> Option<AlarmChannel> {
+        let rtc_now_tick = self.rtc_now_tick();
+        if !self.sleep_clock_uses_hfclk()
+            && timer_start_tick
+                > rtc_now_tick + Self::HFXO_PREWARM_LEAD_TICKS + Self::RTC_GUARD_TICKS
+            && timer_start_tick - rtc_now_tick < Self::RTC_THREE_QUARTERS_PERIOD
+        {
+            if let Some(channel) = [AlarmChannel::SleepTimer1, AlarmChannel::SleepTimer2]
+                .into_iter()
+                .find(|&channel| self.rtc_try_acquire_alarm(channel).is_ok())
+            {
+                let prewarm_tick = timer_start_tick - Self::HFXO_PREWARM_LEAD_TICKS;
+                let rtc = Self::rtc();
+                let cc = channel as usize;
+
+                rtc.events_compare[cc].reset();
+                rtc.cc[cc]
+                    .write(|w| w.compare().variant(prewarm_tick as u32 & 0xFFFFFF));
+
+                // The ISR uses this tick to tell the real compare from a
+                // spurious early match on the stale CC value.
+                // Safety: We own the alarm (Pending) at this point; the value
+                //         is released to interrupt context by the PreWarm store
+                //         below.
+                unsafe { self.set_rtc_alarm_tick(channel, prewarm_tick) };
+
+                match channel {
+                    AlarmChannel::SleepTimer1 => rtc.evtenset.write(|w| w.compare1().set_bit()),
+                    AlarmChannel::SleepTimer2 => rtc.evtenset.write(|w| w.compare2().set_bit()),
+                    _ => {}
+                }
+
+                let ppi = Self::ppi();
+                ppi.ch[Self::RTC_HFCLKSTART_PPI_CHANNEL]
+                    .eep
+                    .write(|w| w.eep().variant(rtc.events_compare[cc].as_ptr() as u32));
+                ppi.chenset
+                    .write(|w| unsafe { w.bits(1 << Self::RTC_HFCLKSTART_PPI_CHANNEL) });
+
+                compiler_fence(Ordering::Release);
+                self.alarms[cc]
+                    .state
+                    .store(AlarmState::PreWarm as u8, Ordering::Relaxed);
+                match channel {
+                    AlarmChannel::SleepTimer1 => rtc.intenset.write(|w| w.compare1().set_bit()),
+                    AlarmChannel::SleepTimer2 => rtc.intenset.write(|w| w.compare2().set_bit()),
+                    _ => {}
+                }
+
+                if self.rtc_now_tick() + Self::RTC_GUARD_TICKS <= prewarm_tick {
+                    return Some(channel);
+                }
+                self.rtc_release_prewarm(channel);
+            }
+        }
+
+        self.hfclk_start_blocking();
+        None
+    }
+
+    fn rtc_release_prewarm(&self, channel: AlarmChannel) {
+        compiler_fence(Ordering::Release);
+        let won = self.alarms[channel as usize]
+            .state
+            .compare_exchange(
+                AlarmState::PreWarm as u8,
+                AlarmState::Unused as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok();
+        compiler_fence(Ordering::Acquire);
+
+        if won {
+            let rtc = Self::rtc();
+            match channel {
+                AlarmChannel::SleepTimer1 => {
+                    rtc.intenclr.write(|w| w.compare1().set_bit());
+                    rtc.evtenclr.write(|w| w.compare1().set_bit());
+                }
+                AlarmChannel::SleepTimer2 => {
+                    rtc.intenclr.write(|w| w.compare2().set_bit());
+                    rtc.evtenclr.write(|w| w.compare2().set_bit());
+                }
+                _ => {}
+            }
+            Self::ppi()
+                .chenclr
+                .write(|w| unsafe { w.bits(1 << Self::RTC_HFCLKSTART_PPI_CHANNEL) });
+            rtc.events_compare[channel as usize].reset();
         }
     }
 
@@ -802,6 +927,28 @@ impl State {
                 .events_compare()
                 .bit_is_set()
             {
+                if self.alarms[channel as usize].state.load(Ordering::Relaxed)
+                    == AlarmState::PreWarm as u8
+                {
+                    compiler_fence(Ordering::Acquire);
+                    // Safety: While the alarm is PreWarm its tick was written
+                    //         once before the state store and is read-only in
+                    //         both contexts afterwards.
+                    let prewarm_tick = unsafe { self.rtc_alarm_tick(channel) };
+                    if self.rtc_now_tick() < prewarm_tick {
+                        rtc.events_compare[channel as usize].reset();
+                        continue;
+                    }
+
+                    let clock = Self::clock();
+                    if clock.hfclkrun.read().status().is_not_triggered() {
+                        super::start_hf_oscillator(&clock);
+                    }
+
+                    self.rtc_release_prewarm(channel);
+                    continue;
+                }
+
                 // We don't reset the compare event here but only just before
                 // scheduling the next timeout: The timer may otherwise trigger
                 // the compare event again whenever it wraps.
@@ -1729,6 +1876,10 @@ impl State {
 
 static STATE: State = State::new();
 
+/// PPI channel carrying the deferred HFXO pre-warm (borrowed RTC compare ->
+/// CLOCK TASKS_HFCLKSTART).
+pub const HFXO_PREWARM_PPI_CHANNEL: usize = State::RTC_HFCLKSTART_PPI_CHANNEL;
+
 #[interrupt]
 fn RTC2() {
     #[cfg(feature = "rtos-trace")]
@@ -2030,7 +2181,7 @@ impl RadioTimerApi for NrfRadioSleepTimer {
         STATE.hfclk_request();
 
         let result = (|| {
-            if let Some(at) = at.into() {
+            let prewarm_channel = if let Some(at) = at.into() {
                 // We need to start at least two timer ticks earlier so we can
                 // schedule signals at non-zero ticks even accounting for a one-tick
                 // PPI delay.
@@ -2047,14 +2198,18 @@ impl RadioTimerApi for NrfRadioSleepTimer {
                 STATE
                     .timer_try_start_at_rtc_tick(rtc_tick)
                     .map_err(|_| RadioTimerError::Overdue(at))?;
+
+                STATE.arrange_hfclk_prewarm(rtc_tick)
             } else {
                 STATE.timer_start_at_next_rtc_tick();
-            }
+                STATE.hfclk_start_blocking();
+                None
+            };
 
             // The high-precision timer will automatically be stopped and the
             // corresponding alarm channel released when dropping the running
             // radio timer instance.
-            Ok(NrfRadioHighPrecisionTimer { _inner: () })
+            Ok(NrfRadioHighPrecisionTimer { prewarm_channel })
         })();
 
         if result.is_err() {
@@ -2067,8 +2222,8 @@ impl RadioTimerApi for NrfRadioSleepTimer {
 }
 
 pub struct NrfRadioHighPrecisionTimer {
-    // Private field to block direct instantiation.
-    _inner: (),
+    /// The sleep compare borrowed to pre-warm the HFXO, if any. Released on drop.
+    prewarm_channel: Option<AlarmChannel>,
 }
 
 impl NrfRadioHighPrecisionTimer {
@@ -2351,6 +2506,10 @@ impl Drop for NrfRadioHighPrecisionTimer {
         // Clean up timer state.
         self.reset();
 
+        if let Some(channel) = self.prewarm_channel.take() {
+            STATE.rtc_release_prewarm(channel);
+        }
+
         // Atomically de-allocate the high precision timer.
         STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer);
         STATE.hfclk_release();
@@ -2365,4 +2524,24 @@ pub(crate) fn request_hfclk() {
 pub(crate) fn release_hfclk() {
     STATE.assert_initialized();
     STATE.hfclk_release();
+}
+
+/// RAII guard that keeps the HFXO (high-frequency crystal) running for as
+/// long as it is held.
+#[must_use = "the HFXO is released as soon as the guard is dropped"]
+pub struct HfclkGuard(());
+
+impl HfclkGuard {
+    /// Request the HFXO and keep it running until the guard is dropped.
+    pub fn new() -> Self {
+        request_hfclk();
+        STATE.hfclk_start_blocking();
+        Self(())
+    }
+}
+
+impl Drop for HfclkGuard {
+    fn drop(&mut self) {
+        release_hfclk();
+    }
 }

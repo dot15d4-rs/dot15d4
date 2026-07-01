@@ -36,20 +36,25 @@ pub enum LfClockSource {
     External,
 }
 
+/// Start the HFXO crystal and return right away (non-blocking).
 pub fn start_hf_oscillator(clock: &CLOCK) {
     if clock.hfclkstat.read().src().is_xtal() {
         return;
     }
 
+    clock.events_hfclkstarted.reset();
     clock
         .tasks_hfclkstart
         .write(|w| w.tasks_hfclkstart().set_bit());
-    while clock.events_hfclkstarted.read().bits() != 1 {}
-    clock.events_hfclkstarted.reset();
+}
+
+/// Block until the HFXO crystal is running.
+pub fn wait_hf_oscillator_ready(clock: &CLOCK) {
+    while !clock.hfclkstat.read().src().is_xtal() {}
 }
 
 pub fn stop_hf_oscillator(clock: &CLOCK) {
-    if clock.hfclkstat.read().src().is_xtal() {
+    if clock.hfclkrun.read().status().is_triggered() {
         clock
             .tasks_hfclkstop
             .write(|w| w.tasks_hfclkstop().set_bit());
