@@ -25,3 +25,5 @@ exclude = [
 [profile.release]
 debug = true
 panic = "abort"
+overflow-checks = true
+debug-assertions = true
