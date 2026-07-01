@@ -15,6 +15,10 @@ pub use radio::*;
 #[cfg(feature = "timer")]
 pub use timer::*;
 
+/// Measurement aid: when true, `start_hf_oscillator` toggles P1.03 right
+/// before triggering TASKS_HFCLKSTART.
+const TRACE_HFXO_START: bool = false;
+
 #[derive(Clone, Copy, Debug)]
 pub enum LfClockSource {
     // Uses the internal RC oscillator as sleep timer clock source (test only:
@@ -40,6 +44,14 @@ pub enum LfClockSource {
 pub fn start_hf_oscillator(clock: &CLOCK) {
     if clock.hfclkstat.read().src().is_xtal() {
         return;
+    }
+
+    if TRACE_HFXO_START {
+        // Measurement build only: the P1.03 edge marks the HFCLKSTART instant.
+        // Safety: P1.03 is a spare pin; one read-modify-write of DIR/OUT.
+        let p1 = unsafe { &*nrf52840_pac::P1::ptr() };
+        p1.dir.modify(|r, w| unsafe { w.bits(r.bits() | (1 << 3)) });
+        p1.out.modify(|r, w| unsafe { w.bits(r.bits() ^ (1 << 3)) });
     }
 
     clock.events_hfclkstarted.reset();

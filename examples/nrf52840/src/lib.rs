@@ -57,6 +57,9 @@ pub mod gpio_trace {
         #[cfg(feature = "timer-trace")]
         TimerEvent,
 
+        #[cfg(feature = "timer-trace")]
+        TimerAlarm,
+
         /// Radio GPIO event tracing.
         #[cfg(feature = "radio-trace")]
         RadioFrame,
@@ -105,6 +108,8 @@ pub mod gpio_trace {
     pub const PIN_TIMER_SIGNAL: GpioteConfig = GpioteConfig::new(TimerSignal, P0, 29, Out);
     #[cfg(feature = "timer-trace")]
     pub const PIN_TIMER_EVENT: GpioteConfig = GpioteConfig::new(TimerEvent, P0, 2, In);
+    #[cfg(feature = "timer-trace")]
+    pub const PIN_TIMER_ALARM: GpioteConfig = GpioteConfig::new(TimerAlarm, P0, 30, Out);
     #[cfg(feature = "radio-trace")]
     pub const PIN_RADIO_FRAME: GpioteConfig = GpioteConfig::new(RadioFrame, P0, 15, Out);
     #[cfg(feature = "radio-trace")]
@@ -194,6 +199,8 @@ pub fn config_peripherals(
             &PIN_TIMER_SIGNAL,
             #[cfg(feature = "timer-trace")]
             &PIN_TIMER_EVENT,
+            #[cfg(feature = "timer-trace")]
+            &PIN_TIMER_ALARM,
             #[cfg(feature = "radio-trace")]
             &PIN_RADIO_FRAME,
             #[cfg(feature = "radio-trace")]
@@ -224,6 +231,7 @@ pub fn config_peripherals(
             gpiote_out_channel: PIN_TIMER_SIGNAL.gpiote_channel as usize,
             gpiote_in_channel: PIN_TIMER_EVENT.gpiote_channel as usize,
             gpiote_tick_channel: PIN_TIMER_TICK.gpiote_channel as usize,
+            gpiote_alarm_channel: PIN_TIMER_ALARM.gpiote_channel as usize,
             ppi_tick_channel: PpiChannel::RadioTimerTick as usize,
         },
     };

@@ -237,6 +237,13 @@ struct State {
     #[cfg(feature = "timer-trace")]
     gpiote_in_channel: AtomicUsize,
 
+    /// GPIOTE channel toggled at the RTC alarm / TIMER-start boundary.
+    ///
+    /// Will only be accessed from scheduling context but is atomic to satisfy
+    /// the type system.
+    #[cfg(feature = "timer-trace")]
+    gpiote_alarm_channel: AtomicUsize,
+
     /// Primary PPI channel used for signal triggering (timer synchronization,
     /// gpio toggle) and event capturing (rx/tx enabled).
     ///
@@ -308,6 +315,8 @@ impl State {
             gpiote_out_channel: AtomicUsize::new(0),
             #[cfg(feature = "timer-trace")]
             gpiote_in_channel: AtomicUsize::new(1),
+            #[cfg(feature = "timer-trace")]
+            gpiote_alarm_channel: AtomicUsize::new(2),
             ppi_channel1: AtomicUsize::new(0),
             ppi_channel2: AtomicUsize::new(0),
             ppi_channel_group: AtomicUsize::new(0),
@@ -400,16 +409,21 @@ impl State {
             let NrfRadioTimerTracingConfig {
                 gpiote_out_channel,
                 gpiote_in_channel,
+                gpiote_alarm_channel,
                 gpiote_tick_channel,
                 ppi_tick_channel,
             } = config.tracing_config;
 
             debug_assert!(gpiote_out_channel <= 7);
             debug_assert!(gpiote_in_channel <= 7);
+            debug_assert!(gpiote_alarm_channel <= 7);
             debug_assert!(gpiote_tick_channel <= 7);
             debug_assert_ne!(gpiote_in_channel, gpiote_out_channel);
             debug_assert_ne!(gpiote_in_channel, gpiote_tick_channel);
             debug_assert_ne!(gpiote_tick_channel, gpiote_out_channel);
+            debug_assert_ne!(gpiote_alarm_channel, gpiote_out_channel);
+            debug_assert_ne!(gpiote_alarm_channel, gpiote_in_channel);
+            debug_assert_ne!(gpiote_alarm_channel, gpiote_tick_channel);
 
             debug_assert!(ppi_tick_channel <= 19);
             debug_assert_ne!(ppi_channel1, ppi_tick_channel);
@@ -419,6 +433,8 @@ impl State {
                 .store(gpiote_out_channel, Ordering::Relaxed);
             self.gpiote_in_channel
                 .store(gpiote_in_channel, Ordering::Relaxed);
+            self.gpiote_alarm_channel
+                .store(gpiote_alarm_channel, Ordering::Relaxed);
 
             let ppi = Self::ppi();
             let gpiote = Self::gpiote();
@@ -460,6 +476,16 @@ impl State {
             ppi.ch[Self::RTC_CC0_TIMER_START_CHANNEL]
                 .tep
                 .write(|w| w.tep().variant(timer.tasks_start.as_ptr() as u32));
+            #[cfg(feature = "timer-trace")]
+            {
+                let gpiote = Self::gpiote();
+                let gpiote_alarm_channel = self.gpiote_alarm_channel.load(Ordering::Relaxed);
+                ppi.fork[Self::RTC_CC0_TIMER_START_CHANNEL].tep.write(|w| {
+                    w.tep()
+                        .variant(gpiote.tasks_out[gpiote_alarm_channel].as_ptr() as u32)
+                });
+            }
+            #[cfg(not(feature = "timer-trace"))]
             ppi.fork[Self::RTC_CC0_TIMER_START_CHANNEL].tep.reset();
 
             // HFXO pre-warm: a borrowed sleep COMPARE -> CLOCK TASKS_HFCLKSTART.
@@ -2106,6 +2132,8 @@ pub struct NrfRadioSleepTimer {
 pub struct NrfRadioTimerTracingConfig {
     pub gpiote_out_channel: usize,
     pub gpiote_in_channel: usize,
+    /// GPIOTE OUT channel toggled at the RTC alarm / TIMER-start boundary.
+    pub gpiote_alarm_channel: usize,
     pub gpiote_tick_channel: usize,
     pub ppi_tick_channel: usize,
 }
