@@ -21,6 +21,8 @@ fn const_config(out_dir: &Path) {
         ("MAC_TSCH_MIN_BE", ("u8", "1")),
         ("MAC_TSCH_MAX_BE", ("u8", "7")),
         ("MAC_JOIN_METRIC", ("u16", "1")),
+        ("MAC_NEIGHBOR_TABLE_SIZE", ("usize", "8")),
+        ("MAC_ETX_NOACK_PENALTY", ("u16", "12")),
         ("MAC_DISCONNECT_TIME", ("u16", "0x00ff")),
         ("MAC_TSCH_MAX_LINKS", ("usize", "5")),
         ("MAC_TSCH_MAX_SLOTFRAMES", ("usize", "1")),

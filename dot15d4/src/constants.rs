@@ -20,6 +20,8 @@ mod customizable {
     pub const MAC_TSCH_MIN_BE: u8 = 1;
     pub const MAC_TSCH_MAX_BE: u8 = 7;
     pub const MAC_JOIN_METRIC: u16 = 1;
+    pub const MAC_NEIGHBOR_TABLE_SIZE: usize = 8;
+    pub const MAC_ETX_NOACK_PENALTY: u16 = 12;
     pub const MAC_DISCONNECT_TIME: u16 = 0x00ff;
 
     pub const MAC_TSCH_MAX_LINKS: usize = 5;

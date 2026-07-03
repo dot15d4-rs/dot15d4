@@ -68,6 +68,7 @@ pub struct Pib {
     /// Sequence of PHY channels that allows for a different channel to be
     /// used at a given ASN
     pub(crate) hopping_sequence: Vec<Channel, { MAC_HOPPING_SEQUENCE_MAX_LENGTH }>,
+    pub(crate) neighbors: crate::mac::neighbors::MacNeighborTable,
     /// MAC constants and PIB attributes for TSCH
     #[cfg(feature = "tsch")]
     pub(crate) tsch: TschPib<()>,
@@ -92,6 +93,7 @@ impl Pib {
             short_address: 0xffff,
             enhanced_beacon_order: 0,
             hopping_sequence: Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap(),
+            neighbors: crate::mac::neighbors::MacNeighborTable::new(),
             #[cfg(feature = "tsch")]
             tsch: TschPib::new(),
         }
