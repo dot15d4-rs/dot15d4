@@ -23,7 +23,6 @@ use crate::{
     },
 };
 
-#[cfg(feature = "tsch-coordinator")]
 use super::beacon::EnhancedBeaconBuilder;
 use super::pib::TschAsn;
 
@@ -258,16 +257,13 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub rx_frame: Cell<Option<RadioFrame<RadioFrameUnsized>>>,
     /// Whether this device is coordinator.
     pub is_coordinator: bool,
-    /// Beacon frame (for coordinator).
-    #[cfg(feature = "tsch-coordinator")]
+    /// Beacon frame (present when beaconing is enabled).
     pub beacon_mpdu: Cell<Option<MpduFrame>>,
     /// Beacon builder.
-    #[cfg(feature = "tsch-coordinator")]
     pub beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
     /// Beacon configuration (period and enabled state).
     pub beacon_config: BeaconConfig,
     /// Timestamp of last beacon transmission.
-    #[cfg(feature = "tsch-coordinator")]
     pub last_beacon_time: Option<NsInstant>,
     /// Marker for radio driver implementation
     _marker: PhantomData<RadioDriverImpl>,
@@ -284,12 +280,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             pending_operations: Vec::new(),
             rx_frame: Cell::new(Some(rx_frame)),
             is_coordinator: false,
-            #[cfg(feature = "tsch-coordinator")]
             beacon_mpdu: Cell::new(None),
-            #[cfg(feature = "tsch-coordinator")]
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
-            #[cfg(feature = "tsch-coordinator")]
             last_beacon_time: None,
             _marker: PhantomData,
         }
@@ -299,10 +292,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn init_device(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         self.is_coordinator = false;
         self.beacon_config = BeaconConfig::disabled();
-        #[cfg(feature = "tsch-coordinator")]
-        {
-            self.last_beacon_time = None;
-        }
+        self.last_beacon_time = None;
         self.state = TschState::Idle;
 
         let current_time = context.timer.now();
@@ -589,7 +579,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 ..
             } => self.queue_tx_with_backoff(response_token, mpdu, asn, backoff, context),
             TschOperation::RxSlot { asn, .. } => self.queue_next_rx(asn, context),
-            #[cfg(feature = "tsch-coordinator")]
             TschOperation::AdvertisementSlot { .. } => self.queue_next_beacon(context),
             _ => unreachable!(),
         }
@@ -693,7 +682,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     .deallocate_buffer(radio_frame.into_buffer())
             };
         }
-        #[cfg(feature = "tsch-coordinator")]
         if let Some(mpdu) = self.beacon_mpdu.take() {
             unsafe {
                 context
@@ -705,9 +693,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 }
 
 // ========================================================================
-// Coordinator features
+// Beacon / advertisement features
 // ========================================================================
-#[cfg(feature = "tsch-coordinator")]
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Initialize as coordinator with network start time and beacon period.
     pub fn init_coordinator(
@@ -781,7 +768,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     }
 
     /// Schedule the next beacon advertisement.
-    #[cfg(feature = "tsch-coordinator")]
     pub fn queue_next_beacon(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> bool {
         use dot15d4_driver::timer::RadioTimerApi;
 

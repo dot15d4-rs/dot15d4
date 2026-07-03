@@ -15,8 +15,6 @@ use dot15d4_driver::{
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-#[cfg(not(feature = "tsch-coordinator"))]
-use dot15d4_util::allocator::IntoBuffer;
 use dot15d4_util::sync::ResponseToken;
 
 #[cfg(feature = "tsch")]
@@ -83,16 +81,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // order for priority rules.
                 context.pib.tsch.sort_links();
 
-                #[cfg(feature = "tsch-coordinator")]
-                {
-                    if context.pib.coord_extended_address.is_broadcast() {
-                        self.init_coordinator(context, Some(9));
-                    } else {
-                        self.init_device(context);
-                    }
-                }
-                #[cfg(not(feature = "tsch-coordinator"))]
-                {
+                if context.pib.coord_extended_address.is_broadcast() {
+                    self.init_coordinator(context, Some(9));
+                } else {
                     self.init_device(context);
                 }
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
@@ -113,7 +104,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::TimerExpired => match self.pending_operations.last() {
                 Some(TschOperation::TxSlot { .. }) => self.schedule_tx_operation(context),
                 Some(TschOperation::RxSlot { .. }) => self.schedule_rx_operation(context),
-                #[cfg(feature = "tsch-coordinator")]
                 Some(TschOperation::AdvertisementSlot { .. }) => {
                     self.schedule_advertisement_operation(context)
                 }
@@ -191,20 +181,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             ),
             // Beacon: restore the frame and reschedule the advertisement.
             None => {
-                #[cfg(feature = "tsch-coordinator")]
-                {
-                    self.beacon_mpdu
-                        .set(Some(MpduFrame::from_radio_frame(radio_frame)));
-                    self.queue_next_beacon(context);
-                }
-                #[cfg(not(feature = "tsch-coordinator"))]
-                // Safety: the frame buffer was allocated by this
-                // allocator when the operation was queued.
-                unsafe {
-                    context
-                        .buffer_allocator
-                        .deallocate_buffer(radio_frame.into_buffer())
-                };
+                self.recover_beacon(radio_frame, context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
         }
@@ -234,18 +211,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                 } else {
-                    #[cfg(feature = "tsch-coordinator")]
-                    {
-                        // Put beacon frame back for next advertisement
-                        self.beacon_mpdu
-                            .set(Some(MpduFrame::from_radio_frame(tx_frame)));
-
-                        // Record beacon transmission time for period calculation
-                        self.on_beacon_sent(instant);
-                        self.queue_next_beacon(context);
-                    }
-                    // Return to idle - next beacon will be scheduled automatically
-                    // in get_initial_action when the period expires
+                    // Record the beacon transmission time (used for the next
+                    // period calculation), then put the frame back and
+                    // schedule the next advertisement.
+                    self.on_beacon_sent(instant);
+                    self.recover_beacon(tx_frame, context);
                     SchedulerTaskTransition::Execute(self.go_idle(context), None)
                 }
             }
@@ -270,20 +240,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     // Beacon: restore the frame and reschedule the
                     // advertisement.
                     None => {
-                        #[cfg(feature = "tsch-coordinator")]
-                        {
-                            self.beacon_mpdu
-                                .set(Some(MpduFrame::from_radio_frame(tx_frame)));
-                            self.queue_next_beacon(context);
-                        }
-                        #[cfg(not(feature = "tsch-coordinator"))]
-                        // Safety: the frame buffer was allocated by this
-                        // allocator when the operation was queued.
-                        unsafe {
-                            context
-                                .buffer_allocator
-                                .deallocate_buffer(tx_frame.into_buffer())
-                        };
+                        self.recover_beacon(tx_frame, context);
                         SchedulerTaskTransition::Execute(self.go_idle(context), None)
                     }
                 }
@@ -641,9 +598,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Schedule an advertisement (beacon) operation for the current timeslot.
     ///
-    /// Coordinator-only. Updates the beacon frame with current ASN and
-    /// schedules transmission.
-    #[cfg(feature = "tsch-coordinator")]
+    /// Updates the beacon frame with current ASN and schedules transmission.
     fn schedule_advertisement_operation(
         &mut self,
         // TODO: pass tsch context
@@ -698,6 +653,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
+    /// Put the beacon frame back after a transmission attempt (sent, CCA busy,
+    /// scheduling failure or missing ACK) and schedule the next advertisement.
+    ///
+    /// This is the single recovery path for the beacon buffer, shared by all
+    /// beacon outcome branches.
+    fn recover_beacon(
+        &mut self,
+        radio_frame: RadioFrame<RadioFrameSized>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) {
+        self.beacon_mpdu
+            .set(Some(MpduFrame::from_radio_frame(radio_frame)));
+        self.queue_next_beacon(context);
+    }
+
     /// Transition to idle state and wait for the next deadline by configuring
     /// timer action accordingly.
     fn go_idle(&mut self, context: &SchedulerContext<RadioDriverImpl>) -> SchedulerAction {

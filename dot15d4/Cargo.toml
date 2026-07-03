@@ -54,7 +54,9 @@ ies = ["dot15d4-frame/ies"]
 # Support for TSCH
 tsch = ["ies"]
 
-# Support for TSCH coordinator features (beacon transmission, etc.)
+# TSCH association responder (accept association requests from devices).
+# Beacon transmission is part of plain `tsch`: in a multi-hop network every
+# node may send Enhanced Beacons, not only the PAN coordinator.
 tsch-coordinator = ["tsch"]
 
 # Disable Enh-Ack-based synchronization in TSCH network
