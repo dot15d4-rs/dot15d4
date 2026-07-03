@@ -217,7 +217,7 @@ fn setup() -> TestRunner<'static, TschTask<FakeDriverConfig>> {
 
 /// Minimal TSCH schedule: one shared advertising link at timeslot 0 in a
 /// slotframe of size 100. The link supports TX, RX, Shared, and TimeKeeping.
-fn setup_one_link_schedule(pib: &mut TschPib<()>) {
+fn setup_one_link_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 100).is_ok());
     let link = TschLink {
         slotframe_handle: 0,
@@ -235,7 +235,7 @@ fn setup_one_link_schedule(pib: &mut TschPib<()>) {
 }
 
 /// Schedule with separate TX and RX links at different timeslots.
-fn setup_two_link_schedule(pib: &mut TschPib<()>) {
+fn setup_two_link_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 100).is_ok());
     // TX link at timeslot 10
     let tx_link = TschLink {
@@ -262,7 +262,7 @@ fn setup_two_link_schedule(pib: &mut TschPib<()>) {
 }
 
 /// Schedule with short slotframe for quick cycling.
-fn setup_short_schedule(pib: &mut TschPib<()>) {
+fn setup_short_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 5).is_ok());
     let link = TschLink {
         slotframe_handle: 0,
@@ -284,7 +284,7 @@ fn setup_short_schedule(pib: &mut TschPib<()>) {
 /// Used by TSCH CSMA-CA tests that step through several TX attempts: with no
 /// RX links, every timer expiry pops the TX operation, without interleaved
 /// RX slots between retransmission attempts.
-fn setup_shared_tx_only_schedule(pib: &mut TschPib<()>) {
+fn setup_shared_tx_only_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 100).is_ok());
     let link = TschLink {
         slotframe_handle: 0,
@@ -300,7 +300,7 @@ fn setup_shared_tx_only_schedule(pib: &mut TschPib<()>) {
 
 /// Schedule with a dedicated (non-shared) TX link at timeslot 10.
 /// Used to test non-shared link behavior where NACK is reported directly.
-fn setup_dedicated_tx_link_schedule(pib: &mut TschPib<()>) {
+fn setup_dedicated_tx_link_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 100).is_ok());
     // Dedicated TX link (not shared): NACK should produce NoAck response
     let tx_link = TschLink {
@@ -333,7 +333,7 @@ fn setup_dedicated_tx_link_schedule(pib: &mut TschPib<()>) {
 /// retransmission tests: with no RX link, every timer expiry pops the TX
 /// operation, so consecutive retransmission attempts are not interleaved with
 /// RX slots.
-fn setup_dedicated_tx_only_schedule(pib: &mut TschPib<()>) {
+fn setup_dedicated_tx_only_schedule(pib: &mut TschPib) {
     assert!(pib.create_slotframe(0, 100).is_ok());
     let link = TschLink {
         slotframe_handle: 0,
@@ -2001,7 +2001,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_first_sync_does_not_update_drift() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         assert_eq!(pib.drift_ns(), 0);
         assert!(pib.last_rx.is_none());
 
@@ -2013,7 +2013,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_positive_drift_clock_faster() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
 
         // First sync at ASN 100
         let slot_start_1: u64 = 1_000_000_000;
@@ -2032,7 +2032,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_negative_drift_clock_slower() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
 
         let slot_start_1: u64 = 1_000_000_000;
         pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
@@ -2046,7 +2046,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_zero_drift_synchronized() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
 
         let slot_start_1: u64 = 1_000_000_000;
         pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
@@ -2060,7 +2060,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_drift_averages_recent_samples() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
 
         // First pair: establish +300 drift (one sample of 60_000ns over 200 slots).
         pib.sync_asn(100, rmarker_for_slot_start(1_000_000_000));
@@ -2077,7 +2077,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_drift_small_delta_asn() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
 
         let slot_start_1: u64 = 1_000_000_000;
         pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
@@ -2092,7 +2092,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_expected_slot_start_zero_drift() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(0);
@@ -2104,7 +2104,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_expected_slot_start_positive_drift() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(300);
@@ -2122,7 +2122,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_expected_slot_start_negative_drift() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(-300);
@@ -2136,7 +2136,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_drift_accumulates_over_distance() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 0;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(100);
@@ -2149,7 +2149,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_expected_slot_start_same_asn() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(500); // drift should not matter for zero distance
@@ -2160,7 +2160,7 @@ mod clock_drift_tests {
 
     #[test]
     fn test_update_timing_uses_drift() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         pib.asn = 100;
         pib.last_base_time = NsInstant::from_ticks(1_000_000_000);
         pib.set_drift_ns(300);
@@ -2509,7 +2509,7 @@ mod tsch_csma_ca_tests {
 
     #[test]
     fn test_select_nth_link_skip_zero_same_as_select_next() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         setup_one_link_schedule(&mut pib);
 
         let next = pib.select_next_link(0, |l| l.link_options.contains(TschLinkOption::Tx));
@@ -2519,7 +2519,7 @@ mod tsch_csma_ca_tests {
 
     #[test]
     fn test_select_nth_link_skip_one() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         setup_one_link_schedule(&mut pib);
 
         // First occurrence at ASN 100 (timeslot 0, slotframe size 100)
@@ -2537,7 +2537,7 @@ mod tsch_csma_ca_tests {
 
     #[test]
     fn test_select_nth_link_skip_multiple() {
-        let mut pib: TschPib<()> = TschPib::new();
+        let mut pib: TschPib = TschPib::new();
         setup_one_link_schedule(&mut pib);
 
         // Skip 3 --> fourth occurrence at ASN 400

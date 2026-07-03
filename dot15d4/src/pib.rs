@@ -71,7 +71,7 @@ pub struct Pib {
     pub(crate) neighbors: crate::mac::neighbors::MacNeighborTable,
     /// MAC constants and PIB attributes for TSCH
     #[cfg(feature = "tsch")]
-    pub(crate) tsch: TschPib<()>,
+    pub(crate) tsch: TschPib,
 }
 
 impl Pib {

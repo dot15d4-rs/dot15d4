@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use core::marker::PhantomData;
 
-use dot15d4_driver::radio::{frame::Address, DriverConfig};
+use dot15d4_driver::radio::DriverConfig;
 use dot15d4_frame::fields::TschLinkOption;
 
 use crate::{
@@ -24,9 +24,11 @@ pub struct SetLinkRequest {
     pub link_options: TschLinkOption,
     /// Type of link (normal or advertising)
     pub link_type: TschLinkType,
-    /// Neighbor assigned to the link for communication. None if not a
-    /// dedicated link
-    pub neighbor: Option<Address<[u8; 4]>>,
+    /// Extended address (little-endian) of the neighbor assigned to the link
+    /// for communication. `None` if the link is not dedicated to a neighbor.
+    /// The scheduler interns the address into the MAC neighbor table and
+    /// stores the resulting handle on the link.
+    pub neighbor: Option<[u8; 8]>,
     /// Wether this link shall be advertised in Enhanced beacon frames
     /// using the TSCH Slotframe and Link IE. If not, this link shall
     /// be added locally only.

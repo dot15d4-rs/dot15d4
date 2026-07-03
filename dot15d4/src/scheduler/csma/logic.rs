@@ -22,10 +22,7 @@ use crate::scheduler::{
 #[cfg(feature = "tsch")]
 use crate::scheduler::{command::tsch::UseTschCommandResult, SchedulerTaskCompletion};
 #[cfg(feature = "tsch")]
-use crate::scheduler::{
-    command::tsch::{TschCommand, TschCommandResult},
-    tsch::TschPib,
-};
+use crate::scheduler::command::tsch::{TschCommand, TschCommandResult};
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
@@ -426,7 +423,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             SchedulerCommand::PibCommand(cmd) => self.on_pib_cmd(token, cmd, context),
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(cmd) => {
-                self.on_tsch_cmd(token, cmd, &mut context.pib.tsch)
+                self.on_tsch_cmd(token, cmd, context)
             }
             #[cfg(feature = "tsch")]
             SchedulerCommand::ScanCommand(cmd) => self.on_scan_command(token, cmd),
@@ -482,7 +479,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         &mut self,
         token: ResponseToken,
         cmd: TschCommand,
-        tsch: &mut TschPib<()>,
+        context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
         use crate::{
             mac::mlme::tsch::TschScheduleOperation,
@@ -492,6 +489,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             },
         };
 
+        let tsch = &mut context.pib.tsch;
         match cmd {
             TschCommand::UseTsch(enabled, cca) => {
                 // Record macTschCca (MLME-TSCH-MODE.request). This handler runs
@@ -556,13 +554,31 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 )
             }
             TschCommand::SetTschLink(cmd) => {
+                // Resolve the neighbor address to a table handle. A link
+                // neighbor is a long-lived reference, so pin the entry.
+                let neighbor = cmd.neighbor.and_then(|ext_addr| {
+                    let now = context.timer.now();
+                    let address = dot15d4_driver::radio::frame::Address::Extended(
+                        dot15d4_driver::radio::frame::ExtendedAddress::new(&ext_addr[..]),
+                    );
+                    let id = context.pib.neighbors.intern(&address, now);
+                    if let Some(id) = id {
+                        context.pib.neighbors.pin(id);
+                    } else {
+                        dot15d4_util::warn!(
+                            "SetTschLink: neighbor table full, link stored without neighbor"
+                        );
+                    }
+                    id
+                });
+                let tsch = &mut context.pib.tsch;
                 let link = TschLink {
                     slotframe_handle: cmd.slotframe_handle,
                     timeslot: cmd.timeslot,
                     channel_offset: cmd.channel_offset,
                     link_options: cmd.link_options,
                     link_type: cmd.link_type,
-                    neighbor: None,
+                    neighbor,
                     link_advertise: cmd.advertise,
                 };
                 let result = match tsch.add_link(link) {

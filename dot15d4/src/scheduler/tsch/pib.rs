@@ -14,6 +14,7 @@ use crate::constants::{
     MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
+use crate::mac::neighbors::NeighborId;
 
 /// Type alias for Absolute Slot Number.
 pub type TschAsn = u64;
@@ -126,7 +127,7 @@ pub enum TschLinkType {
 /// This representation follows specification described in
 /// IEEE802.15.4-2024, Section 10.3.11.3
 #[derive(Debug, Clone)]
-pub struct TschLink<Neighbor> {
+pub struct TschLink {
     /// Slotframe identifier of the slotframe to which the link is associated.
     pub slotframe_handle: u8,
     /// Associated timeslot in the slotframe.
@@ -137,15 +138,15 @@ pub struct TschLink<Neighbor> {
     pub link_options: TschLinkOption,
     /// Type of link (normal or advertising).
     pub link_type: TschLinkType,
-    /// Neighbor assigned to the link for communication. None if not a
-    /// dedicated link.
-    pub neighbor: Option<Neighbor>,
+    /// Handle into the MAC neighbor table for the neighbor assigned to the
+    /// link. `None` if the link is not dedicated to one neighbor.
+    pub neighbor: Option<NeighborId>,
     /// Whether this link shall be advertised in Enhanced beacon frames
     /// using the TSCH Slotframe and Link IE.
     pub link_advertise: bool,
 }
 
-impl<Neighbor> Default for TschLink<Neighbor> {
+impl Default for TschLink {
     fn default() -> Self {
         Self {
             slotframe_handle: 0,
@@ -183,9 +184,9 @@ impl TschSlotframe {
     }
 
     /// Calculate the next ASN when this link will be active.
-    pub fn next_asn_for_link<Neighbor>(
+    pub fn next_asn_for_link(
         &self,
-        link: &TschLink<Neighbor>,
+        link: &TschLink,
         current_asn: TschAsn,
     ) -> TschAsn {
         let current_timeslot = self.timeslot(current_asn);
@@ -212,7 +213,7 @@ impl TschSlotframe {
 /// TSCH-specific PIB attributes.
 ///
 /// IEEE802.15.4-2024 Section 10.3.11
-pub struct TschPib<Neighbor> {
+pub struct TschPib {
     /// The minimum value of the backoff exponent (BE) in the TSCH-CA algorithm.
     pub tsch_min_be: u8,
     /// The maximum value of the BE in the TSCH-CA algorithm.
@@ -229,7 +230,7 @@ pub struct TschPib<Neighbor> {
     /// Slotframe table (macSlotframeTable).
     pub slotframes: Vec<TschSlotframe, MAC_TSCH_MAX_SLOTFRAMES>,
     /// Link table (macLinkTable).
-    pub links: Vec<TschLink<Neighbor>, MAC_TSCH_MAX_LINKS>,
+    pub links: Vec<TschLink, MAC_TSCH_MAX_LINKS>,
     /// Timeslot timing template (macTimeslotTemplate).
     pub timeslot_timings: TschTimeslotTimings,
     /// Current Absolute Slot Number.
@@ -243,7 +244,7 @@ pub struct TschPib<Neighbor> {
     drift: DriftEstimator<MAC_TSCH_DRIFT_BUFFER_LEN>,
 }
 
-impl<Neighbor> TschPib<Neighbor> {
+impl TschPib {
     /// Create a new TSCH PIB with default values.
     pub fn new() -> Self {
         Default::default()
@@ -283,10 +284,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 
     /// Add a link to the schedule.
-    pub fn add_link(&mut self, link: TschLink<Neighbor>) -> Result<u16, ScheduleError>
-    where
-        Neighbor: Clone,
-    {
+    pub fn add_link(&mut self, link: TschLink) -> Result<u16, ScheduleError> {
         // Validate slotframe exists
         let slotframe = self
             .get_slotframe(link.slotframe_handle)
@@ -343,9 +341,9 @@ impl<Neighbor> TschPib<Neighbor> {
     pub fn select_next_link(
         &self,
         current_asn: TschAsn,
-        filter: impl Fn(&TschLink<Neighbor>) -> bool,
-    ) -> Option<(&TschLink<Neighbor>, TschAsn)> {
-        let mut best: Option<(&TschLink<Neighbor>, u64)> = None;
+        filter: impl Fn(&TschLink) -> bool,
+    ) -> Option<(&TschLink, TschAsn)> {
+        let mut best: Option<(&TschLink, u64)> = None;
 
         for link in self.links.iter() {
             if !filter(link) {
@@ -400,8 +398,8 @@ impl<Neighbor> TschPib<Neighbor> {
         &self,
         current_asn: TschAsn,
         skip: u16,
-        filter: impl Fn(&TschLink<Neighbor>) -> bool,
-    ) -> Option<(&TschLink<Neighbor>, TschAsn)> {
+        filter: impl Fn(&TschLink) -> bool,
+    ) -> Option<(&TschLink, TschAsn)> {
         let mut search_asn = current_asn;
         let mut result = None;
         for _ in 0..=skip {
@@ -441,7 +439,7 @@ impl<Neighbor> TschPib<Neighbor> {
     pub fn channel_for_link(
         &self,
         asn: TschAsn,
-        link: &TschLink<Neighbor>,
+        link: &TschLink,
         hopping_sequence: &[Channel],
     ) -> Channel {
         if hopping_sequence.is_empty() {
@@ -566,7 +564,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 
     /// Get iterator over links.
-    pub fn links(&self) -> impl Iterator<Item = &TschLink<Neighbor>> {
+    pub fn links(&self) -> impl Iterator<Item = &TschLink> {
         self.links.iter()
     }
 
@@ -587,7 +585,7 @@ impl<Neighbor> TschPib<Neighbor> {
     }
 }
 
-impl<Neighbor> Default for TschPib<Neighbor> {
+impl Default for TschPib {
     fn default() -> Self {
         Self {
             tsch_min_be: MAC_TSCH_MIN_BE,
