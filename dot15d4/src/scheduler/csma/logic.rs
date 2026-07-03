@@ -123,7 +123,8 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.base_time = instant;
                 self.state = CsmaState::Listening;
 
-                match utils::process_rx_frame(rx_frame, instant, context) {
+                let mpdu = MpduFrame::from_radio_frame(rx_frame);
+                match utils::process_rx_frame(mpdu, instant, context) {
                     Ok((response, token)) => {
                         self.rx_frame = Some(context.allocate_frame());
                         SchedulerTaskTransition::Execute(
@@ -131,8 +132,12 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                             Some((token, response)),
                         )
                     }
-                    Err(recovered_frame) => {
-                        self.rx_frame = Some(recovered_frame);
+                    Err(recovered_mpdu) => {
+                        self.rx_frame = Some(
+                            recovered_mpdu
+                                .into_radio_frame::<RadioDriverImpl>()
+                                .forget_size::<RadioDriverImpl>(),
+                        );
                         SchedulerTaskTransition::Execute(
                             SchedulerAction::SelectDriverEventOrRequest,
                             None,

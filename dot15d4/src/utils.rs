@@ -1,9 +1,6 @@
 use dot15d4_driver::{
     radio::{
-        frame::{
-            Address, FrameType, PanId, RadioFrame, RadioFrameSized, RadioFrameUnsized,
-            ShortAddress, BROADCAST_PAN_ID,
-        },
+        frame::{Address, FrameType, PanId, ShortAddress, BROADCAST_PAN_ID},
         tasks::PreliminaryFrameInfo,
         DriverConfig,
     },
@@ -81,11 +78,10 @@ pub fn is_frame_valid_and_for_us(
 }
 
 pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
-    rx_frame: RadioFrame<RadioFrameSized>,
+    mpdu_frame: MpduFrame,
     instant: NsInstant,
     context: &mut SchedulerContext<RadioDriverImpl>,
-) -> Result<(SchedulerResponse, ResponseToken), RadioFrame<RadioFrameUnsized>> {
-    let mpdu_frame = MpduFrame::from_radio_frame(rx_frame);
+) -> Result<(SchedulerResponse, ResponseToken), MpduFrame> {
     let reader = mpdu_frame.reader();
 
     match reader.frame_control().frame_type() {
@@ -98,9 +94,7 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
                 Ok((response, token))
             } else {
                 // No receiver, reuse frame
-                Err(mpdu_frame
-                    .into_radio_frame::<RadioDriverImpl>()
-                    .forget_size::<RadioDriverImpl>())
+                Err(mpdu_frame)
             }
         }
         FrameType::Data => {
@@ -112,9 +106,7 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
                 Ok((response, token))
             } else {
                 // No receiver, reuse frame
-                Err(mpdu_frame
-                    .into_radio_frame::<RadioDriverImpl>()
-                    .forget_size::<RadioDriverImpl>())
+                Err(mpdu_frame)
             }
         }
         FrameType::MacCommand => {
@@ -124,24 +116,18 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
                 .and_then(|r| r.parse_security().parse_ies::<RadioDriverImpl>().ok());
 
             let Some(reader) = parsed else {
-                return Err(mpdu_frame
-                    .into_radio_frame::<RadioDriverImpl>()
-                    .forget_size::<RadioDriverImpl>());
+                return Err(mpdu_frame);
             };
 
             let Some(payload) = reader.try_frame_payload() else {
-                return Err(mpdu_frame
-                    .into_radio_frame::<RadioDriverImpl>()
-                    .forget_size::<RadioDriverImpl>());
+                return Err(mpdu_frame);
             };
 
             let mac_command_type = match payload.first() {
                 Some(0x01) => MacCommandType::AssociateRequest,
                 Some(0x02) => MacCommandType::AssociateResponse,
                 _ => {
-                    return Err(mpdu_frame
-                        .into_radio_frame::<RadioDriverImpl>()
-                        .forget_size::<RadioDriverImpl>())
+                    return Err(mpdu_frame)
                 }
             };
             // Association Request
@@ -155,16 +141,12 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
                 Ok((response, token))
             } else {
                 // No receiver, reuse frame
-                Err(mpdu_frame
-                    .into_radio_frame::<RadioDriverImpl>()
-                    .forget_size::<RadioDriverImpl>())
+                Err(mpdu_frame)
             }
         }
         _ => {
             // Unsupported frame type: drop the frame
-            Err(mpdu_frame
-                .into_radio_frame::<RadioDriverImpl>()
-                .forget_size::<RadioDriverImpl>())
+            Err(mpdu_frame)
         }
     }
 }

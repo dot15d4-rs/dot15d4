@@ -347,6 +347,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 self.queue_next_rx(current_asn, context);
                 let action = self.go_idle(context);
 
+                // Convert to an MPDU once; the sync decision and the frame
+                // routing below both work on this view.
+                let mpdu = MpduFrame::from_radio_frame(rx_frame);
+
                 // Frame-based synchronization
                 #[cfg(not(feature = "no-tsch-frame-sync"))]
                 if !self.is_coordinator {
@@ -359,16 +363,20 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     }
                 }
 
-                match utils::process_rx_frame(rx_frame, rx_instant, context) {
+                match utils::process_rx_frame(mpdu, rx_instant, context) {
                     Ok((response, token)) => {
                         // Allocate new frame for next RX
                         self.put_rx_frame(context.allocate_frame());
 
                         SchedulerTaskTransition::Execute(action, Some((token, response)))
                     }
-                    Err(recovered_frame) => {
+                    Err(recovered_mpdu) => {
                         // No receiver, reuse frame
-                        self.put_rx_frame(recovered_frame);
+                        self.put_rx_frame(
+                            recovered_mpdu
+                                .into_radio_frame::<RadioDriverImpl>()
+                                .forget_size::<RadioDriverImpl>(),
+                        );
                         SchedulerTaskTransition::Execute(action, None)
                     }
                 }
