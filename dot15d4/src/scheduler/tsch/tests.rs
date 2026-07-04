@@ -24,6 +24,7 @@ use dot15d4_util::allocator::IntoBuffer;
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, Timestamp};
 use crate::mac::MacBufferAllocator;
 use crate::scheduler::command::pib::PibCommand;
+use crate::mac::neighbors::NeighborId;
 use crate::scheduler::command::tsch::{TschCommand, TschRoleConfig};
 use crate::scheduler::command::{CsmaCommandResult, UseCsmaResult};
 use crate::scheduler::tests::{
@@ -169,6 +170,23 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
         self.step_entry();
     }
 
+    /// Intern `addr_le` as a neighbor, pin it and make it this node's time
+    /// source.
+    pub fn set_time_source(&mut self, addr_le: &[u8; 8]) -> NeighborId {
+        let id = self
+            .context
+            .pib
+            .neighbors
+            .intern(
+                &Address::Extended(ExtendedAddress::new(&addr_le[..])),
+                NsInstant::from_ticks(0),
+            )
+            .unwrap();
+        self.context.pib.neighbors.pin(id);
+        self.context.pib.tsch.time_source = Some(id);
+        id
+    }
+
     /// Configure PIB for device node and step_entry.
     pub fn enter_as_device(&mut self) {
         self.context.pib.tsch.role = TschRoleConfig::device();
@@ -178,6 +196,32 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
         self.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
         self.step_entry();
     }
+}
+
+
+/// Like `create_test_data_frame`, but with deterministic extended source
+/// and destination addresses (little-endian bytes).
+fn create_addressed_data_frame(
+    allocator: &MacBufferAllocator,
+    src_le: &[u8; 8],
+    dst_le: &[u8; 8],
+) -> MpduFrame {
+    let mut mpdu = create_test_mpdu_with_ack(allocator);
+    let mut writer = mpdu.writer().parse_addressing_mut().unwrap();
+    let mut addressing = writer.try_addressing_fields_mut().unwrap();
+    addressing
+        .try_src_address_mut()
+        .unwrap()
+        .try_set(&Address::Extended(ExtendedAddress::new(&src_le[..])))
+        .unwrap();
+    addressing
+        .try_dst_address_mut()
+        .unwrap()
+        .try_set(&Address::Extended(ExtendedAddress::new(&dst_le[..])))
+        .unwrap();
+    drop(addressing);
+    drop(writer);
+    mpdu
 }
 
 // ============================================================================
@@ -1207,20 +1251,27 @@ mod advertisement_tests {
 mod ack_sync_tests {
     use super::*;
 
+    /// This node's own address in the exchanged frames.
+    const SRC: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
     #[test]
     fn test_ack_positive_timesync() {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1239,15 +1290,19 @@ mod ack_sync_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1264,15 +1319,19 @@ mod ack_sync_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1288,15 +1347,19 @@ mod ack_sync_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1312,15 +1375,19 @@ mod ack_sync_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Nack(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1331,15 +1398,53 @@ mod ack_sync_tests {
         assert_eq!(runner.last_base_time(), bt_before);
         runner.terminate();
     }
-}
+    #[test]
+    fn test_ack_from_non_time_source_does_not_sync() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
+        // The acknowledged destination is a child, not the time source.
+        let child = [0x0c; 8];
+        runner
+            .context
+            .pib
+            .neighbors
+            .intern(
+                &Address::Extended(ExtendedAddress::new(&child[..])),
+                NsInstant::from_ticks(0),
+            )
+            .unwrap();
 
-// ============================================================================
+        let mpdu = create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &child);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+
+        let bt_before = runner.last_base_time();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let frame = create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &child)
+            .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            Some(50i16),
+        ));
+
+        // The ACK of a child must not steer this node's clock.
+        assert_eq!(runner.last_base_time(), bt_before);
+        runner.terminate();
+    }
+}
 // Integration Tests: Frame-based Synchronization
 // ============================================================================
 
 #[cfg(test)]
 mod frame_sync_tests {
     use super::*;
+
+    /// This node's own address in the received frames.
+    const DST: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
 
     fn setup_device_runner() -> TestRunner<'static, TschTask<FakeDriverConfig>> {
         let mut runner = setup();
@@ -1350,6 +1455,7 @@ mod frame_sync_tests {
         runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
         runner.task.init(&mut runner.context);
         runner.task.state = TschState::Idle;
+        runner.set_time_source(&COORD_ADDRESS);
         runner
     }
 
@@ -1363,7 +1469,9 @@ mod frame_sync_tests {
         runner.step_driver_event(DrvSvcEvent::FrameStarted);
 
         let rx_instant = NsInstant::from_ticks(1_002_120_000);
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &DST)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Received(frame, rx_instant));
 
         assert!(runner.is_idle());
@@ -1381,7 +1489,9 @@ mod frame_sync_tests {
         runner.step_timer_expired();
         runner.step_driver_event(DrvSvcEvent::FrameStarted);
         let first_rx = NsInstant::from_ticks(1_002_120_000);
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &DST)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Received(frame, first_rx));
         assert_eq!(runner.drift_ns(), 0);
 
@@ -1389,7 +1499,9 @@ mod frame_sync_tests {
         runner.step_timer_expired();
         runner.step_driver_event(DrvSvcEvent::FrameStarted);
         let second_rx = NsInstant::from_ticks(2_002_120_000 + 30_000);
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &DST)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Received(frame, second_rx));
 
         assert_ne!(runner.drift_ns(), 0);
@@ -1416,7 +1528,9 @@ mod frame_sync_tests {
         runner.step_timer_expired();
         runner.step_driver_event(DrvSvcEvent::FrameStarted);
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &DST)
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Received(
             frame,
             NsInstant::from_ticks(2_102_200_000),
@@ -1428,6 +1542,36 @@ mod frame_sync_tests {
             runner.last_base_time(),
             expected_slot_start(NsInstant::from_ticks(0), 0, 200)
         );
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_device_rx_from_other_neighbor_does_not_sync() {
+        let mut runner = setup_device_runner();
+
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::FrameStarted);
+
+        // A frame from some other neighbor: it feeds the neighbor table but
+        // must not steer the clock.
+        let other = [0x0b; 8];
+        let rx_instant = NsInstant::from_ticks(1_002_120_000 + 30_000);
+        let frame = create_addressed_data_frame(&runner.context.buffer_allocator, &other, &[0x01; 8])
+            .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Received(frame, rx_instant));
+
+        // base_time follows the nominal schedule (update_timing), not the
+        // reception time of the foreign frame.
+        assert_eq!(
+            runner.last_base_time(),
+            expected_slot_start(NsInstant::from_ticks(0), 0, 100)
+        );
+        assert!(runner
+            .context
+            .pib
+            .neighbors
+            .find_ext(&other)
+            .is_some());
         runner.terminate();
     }
 }
@@ -1572,7 +1716,9 @@ mod multi_operation_tests {
         assert!(runner.last_request_is_tx());
 
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1640,7 +1786,9 @@ mod action_type_tests {
         );
 
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1665,7 +1813,9 @@ mod action_type_tests {
             ActionType::WaitForDriverEvent
         );
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1706,7 +1856,9 @@ mod action_type_tests {
             ActionType::WaitForDriverEvent
         );
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Received(
             frame,
             NsInstant::from_ticks(2_002_120_000),
@@ -1725,7 +1877,9 @@ mod action_type_tests {
         runner.step_timer_expired();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1797,7 +1951,9 @@ mod full_cycle_tests {
         assert!(runner.last_request_is_tx());
 
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(3_000_000_000)));
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &[0x01; 8])
+                .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(3_001_000_000),
@@ -1865,8 +2021,6 @@ mod full_cycle_tests {
         runner.terminate();
     }
 }
-
-// ============================================================================
 // Integration Tests: TX Request During Idle
 // ============================================================================
 
@@ -1961,15 +2115,25 @@ mod idle_request_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &[0x01; 8],
+            &COORD_ADDRESS,
+        );
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &[0x01; 8],
+            &COORD_ADDRESS,
+        )
+        .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -1986,15 +2150,25 @@ mod idle_request_tests {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
 
-        let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+        let mpdu = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &[0x01; 8],
+            &COORD_ADDRESS,
+        );
         runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
         runner.step_timer_expired();
 
         let bt_before = runner.last_base_time();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        let frame = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &[0x01; 8],
+            &COORD_ADDRESS,
+        )
+        .into_radio_frame::<FakeDriverConfig>();
         runner.step_driver_event(DrvSvcEvent::Sent(
             frame,
             NsInstant::from_ticks(1_001_000_000),
@@ -2994,31 +3168,6 @@ mod tsch_csma_ca_state_machine_tests {
 #[cfg(test)]
 mod neighbor_stats_tests {
     use super::*;
-
-    /// Like `create_test_data_frame`, but with deterministic extended source
-    /// and destination addresses (little-endian bytes).
-    fn create_addressed_data_frame(
-        allocator: &MacBufferAllocator,
-        src_le: &[u8; 8],
-        dst_le: &[u8; 8],
-    ) -> MpduFrame {
-        let mut mpdu = create_test_mpdu_with_ack(allocator);
-        let mut writer = mpdu.writer().parse_addressing_mut().unwrap();
-        let mut addressing = writer.try_addressing_fields_mut().unwrap();
-        addressing
-            .try_src_address_mut()
-            .unwrap()
-            .try_set(&Address::Extended(ExtendedAddress::new(&src_le[..])))
-            .unwrap();
-        addressing
-            .try_dst_address_mut()
-            .unwrap()
-            .try_set(&Address::Extended(ExtendedAddress::new(&dst_le[..])))
-            .unwrap();
-        drop(addressing);
-        drop(writer);
-        mpdu
-    }
 
     fn skip_beacon(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) {
         runner.step_timer_expired();

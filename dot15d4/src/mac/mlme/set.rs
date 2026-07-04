@@ -39,6 +39,11 @@ pub enum SetRequestAttribute {
     MacAsn(u64, NsInstant),
     #[cfg(feature = "tsch")]
     MacTimeslotTemplate(TschTimeslotTimings),
+    /// The neighbor (extended address, little-endian) this node synchronizes
+    /// to, or `None` to clear it. The neighbor is created in the neighbor
+    /// table if needed and protected from eviction.
+    #[cfg(feature = "tsch")]
+    MacTschTimeSource(Option<[u8; 8]>),
     /// Hopping sequence list used for TSCH channel hopping.
     MacHoppingSequenceList(Vec<Channel, MAC_HOPPING_SEQUENCE_MAX_LENGTH>),
 }

@@ -232,6 +232,11 @@ pub struct TschPib {
     /// synchronizing device, plus beacon period and jitter. Written by the
     /// UseTsch handler before the mode switch, read at TSCH entry.
     pub role: TschRoleConfig,
+    /// The neighbor this node synchronizes to (its parent in the time
+    /// distribution tree). `None` on the time root and before joining.
+    /// Frame- and acknowledgment-based corrections only apply to exchanges
+    /// with this neighbor.
+    pub time_source: Option<NeighborId>,
     /// Slotframe table (macSlotframeTable).
     pub slotframes: Vec<TschSlotframe, MAC_TSCH_MAX_SLOTFRAMES>,
     /// Link table (macLinkTable).
@@ -417,29 +422,6 @@ impl TschPib {
         result
     }
 
-    /// Returns whether the RX link active at `asn` is a time-keeping link,
-    /// i.e. whether its neighbor is a designated time source.
-    ///
-    /// Frame-based synchronization must only steer the local clock from frames
-    /// received on such links; adjusting from an arbitrary RX link lets any
-    /// neighbour drag the node's notion of time. A link is "active at
-    /// `asn`" when its assigned timeslot matches the timeslot `asn` maps to in
-    /// the link's slotframe.
-    pub fn rx_link_is_time_keeping(&self, asn: TschAsn) -> bool {
-        self.links.iter().any(|link| {
-            if !link
-                .link_options
-                .contains(TschLinkOption::Rx | TschLinkOption::TimeKeeping)
-            {
-                return false;
-            }
-            match self.get_slotframe(link.slotframe_handle) {
-                Some(slotframe) => slotframe.timeslot(asn) == link.timeslot,
-                None => false,
-            }
-        })
-    }
-
     /// Calculate the channel for a given ASN and link.
     pub fn channel_for_link(
         &self,
@@ -599,6 +581,7 @@ impl Default for TschPib {
             disconnect_time: MAC_DISCONNECT_TIME,
             join_metric: MAC_JOIN_METRIC,
             role: TschRoleConfig::default(),
+            time_source: None,
             slotframes: Vec::new(),
             links: Vec::new(),
             timeslot_timings: TschTimeslotTimings::default(),

@@ -21,6 +21,7 @@ use dot15d4_util::sync::ResponseToken;
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
+    mac::neighbors::NeighborId,
     scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
 };
 use crate::{
@@ -198,7 +199,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     // Neighbor statistics: the exchange completed, score it on
                     // the destination neighbor (nb failures + this attempt).
                     let mpdu = MpduFrame::from_radio_frame(tx_frame);
-                    self.note_unicast_tx_result(
+                    let dst_id = self.note_unicast_tx_result(
                         &mpdu,
                         true,
                         backoff.nb.saturating_add(1),
@@ -210,15 +211,20 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             .forget_size::<RadioDriverImpl>(),
                         instant,
                     ));
-                    // Acknowledgment-based synchronization. The time root
-                    // never adjusts its own clock, not even from
-                    // acknowledgments.
+                    // Acknowledgment-based synchronization: only from an ACK
+                    // sent by the time source, and never on the time root.
+                    // An ACK from a child must not steer this node's clock.
                     #[cfg(not(feature = "no-tsch-ack-sync"))]
-                    if !self.is_time_root {
+                    if !self.is_time_root
+                        && dst_id.is_some()
+                        && dst_id == context.pib.tsch.time_source
+                    {
                         if let Some(timesync_us) = _timesync_us {
                             context.pib.tsch.sync_ack(timesync_us);
                         }
                     }
+                    #[cfg(feature = "no-tsch-ack-sync")]
+                    let _ = dst_id;
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                 } else {
@@ -277,7 +283,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             // the destination neighbor with the no-ack penalty.
             let now = noack_instant.unwrap_or_else(|| context.timer.now());
             let mpdu = MpduFrame::from_radio_frame(tx_frame);
-            self.note_unicast_tx_result(&mpdu, false, nb, now, context);
+            let _ = self.note_unicast_tx_result(&mpdu, false, nb, now, context);
             let tx_frame = mpdu.into_radio_frame::<RadioDriverImpl>();
             let result = match noack_instant {
                 Some(instant) => SchedulerTransmissionResult::NoAck(tx_frame, instant),
@@ -368,10 +374,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // routing below both work on this view.
                 let mpdu = MpduFrame::from_radio_frame(rx_frame);
 
-                // Neighbor statistics: attribute the frame to its source
-                // neighbor. Enhanced Beacons also record the advertised join
-                // metric (the IE walk only runs for the rare beacon frames).
-                if let Ok(parsed) = mpdu.reader().parse_addressing() {
+                // Neighbor statistics + source identification: attribute the
+                // frame to its source neighbor (created on first contact).
+                // Enhanced Beacons also record the advertised join metric
+                // (the IE walk only runs for the rare beacon frames).
+                let src_id = if let Ok(parsed) = mpdu.reader().parse_addressing() {
                     let src_id = match parsed.try_addressing_fields() {
                         Ok(addressing) => addressing
                             .try_src_address()
@@ -398,18 +405,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             None => context.pib.neighbors.note_rx(id, rx_instant),
                         }
                     }
-                }
+                    src_id
+                } else {
+                    None
+                };
 
-                // Frame-based synchronization
+                // Frame-based synchronization: only steer the local clock
+                // from frames sent by the designated time source, never from
+                // arbitrary neighbors, and never on the time root.
                 #[cfg(not(feature = "no-tsch-frame-sync"))]
-                if !self.is_time_root {
+                if !self.is_time_root
+                    && src_id.is_some()
+                    && src_id == context.pib.tsch.time_source
+                {
                     let asn = context.pib.tsch.asn;
-                    // Only steer the local clock from frames received on a
-                    // time-keeping link (a designated time-source neighbor),
-                    // not from arbitrary RX links.
-                    if context.pib.tsch.rx_link_is_time_keeping(asn) {
-                        context.pib.tsch.sync_asn(asn, rx_instant);
-                    }
+                    context.pib.tsch.sync_asn(asn, rx_instant);
                 }
 
                 match utils::process_rx_frame(mpdu, rx_instant, context) {
@@ -738,16 +748,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         attempts_used: u8,
         now: NsInstant,
         context: &mut SchedulerContext<RadioDriverImpl>,
-    ) {
+    ) -> Option<NeighborId> {
         let reader = mpdu.reader();
         if !reader.frame_control().ack_request() {
-            return;
+            return None;
         }
         let Ok(parsed) = reader.parse_addressing() else {
-            return;
+            return None;
         };
         let Ok(addressing) = parsed.try_addressing_fields() else {
-            return;
+            return None;
         };
         let dst_id = addressing
             .try_dst_address()
@@ -758,6 +768,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 .neighbors
                 .note_tx_result(id, acked, attempts_used, now);
         }
+        dst_id
     }
 
     /// Transition to idle state and wait for the next deadline by configuring

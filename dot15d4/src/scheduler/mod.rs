@@ -255,6 +255,29 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                         self.pib.tsch.timeslot_timings = timings;
                         SetPibResult::Success
                     }
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacTschTimeSource(addr) => match addr {
+                        Some(le_bytes) => {
+                            use dot15d4_driver::radio::frame::ExtendedAddress;
+                            use dot15d4_driver::timer::RadioTimerApi;
+                            let now = self.timer.now();
+                            let address =
+                                Address::Extended(ExtendedAddress::new(&le_bytes[..]));
+                            match self.pib.neighbors.intern(&address, now) {
+                                Some(id) => {
+                                    // The time source must never be evicted.
+                                    self.pib.neighbors.pin(id);
+                                    self.pib.tsch.time_source = Some(id);
+                                    SetPibResult::Success
+                                }
+                                None => SetPibResult::InvalidParameter,
+                            }
+                        }
+                        None => {
+                            self.pib.tsch.time_source = None;
+                            SetPibResult::Success
+                        }
+                    },
                     SetRequestAttribute::MacHoppingSequenceList(seq) => {
 			// TODO: handle Seq Id only
                         if seq.is_empty() {
@@ -287,6 +310,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                     GetRequestAttribute::MacNeighborStats(index) => {
                         GetPibResult::MacNeighborStats(self.pib.neighbors.snapshot_at(index as usize))
                     }
+                    #[cfg(feature = "tsch")]
+                    GetRequestAttribute::MacTimeSourceStats => GetPibResult::MacNeighborStats(
+                        self.pib
+                            .tsch
+                            .time_source
+                            .and_then(|id| self.pib.neighbors.snapshot(id)),
+                    ),
                     _ => GetPibResult::InvalidParameter,
                 };
                 PibCommandResult::Get(get_result)

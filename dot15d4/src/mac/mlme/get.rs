@@ -33,6 +33,11 @@ pub enum GetRequestAttribute {
     /// Statistics of the neighbor table entry at the given index
     /// (`0..MAC_NEIGHBOR_TABLE_SIZE`). Walk the indices to dump the table.
     MacNeighborStats(u8),
+    /// Statistics of the current time source neighbor (answered with
+    /// `MacNeighborStats`), `None` when no time source is set. This is what
+    /// the keep-alive procedure polls.
+    #[cfg(feature = "tsch")]
+    MacTimeSourceStats,
 }
 
 /// MLME-SET.request primitive
