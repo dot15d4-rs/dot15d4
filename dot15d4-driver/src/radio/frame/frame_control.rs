@@ -201,7 +201,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_security_enabled(&mut self, security_enabled: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (security_enabled as u16) << 3;
+        raw = (raw & !(1 << 3)) | ((security_enabled as u16) << 3);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
@@ -209,7 +209,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_frame_pending(&mut self, frame_pending: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (frame_pending as u16) << 4;
+        raw = (raw & !(1 << 4)) | ((frame_pending as u16) << 4);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
@@ -217,7 +217,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_ack_request(&mut self, ack_request: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (ack_request as u16) << 5;
+        raw = (raw & !(1 << 5)) | ((ack_request as u16) << 5);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
@@ -225,7 +225,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_pan_id_compression(&mut self, pan_id_compression: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (pan_id_compression as u16) << 6;
+        raw = (raw & !(1 << 6)) | ((pan_id_compression as u16) << 6);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
@@ -233,7 +233,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_sequence_number_suppression(&mut self, sequence_number_suppression: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (sequence_number_suppression as u16) << 8;
+        raw = (raw & !(1 << 8)) | ((sequence_number_suppression as u16) << 8);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
@@ -241,7 +241,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> FrameControl<Bytes> {
     pub fn set_information_elements_present(&mut self, information_elements_present: bool) {
         let b = &mut self.bytes.as_mut()[..2];
         let mut raw = u16::from_le_bytes([b[0], b[1]]);
-        raw |= (information_elements_present as u16) << 9;
+        raw = (raw & !(1 << 9)) | ((information_elements_present as u16) << 9);
         b.copy_from_slice(&raw.to_le_bytes());
     }
 
