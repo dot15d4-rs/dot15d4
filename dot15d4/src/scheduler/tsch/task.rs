@@ -180,6 +180,8 @@ pub struct BeaconConfig {
     /// The scheduler will find the next advertising link opportunity
     /// that is at least this many seconds from the previous beacon.
     pub period_secs: u32,
+    /// Random `+/-` jitter applied to each period, in milliseconds.
+    pub jitter_ms: u16,
     /// Whether beacon transmission is enabled.
     pub enabled: bool,
 }
@@ -188,6 +190,7 @@ impl Default for BeaconConfig {
     fn default() -> Self {
         Self {
             period_secs: 10,
+            jitter_ms: 0,
             enabled: false,
         }
     }
@@ -197,14 +200,22 @@ impl BeaconConfig {
     pub fn new(period_secs: u32) -> Self {
         Self {
             period_secs,
+            jitter_ms: 0,
             enabled: true,
         }
+    }
+
+    /// Apply a random `+/-` jitter to each period.
+    pub fn with_jitter_ms(mut self, jitter_ms: u16) -> Self {
+        self.jitter_ms = jitter_ms;
+        self
     }
 
     /// Create a disabled beacon configuration.
     pub fn disabled() -> Self {
         Self {
             period_secs: 0,
+            jitter_ms: 0,
             enabled: false,
         }
     }
@@ -255,8 +266,11 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub pending_operations: Vec<TschOperation, MAC_TSCH_MAX_PENDING_OPERATIONS>,
     /// Pre-allocated frame for inbound frames.
     pub rx_frame: Cell<Option<RadioFrame<RadioFrameUnsized>>>,
-    /// Whether this device is coordinator.
-    pub is_coordinator: bool,
+    /// Whether this node is the network time root: the one clock that never
+    /// adjusts itself. Everyone else applies frame- and acknowledgment-based
+    /// corrections toward its time source. Set from the session role at
+    /// entry.
+    pub is_time_root: bool,
     /// Beacon frame (present when beaconing is enabled).
     pub beacon_mpdu: Cell<Option<MpduFrame>>,
     /// Beacon builder.
@@ -279,7 +293,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             state: TschState::Idle,
             pending_operations: Vec::new(),
             rx_frame: Cell::new(Some(rx_frame)),
-            is_coordinator: false,
+            is_time_root: false,
             beacon_mpdu: Cell::new(None),
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
@@ -288,12 +302,27 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
-    /// Initialize as device with observed ASN and timestamp.
-    pub fn init_device(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
-        self.is_coordinator = false;
-        self.beacon_config = BeaconConfig::disabled();
+    /// Initialize the TSCH session from the role stored in the PIB
+    /// (written by the UseTsch handler before the mode switch).
+    ///
+    /// Time root or not, and beaconing or not, are independent: a joined
+    /// forwarding node beacons while still synchronizing to its time source.
+    pub fn init(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
+        let role = context.pib.tsch.role;
+        self.is_time_root = role.is_time_root;
+        self.beacon_config = match role.beacon_period_secs {
+            Some(period_secs) => {
+                BeaconConfig::new(period_secs).with_jitter_ms(role.beacon_jitter_ms)
+            }
+            None => BeaconConfig::disabled(),
+        };
         self.last_beacon_time = None;
         self.state = TschState::Idle;
+
+        if self.beacon_config.enabled {
+            self.init_beacon_frame(context);
+            self.queue_next_beacon(context);
+        }
 
         let current_time = context.timer.now();
         let current_asn = context.pib.tsch.asn_at(current_time);
@@ -696,28 +725,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 // Beacon / advertisement features
 // ========================================================================
 impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
-    /// Initialize as coordinator with network start time and beacon period.
-    pub fn init_coordinator(
-        &mut self,
-        context: &mut SchedulerContext<RadioDriverImpl>,
-        beacon_period_secs: Option<u32>,
-    ) {
-        self.is_coordinator = true;
-        self.beacon_config = if let Some(beacon_period_secs) = beacon_period_secs {
-            BeaconConfig::new(beacon_period_secs)
-        } else {
-            BeaconConfig::disabled()
-        };
-        self.last_beacon_time = None;
-        self.state = TschState::Idle;
-        self.init_beacon_frame(context);
-        self.queue_next_beacon(context);
-
-        let current_time = context.timer.now();
-        let current_asn = context.pib.tsch.asn_at(current_time);
-        self.queue_next_rx(current_asn, context);
-    }
-
     fn init_beacon_frame(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         let radio_frame = context.allocate_frame();
         let beacon_mpdu = self
@@ -729,23 +736,19 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             panic!("Enhanced beacon could not be initialized");
         }
     }
-    /// Set beacon period (coordinator only).
+    /// Set beacon period.
     pub fn set_beacon_period(&mut self, period_secs: u32) {
-        if self.is_coordinator {
-            self.beacon_config.period_secs = period_secs;
-            self.beacon_config.enabled = period_secs > 0;
-        }
+        self.beacon_config.period_secs = period_secs;
+        self.beacon_config.enabled = period_secs > 0;
     }
 
     /// Enable or disable beacon transmission.
     pub fn set_beacon_enabled(&mut self, enabled: bool) {
-        if self.is_coordinator {
-            self.beacon_config.enabled = enabled;
-        }
+        self.beacon_config.enabled = enabled;
     }
     /// Check if beacon should be scheduled based on time elapsed since last beacon.
     pub fn should_schedule_beacon(&self, current_time: NsInstant) -> bool {
-        if !self.is_coordinator || !self.beacon_config.enabled {
+        if !self.beacon_config.enabled {
             return false;
         }
 
@@ -771,7 +774,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn queue_next_beacon(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> bool {
         use dot15d4_driver::timer::RadioTimerApi;
 
-        if !self.is_coordinator || !self.beacon_config.enabled {
+        if !self.beacon_config.enabled {
             return false;
         }
 
@@ -779,7 +782,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
         // Calculate the minimum ASN for the next beacon
         let min_beacon_time = match self.last_beacon_time {
-            Some(last_time) => last_time + NsDuration::from_ticks(self.beacon_config.period_ns()),
+            Some(last_time) => {
+                let mut next =
+                    last_time + NsDuration::from_ticks(self.beacon_config.period_ns());
+                // Random +/- jitter around the period, so nodes with the same
+                // period do not collide repeatedly in shared advertising
+                // cells.
+                let jitter_ns = self.beacon_config.jitter_ms as u64 * 1_000_000;
+                if jitter_ns > 0 && self.beacon_config.period_ns() > jitter_ns {
+                    let span_ms = 2 * self.beacon_config.jitter_ms as u64 + 1;
+                    let offset_ms = context.rng.next_u32() as u64 % span_ms;
+                    next = next - NsDuration::from_ticks(jitter_ns)
+                        + NsDuration::from_ticks(offset_ms * 1_000_000);
+                }
+                next
+            }
             None => current_time, // First beacon can be sent immediately
         };
 

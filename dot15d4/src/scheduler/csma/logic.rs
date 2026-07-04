@@ -505,11 +505,13 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 
         let tsch = &mut context.pib.tsch;
         match cmd {
-            TschCommand::UseTsch(enabled, cca) => {
-                // Record macTschCca (MLME-TSCH-MODE.request). This handler runs
-                // before the mode switch, so it is the one that takes effect for
-                // the upcoming TSCH session.
+            TschCommand::UseTsch { enabled, cca, role } => {
+                // Record macTschCca and the session role (MLME-TSCH-MODE
+                // .request). This handler runs before the mode switch, so it
+                // is the one that takes effect for the upcoming TSCH session:
+                // TSCH entry reads the role from the PIB.
                 tsch.tsch_cca = cca;
+                tsch.role = role;
                 if enabled {
                     self.state = CsmaState::Terminating(SchedulerTaskCompletion::SwitchToTsch);
                     self.tx_token = Some(token);

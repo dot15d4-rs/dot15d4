@@ -57,6 +57,7 @@ pub async fn get_coordinator_extended_address(
 pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender: &MacRequestSender<'static>,
     timer: RadioTimerImpl,
+    role: crate::scheduler::command::tsch::TschRoleConfig,
     timeslot_timings: Option<dot15d4_frame::fields::TschTimeslotTimings>,
     hopping_sequence: Option<
         heapless::Vec<
@@ -153,6 +154,7 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     let mac_request = MacRequest::MlmeTschMode(TschModeRequest {
         tsch_mode: true,
         tsch_cca: false,
+        role,
     });
     request_sender
         .send_request_awaiting_response(request_token, mac_request)
@@ -165,6 +167,7 @@ pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
     request_sender: &MacRequestSender<'static>,
     scan_confirm: ScanConfirm,
     buffer_allocator: MacBufferAllocator,
+    role: crate::scheduler::command::tsch::TschRoleConfig,
 ) -> Option<(u16, [u8; 8])> {
     let mut best_candidate = None;
     for descriptor in scan_confirm.pan_descriptor_list {
@@ -198,7 +201,8 @@ pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
     }
 
     if let Some((_, mpdu_parser, timestamp)) = best_candidate {
-        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator).await
+        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator, role)
+            .await
     } else {
         None
     }
@@ -210,6 +214,7 @@ async fn join_network_from_beacon(
     mpdu_parser: MpduParser<MpduFrame, MpduWithAllFields>,
     rx_timestamp: NsInstant,
     buffer_allocator: MacBufferAllocator,
+    role: crate::scheduler::command::tsch::TschRoleConfig,
 ) -> Option<(u16, [u8; 8])> {
     use super::{
         frame::fields::TschLinkOption,
@@ -357,6 +362,7 @@ async fn join_network_from_beacon(
         let mac_request = MacRequest::MlmeTschMode(TschModeRequest {
             tsch_mode: true,
             tsch_cca: false,
+            role,
         });
         request_sender
             .send_request_awaiting_response(request_token, mac_request)

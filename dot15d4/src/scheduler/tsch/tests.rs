@@ -24,7 +24,7 @@ use dot15d4_util::allocator::IntoBuffer;
 use crate::driver::{DrvSvcEvent, DrvSvcRequest, Timestamp};
 use crate::mac::MacBufferAllocator;
 use crate::scheduler::command::pib::PibCommand;
-use crate::scheduler::command::tsch::TschCommand;
+use crate::scheduler::command::tsch::{TschCommand, TschRoleConfig};
 use crate::scheduler::command::{CsmaCommandResult, UseCsmaResult};
 use crate::scheduler::tests::{
     create_sized_radio_frame, create_test_allocator, create_test_mpdu_with_ack,
@@ -151,13 +151,18 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
             }
         }
         self.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::TschCommand(
-            TschCommand::UseTsch(false, false),
+            TschCommand::UseTsch {
+                enabled: false,
+                cca: false,
+                role: Default::default(),
+            },
         )));
         assert!(self.last_response_is_command());
     }
 
-    /// Initialize and enter as coordinator node.
+    /// Initialize and enter as coordinator node (time root, 9 s beacon).
     pub fn enter_as_coordinator(&mut self) {
+        self.context.pib.tsch.role = TschRoleConfig::time_root(9);
         self.context.pib.tsch.asn = 0;
         self.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
         self.context.pib.tsch.sort_links();
@@ -166,6 +171,7 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
 
     /// Configure PIB for device node and step_entry.
     pub fn enter_as_device(&mut self) {
+        self.context.pib.tsch.role = TschRoleConfig::device();
         self.context.pib.coord_extended_address =
             Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
         self.context.pib.tsch.asn = 0;
@@ -1099,7 +1105,31 @@ mod advertisement_tests {
         runner.enter_as_coordinator();
 
         assert_eq!(runner.pending_operation_count(), 2);
-        assert!(runner.task.is_coordinator);
+        assert!(runner.task.is_time_root);
+        assert!(runner.task.beacon_config.enabled);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_device_with_beacon_role_queues_beacon_but_keeps_syncing() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        // A joined forwarding node: beacons, but is not the time root.
+        runner.context.pib.tsch.role = TschRoleConfig::device().with_beacon(9);
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.context.pib.tsch.sort_links();
+        runner.step_entry();
+
+        // Both an advertisement and an rx slot are queued, like for the
+        // coordinator, but the node still adjusts its clock.
+        assert_eq!(runner.pending_operation_count(), 2);
+        assert!(runner
+            .task
+            .pending_operations
+            .iter()
+            .any(|op| op.is_advertisement()));
+        assert!(!runner.task.is_time_root);
         assert!(runner.task.beacon_config.enabled);
         runner.terminate();
     }
@@ -1318,7 +1348,7 @@ mod frame_sync_tests {
             Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
         runner.context.pib.tsch.asn = 0;
         runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
-        runner.task.init_device(&mut runner.context);
+        runner.task.init(&mut runner.context);
         runner.task.state = TschState::Idle;
         runner
     }
@@ -1392,7 +1422,7 @@ mod frame_sync_tests {
             NsInstant::from_ticks(2_102_200_000),
         ));
 
-        assert!(runner.task.is_coordinator);
+        assert!(runner.task.is_time_root);
         // base_time set by update_timing(200), NOT by sync_asn
         assert_eq!(
             runner.last_base_time(),
@@ -1500,7 +1530,11 @@ mod command_tests {
         runner.enter_as_device();
 
         runner.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::TschCommand(
-            TschCommand::UseTsch(false, false),
+            TschCommand::UseTsch {
+                enabled: false,
+                cca: false,
+                role: Default::default(),
+            },
         )));
 
         assert_eq!(runner.last_action().unwrap(), ActionType::Completed);
@@ -1522,7 +1556,7 @@ mod multi_operation_tests {
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.context.pib.coord_extended_address =
             Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
-        runner.task.init_device(&mut runner.context);
+        runner.task.init(&mut runner.context);
         runner.task.state = TschState::Idle;
 
         assert_eq!(runner.pending_operation_count(), 1); // RX at ASN 100
@@ -1846,7 +1880,7 @@ mod idle_request_tests {
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.context.pib.coord_extended_address =
             Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
-        runner.task.init_device(&mut runner.context);
+        runner.task.init(&mut runner.context);
         runner.task.state = TschState::Idle;
 
         let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
@@ -1874,7 +1908,7 @@ mod idle_request_tests {
         setup_one_link_schedule(&mut runner.context.pib.tsch);
         runner.context.pib.coord_extended_address =
             Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
-        runner.task.init_device(&mut runner.context);
+        runner.task.init(&mut runner.context);
         runner.task.state = TschState::Idle;
 
         let mpdu = create_test_data_frame(&runner.context.buffer_allocator);

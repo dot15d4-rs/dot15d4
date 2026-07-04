@@ -15,6 +15,7 @@ use crate::constants::{
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 use crate::mac::neighbors::NeighborId;
+use crate::scheduler::command::tsch::TschRoleConfig;
 
 /// Type alias for Absolute Slot Number.
 pub type TschAsn = u64;
@@ -227,6 +228,10 @@ pub struct TschPib {
     pub disconnect_time: u16,
     /// Metric used when selecting and joining a TSCH network.
     pub join_metric: u16,
+    /// Role of the current (or upcoming) TSCH session: time root or
+    /// synchronizing device, plus beacon period and jitter. Written by the
+    /// UseTsch handler before the mode switch, read at TSCH entry.
+    pub role: TschRoleConfig,
     /// Slotframe table (macSlotframeTable).
     pub slotframes: Vec<TschSlotframe, MAC_TSCH_MAX_SLOTFRAMES>,
     /// Link table (macLinkTable).
@@ -593,6 +598,7 @@ impl Default for TschPib {
             tsch_cca: false,
             disconnect_time: MAC_DISCONNECT_TIME,
             join_metric: MAC_JOIN_METRIC,
+            role: TschRoleConfig::default(),
             slotframes: Vec::new(),
             links: Vec::new(),
             timeslot_timings: TschTimeslotTimings::default(),

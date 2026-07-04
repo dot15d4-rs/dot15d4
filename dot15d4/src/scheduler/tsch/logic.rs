@@ -81,11 +81,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // order for priority rules.
                 context.pib.tsch.sort_links();
 
-                if context.pib.coord_extended_address.is_broadcast() {
-                    self.init_coordinator(context, Some(9));
-                } else {
-                    self.init_device(context);
-                }
+                self.init(context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
             // Incoming Scheduler Tx/Command Request from upper layer
@@ -214,10 +210,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             .forget_size::<RadioDriverImpl>(),
                         instant,
                     ));
-                    // Acknowledgment-based synchronization
+                    // Acknowledgment-based synchronization. The time root
+                    // never adjusts its own clock, not even from
+                    // acknowledgments.
                     #[cfg(not(feature = "no-tsch-ack-sync"))]
-                    if let Some(timesync_us) = _timesync_us {
-                        context.pib.tsch.sync_ack(timesync_us);
+                    if !self.is_time_root {
+                        if let Some(timesync_us) = _timesync_us {
+                            context.pib.tsch.sync_ack(timesync_us);
+                        }
                     }
                     let action = self.go_idle(context);
                     SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
@@ -402,7 +402,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 // Frame-based synchronization
                 #[cfg(not(feature = "no-tsch-frame-sync"))]
-                if !self.is_coordinator {
+                if !self.is_time_root {
                     let asn = context.pib.tsch.asn;
                     // Only steer the local clock from frames received on a
                     // time-keeping link (a designated time-source neighbor),
@@ -500,7 +500,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         match command {
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(tsch_cmd) => match tsch_cmd {
-                UseTsch(enabled, cca) => {
+                UseTsch { enabled, cca, .. } => {
                     use crate::scheduler::{
                         command::tsch::TschCommandResult::UseTsch, SchedulerTaskCompletion,
                     };

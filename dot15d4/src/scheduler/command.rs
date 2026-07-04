@@ -122,15 +122,79 @@ pub mod pib {
 pub mod tsch {
     use crate::mac::mlme::tsch::{setlink::SetLinkRequest, setslotframe::SetSlotframeRequest};
 
+    /// Role configuration for a TSCH session, carried by the mode switch
+    /// (MLME-TSCH-MODE.request).
+    ///
+    /// The two aspects are independent: in a multi-hop network every
+    /// forwarding node sends Enhanced Beacons, but only one node (the time
+    /// root) never adjusts its own clock.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TschRoleConfig {
+        /// The single node whose clock is the network time origin. It never
+        /// applies frame- or acknowledgment-based corrections. Every other
+        /// node synchronizes to its time source.
+        pub is_time_root: bool,
+        /// Enhanced Beacon transmission period in seconds; `None` disables
+        /// beaconing.
+        pub beacon_period_secs: Option<u32>,
+        /// Random `+/-` jitter applied to each beacon period, in
+        /// milliseconds, so nodes with the same period do not collide
+        /// repeatedly in shared advertising cells.
+        pub beacon_jitter_ms: u16,
+    }
+
+    impl TschRoleConfig {
+        /// The network time origin, advertising with the given beacon period
+        /// (the classic PAN coordinator role).
+        pub fn time_root(beacon_period_secs: u32) -> Self {
+            Self {
+                is_time_root: true,
+                beacon_period_secs: Some(beacon_period_secs),
+                beacon_jitter_ms: 0,
+            }
+        }
+
+        /// A joined device that keeps synchronizing to its time source and
+        /// does not beacon. Enable beaconing with [`Self::with_beacon`] to
+        /// make it a forwarding node.
+        pub fn device() -> Self {
+            Self {
+                is_time_root: false,
+                beacon_period_secs: None,
+                beacon_jitter_ms: 0,
+            }
+        }
+
+        /// Enable Enhanced Beacon transmission with the given period.
+        pub fn with_beacon(mut self, period_secs: u32) -> Self {
+            self.beacon_period_secs = Some(period_secs);
+            self
+        }
+
+        /// Apply a random `+/-` jitter to each beacon period.
+        pub fn with_beacon_jitter_ms(mut self, jitter_ms: u16) -> Self {
+            self.beacon_jitter_ms = jitter_ms;
+            self
+        }
+    }
+
+    impl Default for TschRoleConfig {
+        fn default() -> Self {
+            Self::device()
+        }
+    }
+
     /// TSCH-specific commands.
     pub enum TschCommand {
         /// Enable or disable TSCH mode.
-        UseTsch(
+        UseTsch {
             /// `true` to start TSCH, `false` to stop.
-            bool,
+            enabled: bool,
             /// `true` to use CCA before transmission.
-            bool,
-        ),
+            cca: bool,
+            /// Role for the TSCH session being started.
+            role: TschRoleConfig,
+        },
         /// Configure a TSCH slotframe.
         SetTschSlotframe(SetSlotframeRequest),
         /// Configure a TSCH link within a slotframe.
