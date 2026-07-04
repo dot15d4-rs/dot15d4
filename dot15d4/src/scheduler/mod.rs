@@ -284,6 +284,9 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                     GetRequestAttribute::MacShortAddress => {
                         GetPibResult::MacShortAddress(self.pib.short_address)
                     }
+                    GetRequestAttribute::MacNeighborStats(index) => {
+                        GetPibResult::MacNeighborStats(self.pib.neighbors.snapshot_at(index as usize))
+                    }
                     _ => GetPibResult::InvalidParameter,
                 };
                 PibCommandResult::Get(get_result)

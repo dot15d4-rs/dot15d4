@@ -67,6 +67,7 @@ pub mod pib {
     use dot15d4_driver::radio::frame::Address;
 
     use crate::mac::mlme::{get::GetRequestAttribute, set::SetRequestAttribute};
+    use crate::mac::neighbors::NeighborSnapshot;
 
     /// PIB-related commands for the scheduler.
     pub enum PibCommand {
@@ -93,6 +94,9 @@ pub mod pib {
         MacAssociationPermit(bool),
         MacPanId(u16),
         MacShortAddress(u16),
+        /// Snapshot of the neighbor table entry at the requested index, or
+        /// `None` when that slot is unused.
+        MacNeighborStats(Option<NeighborSnapshot>),
         InvalidParameter,
     }
 

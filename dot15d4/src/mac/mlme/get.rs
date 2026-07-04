@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use dot15d4_driver::radio::{frame::Address, DriverConfig};
 
 use crate::{
+    mac::neighbors::NeighborSnapshot,
     mac::task::{MacTask, MacTaskEvent, MacTaskTransition},
     scheduler::{
         command::pib::{GetPibResult, PibCommand, PibCommandResult},
@@ -29,6 +30,9 @@ pub enum GetRequestAttribute {
     MacShortAddress,
     #[cfg(feature = "tsch")]
     MacAsn,
+    /// Statistics of the neighbor table entry at the given index
+    /// (`0..MAC_NEIGHBOR_TABLE_SIZE`). Walk the indices to dump the table.
+    MacNeighborStats(u8),
 }
 
 /// MLME-SET.request primitive
@@ -49,6 +53,7 @@ pub enum GetConfirm {
     MacAssociationPermit(bool),
     MacPanId(u16),
     MacShortAddress(u16),
+    MacNeighborStats(Option<NeighborSnapshot>),
     InvalidParameter,
 }
 
@@ -105,6 +110,9 @@ impl<RadioDriverImpl: DriverConfig> MacTask for GetRequestTask<'_, RadioDriverIm
                         }
                         GetPibResult::MacPanId(pan_id) => GetConfirm::MacPanId(pan_id),
                         GetPibResult::MacShortAddress(addr) => GetConfirm::MacShortAddress(addr),
+                        GetPibResult::MacNeighborStats(snapshot) => {
+                            GetConfirm::MacNeighborStats(snapshot)
+                        }
                         _ => todo!(),
                     };
                     MacTaskTransition::Terminated(confirm)
