@@ -69,42 +69,21 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
         >,
     >,
 ) {
+    install_minimal_schedule(request_sender).await;
+    tsch_start_pan_configured(request_sender, timer, role, timeslot_timings, hopping_sequence)
+        .await;
+}
+
+#[cfg(feature = "tsch")]
+pub async fn install_minimal_schedule(request_sender: &MacRequestSender<'static>) {
     use crate::scheduler::tsch::TschLinkType;
 
     use super::{
         frame::fields::TschLinkOption,
-        mlme::{
-            set::{SetRequest, SetRequestAttribute},
-            tsch::{
-                setlink::SetLinkRequest, setslotframe::SetSlotframeRequest, TschScheduleOperation,
-            },
+        mlme::tsch::{
+            setlink::SetLinkRequest, setslotframe::SetSlotframeRequest, TschScheduleOperation,
         },
-        primitives::{MacRequest, TschModeRequest},
     };
-
-    // If custom timeslot timings are provided, set them before configuring
-    // the schedule so that the beacon will contain them.
-    if let Some(timings) = timeslot_timings {
-        let request_token = request_sender.allocate_request_token().await;
-        let mac_request = MacRequest::MlmeSet(SetRequest::new(
-            SetRequestAttribute::MacTimeslotTemplate(timings),
-        ));
-        request_sender
-            .send_request_awaiting_response(request_token, mac_request)
-            .await;
-    }
-
-    // If a custom hopping sequence is provided, set it before configuring
-    // the schedule so that the beacon's Channel Hopping IE reflects it.
-    if let Some(seq) = hopping_sequence {
-        let request_token = request_sender.allocate_request_token().await;
-        let mac_request = MacRequest::MlmeSet(SetRequest::new(
-            SetRequestAttribute::MacHoppingSequenceList(seq),
-        ));
-        request_sender
-            .send_request_awaiting_response(request_token, mac_request)
-            .await;
-    }
 
     // We create a single slotframe with handle 0 and size 100
     let request_token = request_sender.allocate_request_token().await;
@@ -137,6 +116,52 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender
         .send_request_awaiting_response(request_token, mac_request)
         .await;
+}
+
+#[cfg(feature = "tsch")]
+pub async fn tsch_start_pan_configured<RadioTimerImpl: RadioTimerApi>(
+    request_sender: &MacRequestSender<'static>,
+    timer: RadioTimerImpl,
+    role: crate::scheduler::command::tsch::TschRoleConfig,
+    timeslot_timings: Option<dot15d4_frame::fields::TschTimeslotTimings>,
+    hopping_sequence: Option<
+        heapless::Vec<
+            Channel,
+            {
+                use crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH;
+                MAC_HOPPING_SEQUENCE_MAX_LENGTH
+            },
+        >,
+    >,
+) {
+    use super::{
+        mlme::set::{SetRequest, SetRequestAttribute},
+        primitives::{MacRequest, TschModeRequest},
+    };
+
+    // If custom timeslot timings are provided, set them before entering TSCH
+    // mode so that the beacon will contain them.
+    if let Some(timings) = timeslot_timings {
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacTimeslotTemplate(timings),
+        ));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+    }
+
+    // If a custom hopping sequence is provided, set it before entering TSCH
+    // mode so that the beacon's Channel Hopping IE reflects it.
+    if let Some(seq) = hopping_sequence {
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacHoppingSequenceList(seq),
+        ));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+    }
 
     // Then, we configure absolute timing (i.e. t0 for ASN 0)
     let start_timestamp = timer.now();
@@ -159,7 +184,7 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender
         .send_request_awaiting_response(request_token, mac_request)
         .await;
-    // info!("TSCH PAN Started");
+    // info!("TSCH PAN Started")
 }
 
 #[cfg(feature = "tsch")]
