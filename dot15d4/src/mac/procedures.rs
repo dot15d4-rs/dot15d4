@@ -355,16 +355,15 @@ async fn join_network_from_beacon(
             }
         }
 
-        // TODO: join metric
-
-        // Finally, we switch to TSCH mode
+        let parent_join_metric = ies
+            .tsch_sync()
+            .map(|tsch_sync| tsch_sync.join_metric() as u16)
+            .unwrap_or(0);
         let request_token = request_sender.allocate_request_token().await;
-        let mac_request = MacRequest::MlmeTschMode(TschModeRequest {
-            tsch_mode: true,
-            tsch_cca: false,
-            role,
-        });
-        request_sender
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacJoinMetric(parent_join_metric.saturating_add(1)),
+        ));
+        let _ = request_sender
             .send_request_awaiting_response(request_token, mac_request)
             .await;
 
@@ -382,16 +381,34 @@ async fn join_network_from_beacon(
         coord_address.copy_from_slice(src_address.as_ref());
 
         unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
-        // info!("Synchronized to TSCH PAN");
 
         let request_token = request_sender.allocate_request_token().await;
         let mac_request = MacRequest::MlmeSet(SetRequest::new(
             SetRequestAttribute::MacCoordExtendedAddress(coord_address),
         ));
-
         let _ = request_sender
             .send_request_awaiting_response(request_token, mac_request)
             .await;
+
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(
+            SetRequestAttribute::MacTschTimeSource(Some(coord_address)),
+        ));
+        let _ = request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+
+        // Finally, we switch to TSCH mode
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeTschMode(TschModeRequest {
+            tsch_mode: true,
+            tsch_cca: false,
+            role,
+        });
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
+        // info!("Synchronized to TSCH PAN");
 
         Some((pan_id, coord_address))
     } else {

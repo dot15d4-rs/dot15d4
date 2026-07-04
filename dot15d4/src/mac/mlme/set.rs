@@ -44,6 +44,10 @@ pub enum SetRequestAttribute {
     /// table if needed and protected from eviction.
     #[cfg(feature = "tsch")]
     MacTschTimeSource(Option<[u8; 8]>),
+    /// The join metric this node advertises in its Enhanced Beacons
+    /// (typically parent metric + 1, so it grows along the chain).
+    #[cfg(feature = "tsch")]
+    MacJoinMetric(u16),
     /// Hopping sequence list used for TSCH channel hopping.
     MacHoppingSequenceList(Vec<Channel, MAC_HOPPING_SEQUENCE_MAX_LENGTH>),
 }

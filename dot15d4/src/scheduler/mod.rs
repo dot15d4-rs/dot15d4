@@ -278,6 +278,11 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                             SetPibResult::Success
                         }
                     },
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacJoinMetric(metric) => {
+                        self.pib.tsch.join_metric = metric;
+                        SetPibResult::Success
+                    }
                     SetRequestAttribute::MacHoppingSequenceList(seq) => {
 			// TODO: handle Seq Id only
                         if seq.is_empty() {
