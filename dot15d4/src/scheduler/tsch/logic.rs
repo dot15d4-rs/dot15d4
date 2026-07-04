@@ -9,7 +9,7 @@ use core::mem;
 
 use dot15d4_driver::{
     radio::{
-        frame::{RadioFrame, RadioFrameSized},
+        frame::{FrameType, RadioFrame, RadioFrameSized},
         DriverConfig,
     },
     timer::{NsDuration, NsInstant, RadioTimerApi},
@@ -199,8 +199,19 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant, _timesync_us)) => {
                 if let Some(response_token) = response_token {
+                    // Neighbor statistics: the exchange completed, score it on
+                    // the destination neighbor (nb failures + this attempt).
+                    let mpdu = MpduFrame::from_radio_frame(tx_frame);
+                    self.note_unicast_tx_result(
+                        &mpdu,
+                        true,
+                        backoff.nb.saturating_add(1),
+                        instant,
+                        context,
+                    );
                     let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
-                        tx_frame.forget_size::<RadioDriverImpl>(),
+                        mpdu.into_radio_frame::<RadioDriverImpl>()
+                            .forget_size::<RadioDriverImpl>(),
                         instant,
                     ));
                     // Acknowledgment-based synchronization
@@ -262,6 +273,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let nb = backoff.nb.saturating_add(1);
 
         if nb > context.pib.max_frame_retries {
+            // Neighbor statistics: the exchange failed for good, score it on
+            // the destination neighbor with the no-ack penalty.
+            let now = noack_instant.unwrap_or_else(|| context.timer.now());
+            let mpdu = MpduFrame::from_radio_frame(tx_frame);
+            self.note_unicast_tx_result(&mpdu, false, nb, now, context);
+            let tx_frame = mpdu.into_radio_frame::<RadioDriverImpl>();
             let result = match noack_instant {
                 Some(instant) => SchedulerTransmissionResult::NoAck(tx_frame, instant),
                 None => SchedulerTransmissionResult::ChannelAccessFailure(tx_frame),
@@ -350,6 +367,38 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // Convert to an MPDU once; the sync decision and the frame
                 // routing below both work on this view.
                 let mpdu = MpduFrame::from_radio_frame(rx_frame);
+
+                // Neighbor statistics: attribute the frame to its source
+                // neighbor. Enhanced Beacons also record the advertised join
+                // metric (the IE walk only runs for the rare beacon frames).
+                if let Ok(parsed) = mpdu.reader().parse_addressing() {
+                    let src_id = match parsed.try_addressing_fields() {
+                        Ok(addressing) => addressing
+                            .try_src_address()
+                            .and_then(|src| context.pib.neighbors.intern(&src, rx_instant)),
+                        Err(_) => None,
+                    };
+                    if let Some(id) = src_id {
+                        let join_metric =
+                            if parsed.frame_control().frame_type() == FrameType::Beacon {
+                                parsed
+                                    .parse_security()
+                                    .parse_ies::<RadioDriverImpl>()
+                                    .ok()
+                                    .and_then(|with_ies| {
+                                        with_ies.ies_fields().tsch_sync().map(|ts| ts.join_metric())
+                                    })
+                            } else {
+                                None
+                            };
+                        match join_metric {
+                            Some(metric) => {
+                                context.pib.neighbors.note_beacon(id, metric, rx_instant)
+                            }
+                            None => context.pib.neighbors.note_rx(id, rx_instant),
+                        }
+                    }
+                }
 
                 // Frame-based synchronization
                 #[cfg(not(feature = "no-tsch-frame-sync"))]
@@ -674,6 +723,41 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.beacon_mpdu
             .set(Some(MpduFrame::from_radio_frame(radio_frame)));
         self.queue_next_beacon(context);
+    }
+
+    /// Score a completed unicast exchange (success or retry exhaustion) on
+    /// the destination neighbor's statistics.
+    ///
+    /// Only frames that requested an acknowledgment and go to a unicast
+    /// destination already present in the neighbor table are scored:
+    /// transmissions never create table entries, reception does.
+    fn note_unicast_tx_result(
+        &self,
+        mpdu: &MpduFrame,
+        acked: bool,
+        attempts_used: u8,
+        now: NsInstant,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) {
+        let reader = mpdu.reader();
+        if !reader.frame_control().ack_request() {
+            return;
+        }
+        let Ok(parsed) = reader.parse_addressing() else {
+            return;
+        };
+        let Ok(addressing) = parsed.try_addressing_fields() else {
+            return;
+        };
+        let dst_id = addressing
+            .try_dst_address()
+            .and_then(|dst| context.pib.neighbors.find(&dst));
+        if let Some(id) = dst_id {
+            context
+                .pib
+                .neighbors
+                .note_tx_result(id, acked, attempts_used, now);
+        }
     }
 
     /// Transition to idle state and wait for the next deadline by configuring

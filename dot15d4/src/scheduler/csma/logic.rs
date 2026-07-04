@@ -121,6 +121,20 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
                 self.state = CsmaState::Listening;
 
                 let mpdu = MpduFrame::from_radio_frame(rx_frame);
+
+                // Neighbor statistics: attribute the frame to its source
+                // neighbor.
+                if let Ok(parsed) = mpdu.reader().parse_addressing() {
+                    if let Ok(addressing) = parsed.try_addressing_fields() {
+                        let src_id = addressing
+                            .try_src_address()
+                            .and_then(|src| context.pib.neighbors.intern(&src, instant));
+                        if let Some(id) = src_id {
+                            context.pib.neighbors.note_rx(id, instant);
+                        }
+                    }
+                }
+
                 match utils::process_rx_frame(mpdu, instant, context) {
                     Ok((response, token)) => {
                         self.rx_frame = Some(context.allocate_frame());

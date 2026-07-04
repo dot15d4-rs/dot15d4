@@ -2952,3 +2952,156 @@ mod tsch_csma_ca_state_machine_tests {
         runner.terminate();
     }
 }
+
+// ============================================================================
+// Integration Tests: Neighbor statistics hooks
+// ============================================================================
+
+#[cfg(test)]
+mod neighbor_stats_tests {
+    use super::*;
+
+    /// Like `create_test_data_frame`, but with deterministic extended source
+    /// and destination addresses (little-endian bytes).
+    fn create_addressed_data_frame(
+        allocator: &MacBufferAllocator,
+        src_le: &[u8; 8],
+        dst_le: &[u8; 8],
+    ) -> MpduFrame {
+        let mut mpdu = create_test_mpdu_with_ack(allocator);
+        let mut writer = mpdu.writer().parse_addressing_mut().unwrap();
+        let mut addressing = writer.try_addressing_fields_mut().unwrap();
+        addressing
+            .try_src_address_mut()
+            .unwrap()
+            .try_set(&Address::Extended(ExtendedAddress::new(&src_le[..])))
+            .unwrap();
+        addressing
+            .try_dst_address_mut()
+            .unwrap()
+            .try_set(&Address::Extended(ExtendedAddress::new(&dst_le[..])))
+            .unwrap();
+        drop(addressing);
+        drop(writer);
+        mpdu
+    }
+
+    fn skip_beacon(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) {
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_test_mpdu_with_ack(&runner.context.buffer_allocator)
+            .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_rx_frame_feeds_neighbor_table() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_coordinator();
+        skip_beacon(&mut runner);
+
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::FrameStarted);
+
+        let src = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let dst = [0xaa; 8];
+        let frame = create_addressed_data_frame(&runner.context.buffer_allocator, &src, &dst)
+            .into_radio_frame::<FakeDriverConfig>();
+        let rx_instant = NsInstant::from_ticks(2_002_120_000);
+        runner.step_driver_event(DrvSvcEvent::Received(frame, rx_instant));
+
+        let id = runner
+            .context
+            .pib
+            .neighbors
+            .find_ext(&src)
+            .expect("the source neighbor must have been created");
+        let neighbor = runner.context.pib.neighbors.get(id).unwrap();
+        assert_eq!(neighbor.rx_count(), 1);
+        assert_eq!(neighbor.last_heard(), rx_instant);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_tx_sent_scores_destination_neighbor() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let src = [0x01; 8];
+        let dst = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        // The destination must already be known: transmissions never create
+        // table entries, receptions do.
+        let dst_id = runner
+            .context
+            .pib
+            .neighbors
+            .intern(
+                &Address::Extended(ExtendedAddress::new(&dst[..])),
+                NsInstant::from_ticks(0),
+            )
+            .unwrap();
+
+        let mpdu = create_addressed_data_frame(&runner.context.buffer_allocator, &src, &dst);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let sent_instant = NsInstant::from_ticks(1_001_000_000);
+        let frame = create_addressed_data_frame(&runner.context.buffer_allocator, &src, &dst)
+            .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Sent(frame, sent_instant, None));
+
+        let neighbor = runner.context.pib.neighbors.get(dst_id).unwrap();
+        assert_eq!(neighbor.tx_acked(), 1);
+        assert_eq!(neighbor.tx_attempts(), 1);
+        assert_eq!(neighbor.etx_q7(), 128, "one attempt, one ack: ETX 1.0");
+        assert_eq!(neighbor.last_sent_ok(), sent_instant);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_tx_without_ack_request_is_not_scored() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let src = [0x01; 8];
+        let dst = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let dst_id = runner
+            .context
+            .pib
+            .neighbors
+            .intern(
+                &Address::Extended(ExtendedAddress::new(&dst[..])),
+                NsInstant::from_ticks(0),
+            )
+            .unwrap();
+
+        let mut mpdu = create_addressed_data_frame(&runner.context.buffer_allocator, &src, &dst);
+        mpdu.writer().set_ack_request(false);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let mut sent_frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &src, &dst);
+        sent_frame.writer().set_ack_request(false);
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            sent_frame.into_radio_frame::<FakeDriverConfig>(),
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+        ));
+
+        let neighbor = runner.context.pib.neighbors.get(dst_id).unwrap();
+        assert_eq!(neighbor.tx_acked(), 0);
+        assert_eq!(neighbor.tx_attempts(), 0);
+        assert_eq!(neighbor.etx_q7(), 0);
+        runner.terminate();
+    }
+}
