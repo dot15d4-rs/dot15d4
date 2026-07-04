@@ -163,11 +163,46 @@ pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
 }
 
 #[cfg(feature = "tsch")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinPolicy {
+    pub parent: Option<[u8; 8]>,
+    pub apply_advertised_schedule: bool,
+}
+
+#[cfg(feature = "tsch")]
+impl Default for JoinPolicy {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            apply_advertised_schedule: true,
+        }
+    }
+}
+
+#[cfg(feature = "tsch")]
 pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
     request_sender: &MacRequestSender<'static>,
     scan_confirm: ScanConfirm,
     buffer_allocator: MacBufferAllocator,
     role: crate::scheduler::command::tsch::TschRoleConfig,
+) -> Option<(u16, [u8; 8])> {
+    join_network_from_scan_with::<RadioDriverImpl>(
+        request_sender,
+        scan_confirm,
+        buffer_allocator,
+        role,
+        JoinPolicy::default(),
+    )
+    .await
+}
+
+#[cfg(feature = "tsch")]
+pub async fn join_network_from_scan_with<RadioDriverImpl: DriverConfig>(
+    request_sender: &MacRequestSender<'static>,
+    scan_confirm: ScanConfirm,
+    buffer_allocator: MacBufferAllocator,
+    role: crate::scheduler::command::tsch::TschRoleConfig,
+    policy: JoinPolicy,
 ) -> Option<(u16, [u8; 8])> {
     let mut best_candidate = None;
     for descriptor in scan_confirm.pan_descriptor_list {
@@ -176,6 +211,19 @@ pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
             Ok(parser) => parser,
             Err(_) => continue,
         };
+        if let Some(wanted) = policy.parent {
+            let is_wanted = match parser.try_addressing_fields() {
+                Ok(addressing) => addressing.try_src_address().is_some_and(|src| match src {
+                    Address::Extended(ext) => ext.as_ref() == wanted,
+                    _ => false,
+                }),
+                Err(_) => false,
+            };
+            if !is_wanted {
+                unsafe { buffer_allocator.deallocate_buffer(parser.into_buffer()) };
+                continue;
+            }
+        }
         let parser = match parser.parse_security().parse_ies::<RadioDriverImpl>() {
             Ok(parser) => parser,
             Err(_) => continue,
@@ -201,8 +249,15 @@ pub async fn join_network_from_scan<RadioDriverImpl: DriverConfig>(
     }
 
     if let Some((_, mpdu_parser, timestamp)) = best_candidate {
-        join_network_from_beacon(request_sender, mpdu_parser, timestamp, buffer_allocator, role)
-            .await
+        join_network_from_beacon(
+            request_sender,
+            mpdu_parser,
+            timestamp,
+            buffer_allocator,
+            role,
+            policy,
+        )
+        .await
     } else {
         None
     }
@@ -215,6 +270,7 @@ async fn join_network_from_beacon(
     rx_timestamp: NsInstant,
     buffer_allocator: MacBufferAllocator,
     role: crate::scheduler::command::tsch::TschRoleConfig,
+    policy: JoinPolicy,
 ) -> Option<(u16, [u8; 8])> {
     use super::{
         frame::fields::TschLinkOption,
@@ -237,7 +293,10 @@ async fn join_network_from_beacon(
 
         use super::primitives::TschModeRequest;
 
-        for slotframe in sf_links_ie.slotframes() {
+        for slotframe in sf_links_ie
+            .slotframes()
+            .filter(|_| policy.apply_advertised_schedule)
+        {
             // We add the slotframe to our schedule
             let request_token = request_sender.allocate_request_token().await;
             let mac_request = MacRequest::MlmeSetSlotframe(SetSlotframeRequest {
