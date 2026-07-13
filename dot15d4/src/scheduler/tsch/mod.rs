@@ -1,6 +1,7 @@
 //! TSCH (Time Slotted Channel Hopping) scheduler module.
 
 pub mod beacon;
+mod log;
 pub mod logic;
 pub mod pib;
 pub mod task;

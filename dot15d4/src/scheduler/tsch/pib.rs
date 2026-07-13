@@ -17,6 +17,8 @@ use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 use crate::mac::neighbors::NeighborId;
 use crate::scheduler::command::tsch::TschRoleConfig;
 
+use super::log::tsch_trace;
+
 /// Type alias for Absolute Slot Number.
 pub type TschAsn = u64;
 
@@ -502,6 +504,12 @@ impl TschPib {
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, timeslot_start);
         self.last_rx = Some((timeslot_start, asn));
+
+        tsch_trace!(
+            "tsch resync src=frame asn={} drift_ns_per_slot={}",
+            asn,
+            self.drift_ns()
+        );
     }
 
     /// Update clock drift relative to timesource with an instant derived from
@@ -543,6 +551,13 @@ impl TschPib {
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.update_drift(asn, self.last_base_time);
         self.last_rx = Some((self.last_base_time, asn));
+
+        tsch_trace!(
+            "tsch resync src=ack asn={} correction_us={} drift_ns_per_slot={}",
+            asn,
+            timesync_us,
+            self.drift_ns()
+        );
     }
 
     /// Get iterator over slotframes.

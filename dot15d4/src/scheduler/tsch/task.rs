@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::beacon::EnhancedBeaconBuilder;
+use super::log::{ch, tsch_debug, tsch_info, tsch_trace, tsch_warn};
 use super::pib::TschAsn;
 
 /// Guard time before a timeslot starts (microseconds).
@@ -329,6 +330,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
         if !self.queue_next_rx(current_asn, context) {
             // TODO: no rx slot available, fallback to CSMA ?
+            tsch_warn!("tsch: no RX link in the schedule; node will never listen");
         }
     }
 
@@ -588,7 +590,19 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         operation: TschOperation,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
+        tsch_debug!(
+            "tsch reschedule asn={} tx={} adv={}",
+            operation.asn().unwrap_or(0),
+            operation.is_tx(),
+            operation.is_advertisement()
+        );
+
         if self.pending_operations.is_full() {
+            tsch_warn!(
+                "tsch queue full: dropping op asn={} tx={}",
+                operation.asn().unwrap_or(0),
+                operation.is_tx()
+            );
             if let TschOperation::TxSlot {
                 mpdu,
                 response_token,
@@ -619,12 +633,20 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
         match self.next_rx_operation(from_asn, context) {
-            Some(op) => match self.push_operation(op) {
-                Ok(None) => true,
-                Ok(Some(op)) => self.reschedule_operation(op, context),
-                Err(op) => self.reschedule_operation(op, context),
-            },
-            None => false,
+            Some(op) => {
+                if let TschOperation::RxSlot { asn, channel, .. } = &op {
+                    tsch_trace!("tsch rx-link asn={} ch={}", *asn, ch(*channel));
+                }
+                match self.push_operation(op) {
+                    Ok(None) => true,
+                    Ok(Some(op)) => self.reschedule_operation(op, context),
+                    Err(op) => self.reschedule_operation(op, context),
+                }
+            }
+            None => {
+                tsch_trace!("tsch rx-link none from-asn={}", from_asn);
+                false
+            }
         }
     }
 
@@ -659,12 +681,37 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
         match self.next_tx_operation(from_asn, mpdu, token, backoff, context) {
-            Ok(op) => match self.push_operation(op) {
-                Ok(None) => true,
-                Ok(Some(op)) => self.reschedule_operation(op, context),
-                Err(op) => self.reschedule_operation(op, context),
-            },
+            Ok(op) => {
+                if let TschOperation::TxSlot {
+                    asn,
+                    slotframe_handle,
+                    channel,
+                    shared,
+                    ..
+                } = &op
+                {
+                    tsch_debug!(
+                        "tsch tx-link asn={} sf={} ch={} shared={} nb={} skip-shared={}",
+                        *asn,
+                        *slotframe_handle,
+                        ch(*channel),
+                        *shared,
+                        backoff.nb,
+                        backoff.backoff_remaining
+                    );
+                }
+                match self.push_operation(op) {
+                    Ok(None) => true,
+                    Ok(Some(op)) => self.reschedule_operation(op, context),
+                    Err(op) => self.reschedule_operation(op, context),
+                }
+            }
             Err((mpdu, token)) => {
+                tsch_info!(
+                    "tsch tx drop from-asn={} nb={} result=channel-access-failure cause=no-tx-link",
+                    from_asn,
+                    backoff.nb
+                );
                 self.fail_tx(mpdu, token, context);
                 false
             }
@@ -807,12 +854,20 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let search_from_asn = core::cmp::max(current_asn, min_asn);
 
         match self.next_advertising_operation(search_from_asn, context) {
-            Some(op) => match self.push_operation(op) {
-                Ok(None) => true,
-                Ok(Some(op)) => self.reschedule_operation(op, context),
-                Err(op) => self.reschedule_operation(op, context),
-            },
-            None => false,
+            Some(op) => {
+                if let TschOperation::AdvertisementSlot { asn, channel, .. } = &op {
+                    tsch_debug!("tsch adv-link asn={} ch={}", *asn, ch(*channel));
+                }
+                match self.push_operation(op) {
+                    Ok(None) => true,
+                    Ok(Some(op)) => self.reschedule_operation(op, context),
+                    Err(op) => self.reschedule_operation(op, context),
+                }
+            }
+            None => {
+                tsch_warn!("tsch adv-link none from-asn={}", search_from_asn);
+                false
+            }
         }
     }
 

@@ -59,6 +59,12 @@ tsch = ["ies"]
 # node may send Enhanced Beacons, not only the PAN coordinator.
 tsch-coordinator = ["tsch"]
 
+# Trace the TSCH state machine: slot scheduling and link selection, CSMA-CA
+# backoff decisions, TX/RX outcomes and resyncs. Needs a logging backend
+# (log/defmt) to produce output; without one, and without this feature, the
+# instrumentation compiles away entirely.
+tsch-log = ["tsch"]
+
 # Disable Enh-Ack-based synchronization in TSCH network
 no-tsch-ack-sync = []
 
