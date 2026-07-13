@@ -109,6 +109,14 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
         })
     }
 
+    /// Return the ASN of the pending TX operation, if any.
+    pub fn pending_tx_asn(&self) -> Option<TschAsn> {
+        self.task.pending_operations.iter().find_map(|op| match op {
+            TschOperation::TxSlot { asn, .. } => Some(*asn),
+            _ => None,
+        })
+    }
+
     pub fn last_asn(&self) -> TschAsn {
         self.context.pib.tsch.asn
     }
@@ -3157,6 +3165,167 @@ mod tsch_csma_ca_state_machine_tests {
             None,
         ));
         assert_eq!(runner.pending_tx_backoff(), Some((min_be + 1, 1)));
+        runner.terminate();
+    }
+}
+
+#[cfg(test)]
+mod tx_link_destination_tests {
+    use super::*;
+
+    const N1_ADDRESS: [u8; 8] = [0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8];
+    const N2_ADDRESS: [u8; 8] = [0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8];
+    const SRC_ADDRESS: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+    fn intern_neighbor(
+        runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>,
+        addr_le: &[u8; 8],
+    ) -> NeighborId {
+        runner
+            .context
+            .pib
+            .neighbors
+            .intern(
+                &Address::Extended(ExtendedAddress::new(&addr_le[..])),
+                NsInstant::from_ticks(0),
+            )
+            .unwrap()
+    }
+
+    /// Two dedicated TX cells assigned to two different neighbors (timeslots
+    /// 10 and 20) plus one unassigned shared TX cell (timeslot 30), in a
+    /// slotframe of size 100.
+    fn setup_two_neighbor_schedule(pib: &mut TschPib, n1: NeighborId, n2: NeighborId) {
+        assert!(pib.create_slotframe(0, 100).is_ok());
+        for (timeslot, neighbor) in [(10, Some(n1)), (20, Some(n2))] {
+            let link = TschLink {
+                slotframe_handle: 0,
+                timeslot,
+                channel_offset: 0,
+                link_options: TschLinkOption::Tx,
+                link_type: TschLinkType::Normal,
+                neighbor,
+                link_advertise: false,
+            };
+            assert!(pib.add_link(link).is_ok());
+        }
+        let shared = TschLink {
+            slotframe_handle: 0,
+            timeslot: 30,
+            channel_offset: 0,
+            link_options: TschLinkOption::Tx | TschLinkOption::Shared,
+            link_type: TschLinkType::Normal,
+            neighbor: None,
+            link_advertise: false,
+        };
+        assert!(pib.add_link(shared).is_ok());
+    }
+
+    #[test]
+    fn test_unicast_waits_for_link_to_destination() {
+        // A frame to the second neighbor must skip the first neighbor's
+        // earlier dedicated cell (nobody would listen there) and take the
+        // destination's own cell.
+        let mut runner = setup();
+        let n1 = intern_neighbor(&mut runner, &N1_ADDRESS);
+        let n2 = intern_neighbor(&mut runner, &N2_ADDRESS);
+        setup_two_neighbor_schedule(&mut runner.context.pib.tsch, n1, n2);
+        runner.enter_as_device();
+
+        let mpdu = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &SRC_ADDRESS,
+            &N2_ADDRESS,
+        );
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // Timeslot 20, not the earlier timeslot 10 assigned to n1.
+        assert_eq!(runner.pending_tx_asn(), Some(20));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_unresolved_destination_uses_unassigned_links_only() {
+        // A destination that maps to no neighbor table entry (as for a
+        // broadcast) must not borrow another neighbor's dedicated cell; only
+        // links without an assigned neighbor qualify.
+        let mut runner = setup();
+        let n1 = intern_neighbor(&mut runner, &N1_ADDRESS);
+        let n2 = intern_neighbor(&mut runner, &N2_ADDRESS);
+        setup_two_neighbor_schedule(&mut runner.context.pib.tsch, n1, n2);
+        runner.enter_as_device();
+
+        const UNKNOWN: [u8; 8] = [0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8];
+        let mpdu = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &SRC_ADDRESS,
+            &UNKNOWN,
+        );
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+
+        // The unassigned shared cell at timeslot 30.
+        assert_eq!(runner.pending_tx_asn(), Some(30));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_retransmission_never_preempts_into_other_neighbors_cell() {
+        // The dedicated-link preemption of the retransmission wait only
+        // applies to dedicated links to the destination. A retry of a frame
+        // whose destination has no dedicated cell must stay on unassigned
+        // shared cells even when another neighbor's dedicated cell comes
+        // first.
+        let mut runner = setup();
+        let n1 = intern_neighbor(&mut runner, &N1_ADDRESS);
+        let _n2 = intern_neighbor(&mut runner, &N2_ADDRESS);
+        // Only n1 has a dedicated cell (timeslot 10); the shared cell is at
+        // timeslot 30.
+        assert!(runner.context.pib.tsch.create_slotframe(0, 100).is_ok());
+        let dedicated = TschLink {
+            slotframe_handle: 0,
+            timeslot: 10,
+            channel_offset: 0,
+            link_options: TschLinkOption::Tx,
+            link_type: TschLinkType::Normal,
+            neighbor: Some(n1),
+            link_advertise: false,
+        };
+        assert!(runner.context.pib.tsch.add_link(dedicated).is_ok());
+        let shared = TschLink {
+            slotframe_handle: 0,
+            timeslot: 30,
+            channel_offset: 0,
+            link_options: TschLinkOption::Tx | TschLinkOption::Shared,
+            link_type: TschLinkType::Normal,
+            neighbor: None,
+            link_advertise: false,
+        };
+        assert!(runner.context.pib.tsch.add_link(shared).is_ok());
+        runner.enter_as_device();
+
+        // Fresh frame to n2: only the shared cell qualifies (ASN 30).
+        let mpdu = create_addressed_data_frame(
+            &runner.context.buffer_allocator,
+            &SRC_ADDRESS,
+            &N2_ADDRESS,
+        );
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        assert_eq!(runner.pending_tx_asn(), Some(30));
+
+        // First attempt at ASN 30 fails (no ACK): the retry draws a one-slot
+        // shared-link skip (deterministic RNG) and must land on the shared
+        // cell after the skipped one (ASN 230), not on n1's dedicated cell at
+        // ASN 110.
+        runner.step_timer_expired();
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let frame = create_data_radio_frame(&runner.context.buffer_allocator, 20);
+        runner.step_driver_event(DrvSvcEvent::Nack(
+            frame,
+            NsInstant::from_ticks(1_001_000_000),
+            None,
+            None,
+        ));
+        assert_eq!(runner.pending_tx_asn(), Some(230));
         runner.terminate();
     }
 }

@@ -18,6 +18,7 @@ use heapless::Vec;
 
 use crate::{
     constants::MAC_TSCH_MAX_PENDING_OPERATIONS,
+    mac::neighbors::NeighborId,
     scheduler::{
         tsch::TschLinkType, SchedulerContext, SchedulerResponse, SchedulerTransmissionResult,
     },
@@ -25,7 +26,7 @@ use crate::{
 
 use super::beacon::EnhancedBeaconBuilder;
 use super::log::{ch, tsch_debug, tsch_info, tsch_trace, tsch_warn};
-use super::pib::TschAsn;
+use super::pib::{TschAsn, TschLink};
 
 /// Guard time before a timeslot starts (microseconds).
 pub const TIMESLOT_GUARD_TIME_US: u64 = 2000;
@@ -483,8 +484,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         &self,
         current_asn: TschAsn,
         backoff: &TschCsmaBackoff,
+        dst: Option<NeighborId>,
         context: &SchedulerContext<RadioDriverImpl>,
     ) -> Option<(TschAsn, u8, Channel, bool)> {
+        let to_destination = |l: &TschLink| l.neighbor.is_none() || l.neighbor == dst;
         let selected = if backoff.nb > 0 {
             let shared = context.pib.tsch.select_nth_link(
                 current_asn,
@@ -492,11 +495,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 |l| {
                     l.link_options.contains(TschLinkOption::Tx)
                         && l.link_options.contains(TschLinkOption::Shared)
+                        && to_destination(l)
                 },
             );
             let dedicated = context.pib.tsch.select_next_link(current_asn, |l| {
                 l.link_options.contains(TschLinkOption::Tx)
                     && !l.link_options.contains(TschLinkOption::Shared)
+                    && to_destination(l)
             });
             match (shared, dedicated) {
                 // Dedicated link preempts the remaining shared-link wait on a
@@ -513,10 +518,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 (None, None) => None,
             }
         } else {
-            context
-                .pib
-                .tsch
-                .select_next_link(current_asn, |l| l.link_options.contains(TschLinkOption::Tx))
+            context.pib.tsch.select_next_link(current_asn, |l| {
+                l.link_options.contains(TschLinkOption::Tx) && to_destination(l)
+            })
         };
 
         selected.map(|(link, asn)| {
@@ -530,7 +534,25 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         })
     }
 
-    /// Build the TX operation for a frame at the next suitable link.
+    /// Resolve the destination address of a frame to a neighbor table entry.
+    ///
+    /// Returns `None` when the destination does not identify a single
+    /// neighbor: broadcast, absent address, a short address with no known
+    /// mapping, or a device not (yet) in the neighbor table.
+    fn frame_dst_neighbor(
+        mpdu: &MpduFrame,
+        context: &SchedulerContext<RadioDriverImpl>,
+    ) -> Option<NeighborId> {
+        let reader = mpdu.reader();
+        let parsed = reader.parse_addressing().ok()?;
+        let addressing = parsed.try_addressing_fields().ok()?;
+        addressing
+            .try_dst_address()
+            .and_then(|dst| context.pib.neighbors.find(&dst))
+    }
+
+    /// Build the TX operation for a frame at the next suitable link to the
+    /// given destination neighbor.
     ///
     /// Returns the frame and response token unconsumed when no suitable link
     /// exists so that the caller can fail the request properly (dropping a
@@ -541,9 +563,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         mpdu: MpduFrame,
         response_token: ResponseToken,
         backoff: TschCsmaBackoff,
+        dst: Option<NeighborId>,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> Result<TschOperation, (MpduFrame, ResponseToken)> {
-        match self.select_tx_link(current_asn, &backoff, context) {
+        match self.select_tx_link(current_asn, &backoff, dst, context) {
             Some((asn, slotframe_handle, channel, shared)) => Ok(TschOperation::TxSlot {
                 mpdu,
                 asn,
@@ -680,7 +703,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         backoff: TschCsmaBackoff,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
-        match self.next_tx_operation(from_asn, mpdu, token, backoff, context) {
+        let dst = Self::frame_dst_neighbor(&mpdu, context);
+        match self.next_tx_operation(from_asn, mpdu, token, backoff, dst, context) {
             Ok(op) => {
                 if let TschOperation::TxSlot {
                     asn,
