@@ -404,9 +404,21 @@ async fn join_network_from_beacon(
                 let mac_request = MacRequest::MlmeSet(SetRequest::new(
                     SetRequestAttribute::MacTimeslotTemplate(timings),
                 ));
-                request_sender
+                let confirm = request_sender
                     .send_request_awaiting_response(request_token, mac_request)
                     .await;
+                if matches!(
+                    confirm,
+                    super::primitives::MacConfirm::MlmeSet(
+                        super::mlme::set::SetConfirm::InvalidParameter
+                    )
+                ) {
+                    dot15d4_util::warn!(
+                        "Advertised TSCH timeslot template is not supported; not joining this PAN."
+                    );
+                    unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
+                    return None;
+                }
             }
         }
 

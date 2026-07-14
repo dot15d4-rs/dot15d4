@@ -14,7 +14,7 @@ use dot15d4_driver::{
     timer::{NsDuration, NsInstant},
 };
 use dot15d4_frame::{
-    fields::TschLinkOption,
+    fields::{TschLinkOption, TschTimeslotTimings},
     mpdu::MpduFrame,
     repr::{MpduRepr, SeqNrRepr},
     MpduWithIes,
@@ -1691,6 +1691,88 @@ mod command_tests {
 
         assert_eq!(runner.last_action().unwrap(), ActionType::Completed);
         assert!(runner.last_response_is_command());
+    }
+
+    /// Convenience for the timeslot-template tests below.
+    fn set_timeslot_template(
+        runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>,
+        timings: TschTimeslotTimings,
+    ) {
+        runner.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::PibCommand(
+            PibCommand::Set(SetRequestAttribute::MacTimeslotTemplate(timings)),
+        )));
+        assert!(runner.last_response_is_command());
+    }
+
+    #[test]
+    fn test_set_timeslot_template_honors_custom_ie_timings() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mut timings = TschTimeslotTimings::default();
+        timings.set_timeslot_length(15_000);
+        timings.set_tx_offset(3000);
+        timings.set_cca_offset(1234);
+        timings.set_rx_offset(1900);
+        timings.set_ack_wait(800);
+        set_timeslot_template(&mut runner, timings);
+
+        let applied = &runner.context.pib.tsch.timeslot_timings;
+        assert_eq!(applied.timeslot_length(), 15_000);
+        assert_eq!(applied.tx_offset(), 3000);
+        assert_eq!(applied.cca_offset(), 1234);
+        assert_eq!(applied.ack_wait(), 800);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_set_timeslot_template_rejects_too_short_cca() {
+        // CCA needs at least phyCcaDuration (128 us for O-QPSK); a template
+        // asking for less cannot be honored, so the current one is kept.
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mut timings = TschTimeslotTimings::default();
+        timings.set_cca(64);
+        set_timeslot_template(&mut runner, timings);
+
+        assert_eq!(runner.context.pib.tsch.timeslot_timings.cca(), 128);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_set_timeslot_template_rejects_too_short_tx_offset() {
+        // The RMARKER cannot precede a full macUnitBackoffPeriod (320 us for
+        // O-QPSK) of wake-up and CCA, so a shorter TX offset is refused.
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mut timings = TschTimeslotTimings::default();
+        timings.set_tx_offset(200);
+        set_timeslot_template(&mut runner, timings);
+
+        assert_eq!(runner.context.pib.tsch.timeslot_timings.tx_offset(), 2120);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_set_timeslot_template_rejects_too_short_rx_offset() {
+        // The receiver needs at least one aTurnaroundTime (192 us for O-QPSK)
+        // to bring its front end up before listening; a shorter RX offset is
+        // refused.
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_device();
+
+        let mut timings = TschTimeslotTimings::default();
+        timings.set_rx_offset(100);
+        set_timeslot_template(&mut runner, timings);
+
+        assert_eq!(runner.context.pib.tsch.timeslot_timings.rx_offset(), 1020);
+        runner.terminate();
     }
 }
 

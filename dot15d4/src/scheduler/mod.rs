@@ -220,6 +220,20 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
         )
     }
 
+    #[cfg(feature = "tsch")]
+    fn timeslot_template_supported(
+        timings: &crate::mac::frame::fields::TschTimeslotTimings,
+    ) -> bool {
+        use dot15d4_driver::radio::{phy::PhyConfig, PhyOf};
+
+        timings.cca() as u64
+            >= <PhyOf<RadioDriverImpl> as PhyConfig>::PHY_CCA_DURATION.to_micros()
+            && timings.tx_offset() as u64
+                >= <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD.to_micros()
+            && timings.rx_offset() as u64
+                >= <PhyOf<RadioDriverImpl> as PhyConfig>::A_TURNAROUND_TIME.to_micros()
+    }
+
     /// Process a PIB command and return the corresponding scheduler response
     pub fn process_pib_command(&mut self, cmd: PibCommand) -> SchedulerResponse {
         let result = match cmd {
@@ -252,8 +266,19 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                     }
                     #[cfg(feature = "tsch")]
                     SetRequestAttribute::MacTimeslotTemplate(timings) => {
-                        self.pib.tsch.timeslot_timings = timings;
-                        SetPibResult::Success
+                        if Self::timeslot_template_supported(&timings) {
+                            self.pib.tsch.timeslot_timings = timings;
+                            SetPibResult::Success
+                        } else {
+                            // The requested CCA duration or TX/RX offset is
+                            // shorter than this radio can physically honor;
+                            // keep the current template rather than adopt slot
+                            // timing the radio would miss.
+                            dot15d4_util::warn!(
+                                "TSCH timeslot template rejected: CCA duration or TX/RX offset too short for this radio."
+                            );
+                            SetPibResult::InvalidParameter
+                        }
                     }
                     #[cfg(feature = "tsch")]
                     SetRequestAttribute::MacTschTimeSource(addr) => match addr {
