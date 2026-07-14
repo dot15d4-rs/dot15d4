@@ -36,8 +36,9 @@ pub const INFINITE_DEADLINE: NsInstant = NsInstant::from_ticks(u64::MAX);
 
 /// TSCH CSMA-CA retransmission backoff state.
 ///
-/// Tracks the backoff exponent (BE), number of backoffs (NB), and remaining
-/// shared links to skip before retransmission. NB also counts the channel-access
+/// Tracks the backoff exponent (BE), number of backoffs (NB), the number of
+/// shared links left to skip before the next attempt, and whether the frame
+/// has entered the retransmission procedure. NB also counts the channel-access
 /// failures that precede the first missing acknowledgment.
 #[derive(Debug, Clone, Copy)]
 pub struct TschCsmaBackoff {
@@ -47,6 +48,10 @@ pub struct TschCsmaBackoff {
     pub nb: u8,
     /// Number of shared links remaining to skip before retransmission.
     pub backoff_remaining: u16,
+    /// Whether at least one transmission attempt went unacknowledged, i.e.
+    /// the frame has entered the retransmission procedure. Channel-access
+    /// (CCA) failures before that point retry without any backoff.
+    pub retransmitting: bool,
 }
 
 impl TschCsmaBackoff {
@@ -56,6 +61,7 @@ impl TschCsmaBackoff {
             be: min_be,
             nb: 0,
             backoff_remaining: 0,
+            retransmitting: false,
         }
     }
 }

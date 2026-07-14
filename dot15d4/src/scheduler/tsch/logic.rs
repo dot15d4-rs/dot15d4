@@ -330,20 +330,33 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             );
         }
 
-        let (be, backoff_remaining) = if failed_on_shared && !(is_cca_busy && backoff.nb == 0) {
-            // Shared-link retransmission: the delay window comes from the current
-            // BE, which is advanced afterwards for the next round.
-            let window = 1u32 << backoff.be.min(31);
-            let backoff_remaining = (context.rng.next_u32() % window) as u16;
-            let be = backoff
-                .be
-                .saturating_add(1)
-                .min(context.pib.tsch.tsch_max_be);
-            (be, backoff_remaining)
+        let (be, backoff_remaining, retransmitting) = if is_cca_busy && !backoff.retransmitting {
+            // Channel-access failure: the frame has never been on the air, so
+            // this is still the channel-access algorithm, which uses no
+            // backoff. Retry at the next TX link with no delay and BE
+            // unchanged, however many busy channels in a row are seen.
+            (backoff.be, 0, false)
         } else {
-            // First channel-access failure, or a dedicated-link failure: no wait,
-            // BE unchanged.
-            (backoff.be, 0)
+            // Retransmission: entered at the first missing acknowledgment and
+            // re-entered on every subsequent failure. Each round draws a fresh
+            // delay of random(2^BE - 1) shared links; the wait only defers
+            // shared links, a dedicated link to the destination is never
+            // delayed and preempts it. BE is advanced before the draw when the
+            // failed attempt was an unacknowledged transmission in a shared
+            // link; dedicated-link failures and busy channels leave it
+            // unchanged, so the round entering the procedure draws from
+            // macTschMinBe.
+            let be = if backoff.retransmitting && failed_on_shared && !is_cca_busy {
+                backoff
+                    .be
+                    .saturating_add(1)
+                    .min(context.pib.tsch.tsch_max_be)
+            } else {
+                backoff.be
+            };
+            let window = 1u32 << be.min(15);
+            let backoff_remaining = (context.rng.next_u32() % window) as u16;
+            (be, backoff_remaining, true)
         };
 
         tsch_debug!(
@@ -359,6 +372,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             be,
             nb,
             backoff_remaining,
+            retransmitting,
         };
         let mpdu = MpduFrame::from_radio_frame(tx_frame);
         let current_asn = context.pib.tsch.asn_at(context.timer.now());
