@@ -29,7 +29,7 @@ pub const DATA_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     .with_addressing(AddressingRepr::new(
         AddressingMode::Extended,
         AddressingMode::Extended,
-        true,
+        false,
         PanIdCompressionRepr::Yes,
     ))
     .without_security();

@@ -891,6 +891,20 @@ impl AddressingRepr {
         Ok(addressing)
     }
 
+    /// Checks whether this addressing representation may be combined with the
+    /// given frame version.
+    pub const fn is_compatible_with_frame_version(&self, frame_version: FrameVersion) -> bool {
+        match self.pan_id_compression {
+            PanIdCompressionRepr::Legacy => matches!(
+                frame_version,
+                FrameVersion::Ieee802154_2003 | FrameVersion::Ieee802154_2006
+            ),
+            PanIdCompressionRepr::Yes | PanIdCompressionRepr::No => {
+                matches!(frame_version, FrameVersion::Ieee802154)
+            }
+        }
+    }
+
     /// Pan ID compression
     pub const fn pan_id_compression(&self) -> bool {
         match self.pan_id_compression {
@@ -1294,6 +1308,76 @@ mod tests {
         check!((0b10, 0b10, 0b00, true) -> Some(AddressingRepr::new(Short, Absent, false, PanIdCompressionRepr::Yes)));
         check!((0b10, 0b00, 0b00, true) -> Some(AddressingRepr::new(Absent, Absent, false, PanIdCompressionRepr::Yes)));
         check!((0b10, 0b00, 0b00, false) -> Some(AddressingRepr::new(Absent, Absent, false, PanIdCompressionRepr::No)));
+    }
+
+    #[test]
+    fn frame_version_compatibility() {
+        use AddressingMode::*;
+
+        let legacy = AddressingRepr::new(Short, Short, true, PanIdCompressionRepr::Legacy);
+        assert!(legacy.is_compatible_with_frame_version(FrameVersion::Ieee802154_2003));
+        assert!(legacy.is_compatible_with_frame_version(FrameVersion::Ieee802154_2006));
+        assert!(!legacy.is_compatible_with_frame_version(FrameVersion::Ieee802154));
+        assert!(!legacy.is_compatible_with_frame_version(FrameVersion::Unknown));
+
+        for compression in [PanIdCompressionRepr::Yes, PanIdCompressionRepr::No] {
+            let modern = AddressingRepr::new(Extended, Extended, false, compression);
+            assert!(!modern.is_compatible_with_frame_version(FrameVersion::Ieee802154_2003));
+            assert!(!modern.is_compatible_with_frame_version(FrameVersion::Ieee802154_2006));
+            assert!(modern.is_compatible_with_frame_version(FrameVersion::Ieee802154));
+            assert!(!modern.is_compatible_with_frame_version(FrameVersion::Unknown));
+        }
+    }
+
+    /// The addressing layout derived from a frame control field must exactly
+    /// reproduce the layout the frame was built with. This is the invariant
+    /// that all addressing field accessors rely on.
+    #[test]
+    fn frame_control_round_trip() {
+        use AddressingMode::*;
+
+        let modes = [Absent, Short, Extended];
+        let versions_and_compressions = [
+            (0b00_u8, PanIdCompressionRepr::Legacy),
+            (0b01_u8, PanIdCompressionRepr::Legacy),
+            (0b10_u8, PanIdCompressionRepr::Yes),
+            (0b10_u8, PanIdCompressionRepr::No),
+        ];
+
+        for (version, compression) in versions_and_compressions {
+            for dst in modes {
+                for src in modes {
+                    for pan_ids_equal in [false, true] {
+                        let repr = AddressingRepr::new(dst, src, pan_ids_equal, compression);
+                        let Ok(built_lengths) = repr.try_addressing_fields_lengths() else {
+                            // Invalid representations cannot be built and thus
+                            // need not round-trip.
+                            continue;
+                        };
+
+                        // Emulate `MpduRepr::into_writer()`: the frame control
+                        // field is populated from the representation.
+                        let bytes =
+                            fc_bytes(version, dst as u8, src as u8, repr.pan_id_compression());
+                        let fc = FrameControl::new(&bytes).unwrap();
+
+                        // Emulate the accessors: the representation is
+                        // re-derived from the frame control field.
+                        let parsed = AddressingRepr::try_from_frame_control(fc).unwrap_or_else(|_| {
+                            panic!(
+                                "built frame must parse: {dst:?}/{src:?}, equal: {pan_ids_equal}, {compression:?}"
+                            )
+                        });
+                        let parsed_lengths = parsed.try_addressing_fields_lengths().unwrap();
+
+                        assert_eq!(
+                            built_lengths, parsed_lengths,
+                            "layout mismatch for {dst:?}/{src:?}, equal: {pan_ids_equal}, {compression:?}, version {version:#04b}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

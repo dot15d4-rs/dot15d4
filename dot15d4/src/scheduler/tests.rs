@@ -16,8 +16,8 @@ use dot15d4_driver::{
     radio::{
         config::Channel,
         frame::{
-            AddressingMode, AddressingRepr, FrameType, FrameVersion, RadioFrame, RadioFrameSized,
-            RadioFrameUnsized,
+            AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
+            RadioFrame, RadioFrameSized, RadioFrameUnsized,
         },
         phy::{OQpsk250KBit, Phy, PhyConfig},
         DriverConfig, FcsTwoBytes,
@@ -845,10 +845,11 @@ pub fn create_test_mpdu_with_ack(allocator: &MacBufferAllocator) -> MpduFrame {
 
     const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
         .with_frame_control(SeqNrRepr::Yes)
-        .with_addressing(AddressingRepr::new_legacy_addressing(
+        .with_addressing(AddressingRepr::new(
             AddressingMode::Extended,
             AddressingMode::Extended,
-            true,
+            false,
+            PanIdCompressionRepr::No,
         ))
         .without_security()
         .without_ies();

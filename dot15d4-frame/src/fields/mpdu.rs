@@ -180,6 +180,34 @@ impl<'repr> MpduRepr<'repr, MpduWithIes> {
         // Note: The buffer may or may not be zeroed.
         buffer: BufferToken,
     ) -> Result<MpduParser<MpduFrame, MpduWithAllFields>, BufferToken> {
+        // Reject reserved frame versions.
+        if matches!(frame_version, FrameVersion::Unknown) {
+            return Err(buffer);
+        }
+
+        // For frame versions 0b00 and 0b01 the Sequence Number Suppression and
+        // IE Present fields shall be zero, see IEEE 802.15.4-2024, sections
+        // 7.2.2.7 and 7.2.2.8.
+        if matches!(
+            frame_version,
+            FrameVersion::Ieee802154_2003 | FrameVersion::Ieee802154_2006
+        ) {
+            if matches!(self.seq_nr, SeqNrRepr::No) {
+                return Err(buffer);
+            }
+
+            #[cfg(feature = "ies")]
+            if !self.ies.is_empty() {
+                return Err(buffer);
+            }
+        }
+
+        if let Some(addressing) = &self.addressing {
+            if !addressing.is_compatible_with_frame_version(frame_version) {
+                return Err(buffer);
+            }
+        }
+
         let mpdu_length_wo_fcs = match self.mpdu_length_wo_fcs(frame_payload_length) {
             Ok(mpdu_length_wo_fcs) => mpdu_length_wo_fcs,
             Err(_) => return Err(buffer),
@@ -498,17 +526,7 @@ impl<ReadOnlyMpdu: AsRef<MpduFrame>, State: MpduParsedUpToAddressing>
         let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
         let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: We checked that we have an addressing range with a non-zero
-        //         length. Addressing representation and range are both synced
-        //         with the frame control field.
-        let addressing_fields = unsafe {
-            AddressingFields::new_unchecked(
-                &self.mpdu.as_ref().buffer[range_addressing],
-                addressing_repr,
-            )
-        };
-
-        Ok(addressing_fields)
+        AddressingFields::try_new(&self.mpdu.as_ref().buffer[range_addressing], addressing_repr)
     }
 }
 
@@ -525,17 +543,10 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAd
         let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
         let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: We checked that we have an addressing range with a non-zero
-        //         length. Addressing representation and range are both synced
-        //         with the frame control field.
-        let addressing_fields = unsafe {
-            AddressingFields::new_unchecked(
-                &mut self.mpdu.as_mut().buffer[range_addressing],
-                addressing_repr,
-            )
-        };
-
-        Ok(addressing_fields)
+        AddressingFields::try_new(
+            &mut self.mpdu.as_mut().buffer[range_addressing],
+            addressing_repr,
+        )
     }
 
     /// Writable addressing field access.
@@ -548,15 +559,11 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>, State: MpduParsedUpToAd
         let range_addressing = self.mpdu_field_ranges.try_range_addressing().unwrap();
         let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control()).unwrap();
 
-        // Safety: We checked that we have an addressing range with a non-zero
-        //         length. Addressing representation and range are both synced
-        //         with the frame control field.
-        unsafe {
-            AddressingFields::new_unchecked(
-                &mut self.mpdu.as_mut().buffer[range_addressing],
-                addressing_repr,
-            )
-        }
+        AddressingFields::try_new(
+            &mut self.mpdu.as_mut().buffer[range_addressing],
+            addressing_repr,
+        )
+        .unwrap()
     }
 }
 
@@ -568,14 +575,7 @@ impl<'mpdu, State: MpduParsedUpToAddressing> MpduParser<&'mpdu MpduFrame, State>
         let range_addressing = self.mpdu_field_ranges.try_range_addressing().ok_or(Error)?;
         let addressing_repr = AddressingRepr::try_from_frame_control(self.frame_control())?;
 
-        // Safety: We checked that we have an addressing range with a non-zero
-        //         length. Addressing representation and range are both synced
-        //         with the frame control field.
-        let addressing_fields = unsafe {
-            AddressingFields::new_unchecked(&self.mpdu.buffer[range_addressing], addressing_repr)
-        };
-
-        Ok(addressing_fields)
+        AddressingFields::try_new(&self.mpdu.buffer[range_addressing], addressing_repr)
     }
 }
 

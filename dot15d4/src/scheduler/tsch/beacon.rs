@@ -55,7 +55,7 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
             .with_addressing(AddressingRepr::new(
                 AddressingMode::Short,
                 AddressingMode::Extended,
-                true,
+                false,
                 PanIdCompressionRepr::Yes,
             ))
             .without_security()

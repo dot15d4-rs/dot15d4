@@ -419,11 +419,14 @@ mod test {
             ConstStaticCell::new([0; MAX_BUFFER_LENGTH]);
         let buffer = BufferToken::new(BUFFER.take());
 
-        // Destination PAN ID present, source PAN ID omitted, extended
-        // addresses (IEEE 802.15.4-2024, sections 10.21.5.1/10.21.5.2 and
-        // Table 7-2).
+        // Both associate command representations must be structurally valid
+        // and consistent with frame version 0b10.
         for repr in [ASSOCIATE_REQUEST_FRAME_REPR, ASSOCIATE_RESPONSE_FRAME_REPR] {
             let addressing = repr.addressing.unwrap();
+            assert!(addressing.is_compatible_with_frame_version(FrameVersion::Ieee802154));
+            // Destination PAN ID present, source PAN ID omitted, extended
+            // addresses (IEEE 802.15.4-2024, sections 10.21.5.1/10.21.5.2 and
+            // Table 7-2).
             assert_eq!(addressing.try_addressing_fields_lengths(), Ok([2, 8, 0, 8]));
         }
 
@@ -488,6 +491,107 @@ mod test {
 
         unsafe {
             mpdu.into_buffer().consume();
+        }
+    }
+
+    /// Frame versions that contradict the PAN ID compression rule set of the
+    /// addressing representation (or other version-dependent frame control
+    /// invariants) must be rejected when building a frame.
+    #[test]
+    fn test_into_writer_rejects_inconsistent_frame_version() {
+        const FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameUnsized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new();
+        const MAX_BUFFER_LENGTH: usize = FRAME_REPR.max_buffer_length() as usize;
+
+        static BUFFER: ConstStaticCell<[u8; MAX_BUFFER_LENGTH]> =
+            ConstStaticCell::new([0; MAX_BUFFER_LENGTH]);
+        let mut buffer = BufferToken::new(BUFFER.take());
+
+        // Legacy PAN ID compression rules combined with frame version 0b10:
+        // this is the combination that previously produced frames whose
+        // buffer layout disagreed with their frame control field.
+        const LEGACY_ADDRESSING: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
+            .with_frame_control(SeqNrRepr::Yes)
+            .with_addressing(AddressingRepr::new_legacy_addressing(
+                AddressingMode::Extended,
+                AddressingMode::Extended,
+                true,
+            ))
+            .without_security()
+            .without_ies();
+        buffer = match LEGACY_ADDRESSING.into_writer::<FakeDriverConfig>(
+            FrameVersion::Ieee802154,
+            FrameType::MacCommand,
+            2,
+            buffer,
+        ) {
+            Err(buffer) => buffer,
+            Ok(_) => panic!("legacy addressing with frame version 0b10 must be rejected"),
+        };
+
+        // IEEE 802.15.4-2015+ PAN ID compression rules combined with a legacy
+        // frame version.
+        const MODERN_ADDRESSING: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
+            .with_frame_control(SeqNrRepr::Yes)
+            .with_addressing(AddressingRepr::new(
+                AddressingMode::Extended,
+                AddressingMode::Extended,
+                false,
+                PanIdCompressionRepr::No,
+            ))
+            .without_security()
+            .without_ies();
+        buffer = match MODERN_ADDRESSING.into_writer::<FakeDriverConfig>(
+            FrameVersion::Ieee802154_2006,
+            FrameType::MacCommand,
+            2,
+            buffer,
+        ) {
+            Err(buffer) => buffer,
+            Ok(_) => panic!("2015+ addressing with a legacy frame version must be rejected"),
+        };
+
+        // Sequence number suppression is only allowed for frame version 0b10
+        // (IEEE 802.15.4-2024, section 7.2.2.7).
+        const SUPPRESSED_SEQ_NR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
+            .with_frame_control(SeqNrRepr::No)
+            .without_addressing()
+            .without_security()
+            .without_ies();
+        buffer = match SUPPRESSED_SEQ_NR.into_writer::<FakeDriverConfig>(
+            FrameVersion::Ieee802154_2006,
+            FrameType::Data,
+            2,
+            buffer,
+        ) {
+            Err(buffer) => buffer,
+            Ok(_) => panic!("sequence number suppression with a legacy frame version must be rejected"),
+        };
+
+        // Reserved frame version.
+        buffer = match MODERN_ADDRESSING.into_writer::<FakeDriverConfig>(
+            FrameVersion::Unknown,
+            FrameType::Data,
+            2,
+            buffer,
+        ) {
+            Err(buffer) => buffer,
+            Ok(_) => panic!("a reserved frame version must be rejected"),
+        };
+
+        // The compatible combination succeeds with the same inputs.
+        let writer = match MODERN_ADDRESSING.into_writer::<FakeDriverConfig>(
+            FrameVersion::Ieee802154,
+            FrameType::MacCommand,
+            2,
+            buffer,
+        ) {
+            Ok(writer) => writer,
+            Err(_) => panic!("the compatible combination must succeed"),
+        };
+
+        unsafe {
+            writer.into_buffer().consume();
         }
     }
 
