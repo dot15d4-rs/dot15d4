@@ -169,7 +169,7 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> ExtendedAddress<Bytes> {
 
     pub fn set_be_bytes<SrcBytes: AsRef<[u8]>>(&mut self, be_bytes: SrcBytes) {
         debug_assert_eq!(be_bytes.as_ref().len(), 8, "invalid");
-        let mut be_bytes = <[u8; 2]>::try_from(be_bytes.as_ref()).expect("invalid");
+        let mut be_bytes = <[u8; 8]>::try_from(be_bytes.as_ref()).expect("invalid");
         be_bytes.reverse();
         self.as_mut().clone_from_slice(be_bytes.as_ref());
     }
@@ -1206,6 +1206,24 @@ mod tests {
         check!((PanIdCompressionRepr::Yes, Extended, Absent, true) -> Some((false, Extended, false, Absent)));
         check!((PanIdCompressionRepr::No, Absent, Absent, false) -> Some((false, Absent, false, Absent)));
         check!((PanIdCompressionRepr::Yes, Absent, Absent, true) -> Some((true, Absent, false, Absent)));
+    }
+
+    #[test]
+    fn set_be_bytes() {
+        let mut short = ShortAddress::new_owned([0, 0]);
+        short.set_be_bytes([0x12, 0x34]);
+        assert_eq!(short.as_ref(), &[0x34, 0x12]);
+        assert_eq!(short.into_be_bytes(), [0x12, 0x34]);
+
+        let mut extended = ExtendedAddress::new_owned([0; 8]);
+        extended.set_be_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(extended.as_ref(), &[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(extended.into_be_bytes(), [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let mut pan_id = PanId::new_owned([0, 0]);
+        pan_id.set_be_bytes([0xbe, 0xef]);
+        assert_eq!(pan_id.as_ref(), &[0xef, 0xbe]);
+        assert_eq!(pan_id.into_be_bytes(), [0xbe, 0xef]);
     }
 
     #[test]
