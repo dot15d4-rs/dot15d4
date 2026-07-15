@@ -826,18 +826,26 @@ impl AddressingRepr {
         Self::new(dst, src, pan_ids_equal, PanIdCompressionRepr::Legacy)
     }
 
-    /// Safety: The frame version and addressing modes must be known.
+    /// Derives the addressing representation of a frame from its frame control
+    /// field.
     pub fn try_from_frame_control<Bytes: AsRef<[u8]>>(
         frame_control: FrameControl<Bytes>,
     ) -> Result<Self> {
         let dst = frame_control.dst_addressing_mode();
         let src = frame_control.src_addressing_mode();
+
+        // Reserved addressing modes (0b01) must not reach
+        // `AddressingRepr::new()` which panics on unknown modes.
+        if matches!(dst, AddressingMode::Unknown) || matches!(src, AddressingMode::Unknown) {
+            return Err(Error);
+        }
+
         let frame_version = frame_control.frame_version();
         let (pan_id_compression, pan_ids_equal) = match frame_version {
             FrameVersion::Ieee802154_2003 | FrameVersion::Ieee802154_2006 => {
                 let pan_id_compression = PanIdCompressionRepr::Legacy;
 
-                // See see IEEE 802.15.4-2024, section 7.2.2.6
+                // See IEEE 802.15.4-2024, section 7.2.2.6:
                 let pan_ids_equal = if !matches!(dst, AddressingMode::Absent)
                     && !matches!(src, AddressingMode::Absent)
                 {
@@ -851,11 +859,9 @@ impl AddressingRepr {
                     //   field and Source PAN ID fields shall be included in the
                     //   transmitted frame.
                     frame_control.pan_id_compression()
+                } else if frame_control.pan_id_compression() {
+                    return Err(Error);
                 } else {
-                    // - If only either the destination or the source addressing
-                    //   information is present, the PAN ID Compression field shall
-                    //   be set to zero, and the PAN ID field of the single address
-                    //   shall be included in the transmitted frame.
                     false
                 };
 
@@ -868,18 +874,13 @@ impl AddressingRepr {
                     PanIdCompressionRepr::No
                 };
 
-                // If both the destination and source addressing information is present
-                // and either is a short address, the MAC sublayer shall compare the
-                // destination and source PAN IDs and the PAN ID Compression field shall
-                // be set to zero if and only if the PAN identifiers are identical,
-                // see IEEE 802.15.4-2024, section 7.2.2.6.
-                let pan_ids_equal = if matches!(dst, AddressingMode::Short)
-                    || matches!(src, AddressingMode::Short)
-                {
-                    matches!(pan_id_compression, PanIdCompressionRepr::Yes)
-                } else {
-                    false
-                };
+                let both_present = !matches!(dst, AddressingMode::Absent)
+                    && !matches!(src, AddressingMode::Absent);
+                let either_short = matches!(dst, AddressingMode::Short)
+                    || matches!(src, AddressingMode::Short);
+                let pan_ids_equal = both_present
+                    && either_short
+                    && matches!(pan_id_compression, PanIdCompressionRepr::No);
 
                 (pan_id_compression, pan_ids_equal)
             }
@@ -1007,6 +1008,12 @@ impl AddressingRepr {
                     // present and the PAN ID compression field is set to 0.
                     (Absent, src @ (Short | Extended), false) => Ok((false, Absent, true, src)),
                     (dst @ (Short | Extended), Absent, false) => Ok((true, dst, false, Absent)),
+
+                    // Frames without any addressing information (e.g. an
+                    // Imm-Ack, see IEEE 802.15.4-2024, section 7.3.3) carry
+                    // neither PAN IDs nor addresses. The PAN ID Compression
+                    // field must be zero in this case.
+                    (Absent, Absent, false) => Ok((false, Absent, false, Absent)),
 
                     // All other cases are invalid.
                     _ => Err(Error),
@@ -1185,7 +1192,9 @@ mod tests {
         check!((PanIdCompressionRepr::Legacy, Absent, Extended, true) -> None);
         check!((PanIdCompressionRepr::Legacy, Short, Absent, true) -> None);
         check!((PanIdCompressionRepr::Legacy, Extended, Absent, true) -> None);
-        check!((PanIdCompressionRepr::Legacy, Absent, Absent, false) -> None);
+        // A legacy frame without any addressing information (e.g. an Imm-Ack)
+        // is valid as long as the PAN ID Compression field is zero.
+        check!((PanIdCompressionRepr::Legacy, Absent, Absent, false) -> Some((false, Absent, false, Absent)));
         check!((PanIdCompressionRepr::Legacy, Absent, Absent, true) -> None);
 
         check!((PanIdCompressionRepr::No, Short, Short, false) -> Some((true, Short, true, Short)));
@@ -1206,6 +1215,85 @@ mod tests {
         check!((PanIdCompressionRepr::Yes, Extended, Absent, true) -> Some((false, Extended, false, Absent)));
         check!((PanIdCompressionRepr::No, Absent, Absent, false) -> Some((false, Absent, false, Absent)));
         check!((PanIdCompressionRepr::Yes, Absent, Absent, true) -> Some((true, Absent, false, Absent)));
+    }
+
+    /// Builds a frame control field from its sub-fields, see
+    /// IEEE 802.15.4-2024, Figure 7-2.
+    fn fc_bytes(
+        frame_version: u8,
+        dst_mode: u8,
+        src_mode: u8,
+        pan_id_compression: bool,
+    ) -> [u8; 2] {
+        let raw: u16 = 0b001 // frame type: data
+            | ((pan_id_compression as u16) << 6)
+            | ((dst_mode as u16 & 0b11) << 10)
+            | ((frame_version as u16 & 0b11) << 12)
+            | ((src_mode as u16 & 0b11) << 14);
+        raw.to_le_bytes()
+    }
+
+    #[test]
+    fn from_frame_control() {
+        use AddressingMode::*;
+
+        macro_rules! check {
+            (($version:literal, $dst:literal, $src:literal, $compression:literal) -> $expected:expr) => {{
+                let bytes = fc_bytes($version, $dst, $src, $compression);
+                let fc = FrameControl::new(&bytes).unwrap();
+                assert_eq!(
+                    AddressingRepr::try_from_frame_control(fc).ok(),
+                    $expected,
+                    "version {:#04b}, dst {:#04b}, src {:#04b}, compression {}",
+                    $version,
+                    $dst,
+                    $src,
+                    $compression
+                );
+            }};
+        }
+
+        // Reserved frame version.
+        check!((0b11, 0b11, 0b11, false) -> None);
+
+        // Reserved addressing modes must be rejected without panicking as
+        // this method is called on unvalidated frames received over the air.
+        check!((0b10, 0b01, 0b11, false) -> None);
+        check!((0b10, 0b11, 0b01, false) -> None);
+        check!((0b01, 0b01, 0b00, false) -> None);
+
+        // Legacy frame versions.
+        //
+        // No addressing information at all, e.g. an Imm-Ack.
+        check!((0b01, 0b00, 0b00, false) -> Some(AddressingRepr::new(Absent, Absent, false, PanIdCompressionRepr::Legacy)));
+        // The PAN ID Compression field shall be zero unless both addresses
+        // are present, see IEEE 802.15.4-2024, section 7.2.2.6.
+        check!((0b01, 0b00, 0b00, true) -> None);
+        check!((0b01, 0b10, 0b00, true) -> None);
+        check!((0b00, 0b00, 0b11, true) -> None);
+        // Single address.
+        check!((0b01, 0b10, 0b00, false) -> Some(AddressingRepr::new(Short, Absent, false, PanIdCompressionRepr::Legacy)));
+        check!((0b00, 0b00, 0b11, false) -> Some(AddressingRepr::new(Absent, Extended, false, PanIdCompressionRepr::Legacy)));
+        // Both addresses: the PAN ID Compression field signals identical PAN
+        // IDs (source PAN ID elided).
+        check!((0b01, 0b10, 0b11, true) -> Some(AddressingRepr::new(Short, Extended, true, PanIdCompressionRepr::Legacy)));
+        check!((0b01, 0b11, 0b11, false) -> Some(AddressingRepr::new(Extended, Extended, false, PanIdCompressionRepr::Legacy)));
+
+        // IEEE 802.15.4-2015 and beyond: the PAN ID Compression field shall be
+        // set to zero if and only if the PAN IDs are identical when both
+        // addresses are present and either is short, see IEEE 802.15.4-2024,
+        // Table 7-2, footnote a.
+        check!((0b10, 0b10, 0b10, false) -> Some(AddressingRepr::new(Short, Short, true, PanIdCompressionRepr::No)));
+        check!((0b10, 0b10, 0b10, true) -> Some(AddressingRepr::new(Short, Short, false, PanIdCompressionRepr::Yes)));
+        check!((0b10, 0b10, 0b11, false) -> Some(AddressingRepr::new(Short, Extended, true, PanIdCompressionRepr::No)));
+        check!((0b10, 0b11, 0b10, true) -> Some(AddressingRepr::new(Extended, Short, false, PanIdCompressionRepr::Yes)));
+        // The footnote does not apply to extended-only or single-address
+        // combinations.
+        check!((0b10, 0b11, 0b11, false) -> Some(AddressingRepr::new(Extended, Extended, false, PanIdCompressionRepr::No)));
+        check!((0b10, 0b11, 0b11, true) -> Some(AddressingRepr::new(Extended, Extended, false, PanIdCompressionRepr::Yes)));
+        check!((0b10, 0b10, 0b00, true) -> Some(AddressingRepr::new(Short, Absent, false, PanIdCompressionRepr::Yes)));
+        check!((0b10, 0b00, 0b00, true) -> Some(AddressingRepr::new(Absent, Absent, false, PanIdCompressionRepr::Yes)));
+        check!((0b10, 0b00, 0b00, false) -> Some(AddressingRepr::new(Absent, Absent, false, PanIdCompressionRepr::No)));
     }
 
     #[test]
