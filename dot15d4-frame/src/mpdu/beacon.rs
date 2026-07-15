@@ -17,16 +17,14 @@ use crate::{
     MpduWithAllFields, MpduWithSecurity,
 };
 
-/// Re-usable part of the structural representation of a beacon MPDU.
-///
-/// Note: IEs have not yet been configured as they may be individual to each
-///       beacon frame.
 pub const BEACON_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
-    .with_frame_control(SeqNrRepr::No)
+    // Sequence number suppression is only allowed for frame version 0b10, see
+    // IEEE 802.15.4-2024, sections 7.2.2.7 and 7.3.1.2.
+    .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(
-        AddressingMode::Short,
         AddressingMode::Absent,
-        true,
+        AddressingMode::Short,
+        false,
         PanIdCompressionRepr::Legacy,
     ))
     .without_security();
@@ -66,7 +64,7 @@ pub fn beacon_frame<'ies, Config: DriverConfig>(
     match beacon_frame_repr.into_writer::<Config>(
         FrameVersion::Ieee802154_2006,
         FrameType::Beacon,
-        0,
+        beacon_payload_length,
         buffer,
     ) {
         Ok(result) => Ok(result),
