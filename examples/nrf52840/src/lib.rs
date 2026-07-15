@@ -26,6 +26,8 @@ use dot15d4::util::rtt::export::set_defmt_channel;
 #[cfg(any(feature = "log", feature = "defmt", feature = "rtos-trace",))]
 use dot15d4::util::rtt::init_rtt_channels;
 
+pub mod rng;
+
 #[cfg(feature = "_gpio-trace")]
 pub mod gpio_trace {
     use dot15d4::driver::socs::nrf::export::pac::Peripherals;
@@ -113,7 +115,7 @@ pub mod gpio_trace {
     #[cfg(feature = "radio-trace")]
     pub const PIN_RADIO_FRAME: GpioteConfig = GpioteConfig::new(RadioFrame, P0, 15, Out);
     #[cfg(feature = "radio-trace")]
-    pub const PIN_RADIO_TRX: GpioteConfig = GpioteConfig::new(RadioTrx, P0, 17, Out);
+    pub const PIN_RADIO_TRX: GpioteConfig = GpioteConfig::new(RadioTrx, P1, 6, Out);
 
     pub(super) fn config_gpiote(peripherals: &Peripherals, config: &GpioteConfig) {
         if matches!(config.direction, In) {

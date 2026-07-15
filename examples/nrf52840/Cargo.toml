@@ -5,17 +5,24 @@ version = "0.0.1"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "embassy-net-udp"
-path = "src/bin/embassy-net/udp.rs"
-required-features = ["embassy-net"]
-
-[[bin]]
 name = "timer-sig"
+path = "src/bin/timer/timer-sig.rs"
 required-features = ["timer-trace"]
 
 [[bin]]
 name = "timer-evt"
+path = "src/bin/timer/timer-evt.rs"
 required-features = ["timer-trace"]
+
+[[bin]]
+name = "timer-toggle"
+path = "src/bin/timer/timer-toggle.rs"
+required-features = ["timer-trace"]
+
+[[bin]]
+name = "tsch-node"
+path = "src/bin/tsch/tsch-node.rs"
+required-features = ["tsch"]
 
 [dependencies]
 cortex-m = { version = "0.7", features = [
@@ -36,50 +43,48 @@ panic-probe = "1.0"
 heapless = "0.8"
 static_cell = "2.1"
 
-# Required by embassy-net examples only:
-dot15d4-embassy = { version = "0.0.1", path = "../../dot15d4-embassy", optional = true }
-embassy-net = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
-    "medium-ieee802154",
-    "udp",
-    "proto-ipv6",
-], optional = true }
-
 defmt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 rtos-trace = { version = "0.2", optional = true }
 rtt-target = { version = "0.6.2", optional = true }
 
 [features]
-default = ["nrf52840", "embassy-net"]
-
-embassy-net = ["dep:dot15d4-embassy", "dep:embassy-net"]
+default = ["nrf52840"]
 
 defmt = [
     "dep:defmt",
     "dep:rtt-target",
     "dot15d4/defmt",
-    "dot15d4-embassy/defmt",
     "embassy-executor/defmt",
-    "embassy-net/defmt",
     "panic-probe/print-defmt",
 ]
-log = ["dep:log", "dep:rtt-target", "dot15d4/log", "dot15d4-embassy/log"]
+log = ["dep:log", "dep:rtt-target", "dot15d4/log"]
+tsch-log = ["dot15d4/tsch-log"]
+sync-error-log = ["dot15d4/sync-error-log", "defmt"]
 
 executor-trace = ["dot15d4/executor-trace", "_gpio-trace"]
 timer-trace = ["dot15d4/timer-trace", "_gpio-trace"]
 radio-trace = ["dot15d4/radio-trace", "_gpio-trace"]
+
+tsch-ramp-trace = []
+
 rtos-trace = [
     "dep:rtos-trace",
     "dep:rtt-target",
     "dep:embassy-nrf",
     "embassy-executor/rtos-trace",
     "dot15d4/rtos-trace",
-    "dot15d4-embassy/rtos-trace",
 ]
+
 _gpio-trace = []
 
 tsch = ["dot15d4/tsch"]
 tsch-coordinator = ["tsch", "dot15d4/tsch-coordinator"]
+
+# Perform the MLME association handshake with the parent after joining a TSCH
+# network (tsch-node example). The parent must accept association requests,
+# i.e. be built with "tsch-coordinator".
+tsch-association = ["tsch"]
 
 # Disable Enh-Ack-based synchronization in TSCH network
 no-tsch-ack-sync = ["dot15d4/no-tsch-ack-sync"]
@@ -115,7 +120,6 @@ nrf52840 = [
     "dep:cortex-m-rt",
     "embassy-executor/arch-cortex-m",
     "dot15d4/nrf52840",
-    "dot15d4-embassy/nrf52840",
 ]
 _clippy-std = ["embassy-executor/arch-std"]
 _clippy-no-std = ["default"]
