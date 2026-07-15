@@ -114,14 +114,13 @@ impl From<u8> for AssociationStatus {
 ///
 /// The device sends this frame to the coordinator with:
 /// - Source: Extended address of the device
-/// - Destination: Short address of the coordinator
 pub const ASSOCIATE_REQUEST_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(
         AddressingMode::Extended,
         AddressingMode::Extended,
-        true,
-        PanIdCompressionRepr::Legacy,
+        false,
+        PanIdCompressionRepr::No,
     ))
     .without_security();
 
@@ -135,8 +134,8 @@ pub const ASSOCIATE_RESPONSE_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr(
     .with_addressing(AddressingRepr::new(
         AddressingMode::Extended,
         AddressingMode::Extended,
-        true,
-        PanIdCompressionRepr::Legacy,
+        false,
+        PanIdCompressionRepr::No,
     ))
     .without_security();
 
@@ -155,7 +154,7 @@ pub fn associate_request_frame<Config: DriverConfig>(
         .try_allocate_buffer(min_buffer_size)
         .unwrap();
     match frame_repr.into_writer::<Config>(
-        FrameVersion::Ieee802154_2006,
+        FrameVersion::Ieee802154,
         FrameType::MacCommand,
         ASSOCIATION_REQUEST_PAYLOAD_LENGTH,
         buffer,
@@ -188,7 +187,7 @@ pub fn associate_response_frame<Config: DriverConfig>(
         .try_allocate_buffer(min_buffer_size)
         .unwrap();
     match frame_repr.into_writer::<Config>(
-        FrameVersion::Ieee802154_2006,
+        FrameVersion::Ieee802154,
         FrameType::MacCommand,
         ASSOCIATION_RESPONSE_PAYLOAD_LENGTH,
         buffer,

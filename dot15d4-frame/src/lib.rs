@@ -404,6 +404,93 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_mac_command_frame_version_0b10_addressing() {
+        use crate::mpdu::{
+            ASSOCIATE_REQUEST_FRAME_REPR, ASSOCIATE_RESPONSE_FRAME_REPR,
+            ASSOCIATION_REQUEST_PAYLOAD_LENGTH,
+        };
+
+        const FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameUnsized> =
+            RadioFrameRepr::<_, RadioFrameUnsized>::new();
+        const MAX_BUFFER_LENGTH: usize = FRAME_REPR.max_buffer_length() as usize;
+
+        static BUFFER: ConstStaticCell<[u8; MAX_BUFFER_LENGTH]> =
+            ConstStaticCell::new([0; MAX_BUFFER_LENGTH]);
+        let buffer = BufferToken::new(BUFFER.take());
+
+        // Destination PAN ID present, source PAN ID omitted, extended
+        // addresses (IEEE 802.15.4-2024, sections 10.21.5.1/10.21.5.2 and
+        // Table 7-2).
+        for repr in [ASSOCIATE_REQUEST_FRAME_REPR, ASSOCIATE_RESPONSE_FRAME_REPR] {
+            let addressing = repr.addressing.unwrap();
+            assert_eq!(addressing.try_addressing_fields_lengths(), Ok([2, 8, 0, 8]));
+        }
+
+        let mut writer = ASSOCIATE_REQUEST_FRAME_REPR
+            .without_ies()
+            .into_writer::<FakeDriverConfig>(
+                FrameVersion::Ieee802154,
+                FrameType::MacCommand,
+                ASSOCIATION_REQUEST_PAYLOAD_LENGTH,
+                buffer,
+            )
+            .unwrap();
+
+        const DEVICE_ADDR: Address<[u8; 8]> =
+            Address::Extended(ExtendedAddress::new_owned([1, 2, 3, 4, 5, 6, 7, 8]));
+        const COORD_ADDR: Address<[u8; 8]> =
+            Address::Extended(ExtendedAddress::new_owned([9, 10, 11, 12, 13, 14, 15, 16]));
+        const PAN_ID: PanId<[u8; 2]> = PanId::new_owned([0xBE, 0xEF]);
+
+        // This is the access pattern that previously panicked.
+        {
+            let mut addressing = writer.addressing_fields_mut();
+            addressing.dst_pan_id_mut().set(&PAN_ID);
+            addressing.dst_address_mut().set(&COORD_ADDR);
+            addressing.src_address_mut().set(&DEVICE_ADDR);
+        }
+        writer.set_sequence_number(7);
+
+        // Verify the frame control field on the wire.
+        let fc = writer.frame_control();
+        assert_eq!(fc.frame_type(), FrameType::MacCommand);
+        assert_eq!(fc.frame_version(), FrameVersion::Ieee802154);
+        assert!(!fc.pan_id_compression());
+        assert_eq!(fc.dst_addressing_mode(), AddressingMode::Extended);
+        assert_eq!(fc.src_addressing_mode(), AddressingMode::Extended);
+
+        // Re-parse the finished frame the way the receive path does and check
+        // that all addressing fields read back consistently.
+        let mpdu = writer.into_mpdu_frame();
+        {
+            let reader = mpdu
+                .reader()
+                .parse_addressing()
+                .unwrap()
+                .parse_security()
+                .parse_ies::<FakeDriverConfig>()
+                .unwrap();
+            let fields = reader.try_addressing_fields().unwrap();
+            assert_eq!(fields.try_dst_pan_id().unwrap().as_ref(), PAN_ID.as_ref());
+            assert!(fields.try_src_pan_id().is_none());
+            assert_eq!(
+                fields.try_dst_address().unwrap().as_le_bytes(),
+                COORD_ADDR.as_le_bytes()
+            );
+            assert_eq!(
+                fields.try_src_address().unwrap().as_le_bytes(),
+                DEVICE_ADDR.as_le_bytes()
+            );
+        }
+
+        assert_eq!(mpdu.sequence_number(), Some(7));
+
+        unsafe {
+            mpdu.into_buffer().consume();
+        }
+    }
+
     fn round_to_alignment(size: usize, alignment: usize) -> usize {
         assert!(alignment > 0 && ((alignment & (alignment - 1)) == 0));
 
