@@ -758,7 +758,7 @@ impl State {
     /// Called exclusively from scheduling context.
     fn rtc_try_acquire_alarm(&self, channel: AlarmChannel) -> Result<(), RadioTimerError> {
         compiler_fence(Ordering::Release);
-        let result = self.alarms[channel as usize].state.compare_exchange_weak(
+        let result = self.alarms[channel as usize].state.compare_exchange(
             AlarmState::Unused as u8,
             AlarmState::Pending as u8,
             Ordering::Relaxed,
@@ -853,7 +853,7 @@ impl State {
         compiler_fence(Ordering::Release);
         self.alarms[channel as usize]
             .state
-            .compare_exchange_weak(
+            .compare_exchange(
                 AlarmState::Fired as u8,
                 AlarmState::Unused as u8,
                 Ordering::Relaxed,
@@ -2021,10 +2021,10 @@ impl TickConversion {
 
     #[inline(always)]
     const fn instant_to_timer_ticks_with_epoch(timer_epoch: NsInstant, instant: NsInstant) -> u32 {
-        debug_assert!(instant.ticks() > timer_epoch.ticks());
-        Self::duration_to_timer_ticks(NsDuration::from_ticks(
-            instant.ticks() - timer_epoch.ticks(),
-        ))
+        match instant.ticks().checked_sub(timer_epoch.ticks()) {
+            Some(delta_ns) => Self::duration_to_timer_ticks(NsDuration::from_ticks(delta_ns)),
+            None => 0,
+        }
     }
 
     #[inline(always)]
@@ -2277,7 +2277,7 @@ impl NrfRadioHighPrecisionTimer {
         // Account for PPI delay, see nRF52840 PS, section 6.16: The timer is
         // synchronized to the 16 MHz clock and runs at 16 MHz, therefore PPI
         // will delay the compare event by one timer tick.
-        timer_ticks - 1
+        timer_ticks.saturating_sub(1)
     }
 }
 
