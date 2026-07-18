@@ -1267,19 +1267,32 @@ where
         }
     }
 
-    /// Schedules rx into a temporary buffer back-to-back while finalizing
-    /// reception of the invalid frame. Then drops the invalid frame. The
-    /// recovered buffer from the dropped frame becomes the new temporary buffer.
-    ///
-    /// If a request was scheduled: Returns the driver in the requested driver
-    /// state together with the corresponding response token.
-    ///
-    /// If the radio was turned off: Returns the driver in the off state and no
-    /// response token.
     async fn drop_invalid_frame(
         &self,
         receiving_rx_driver: impl ReceivingRxState<RadioDriverImpl>,
     ) -> DriverState<RadioDriverImpl> {
+        if self.rx_window_end.get().is_some() {
+            //TODO: continue listening if rx_window allow for another frame
+            //      to be received.
+            self.rx_window_end.set(None);
+            self.expected_rx_framestart.set(None);
+            return match receiving_rx_driver
+                .schedule_off(None.into(), false)
+                .complete_and_transition()
+                .await
+            {
+                CompletedRadioTransition::Entered(radio_transition_result) => {
+                    self.end_rx_window(radio_transition_result, ReceptionType::Frame)
+                        .await
+                }
+                // Safety: The transition task was programmed to not roll back
+                //         on CRC error.
+                CompletedRadioTransition::Rollback(..) => unreachable!(),
+                // Safety: Switching the radio off is infallible.
+                CompletedRadioTransition::Fallback(..) => unreachable!(),
+            };
+        }
+
         // Safety: The temporary rx frame will be recovered by the end of the
         //         procedure.
         let temporary_rx_frame = self.temp_inbound_frame.take().unwrap();
@@ -1384,8 +1397,17 @@ where
 
                         Err(this_state)
                     }
-                    // Safety: The off task doesn't roll back.
-                    CompletedRadioTransition::Rollback(..) => unreachable!(),
+                    CompletedRadioTransition::Rollback(
+                        off_driver,
+                        _radio_task_error,
+                        _prev_task_result,
+                        recovered_tx_task,
+                    ) => {
+                        self.event_sender
+                            .send(DrvSvcEvent::SchedulingFailed(recovered_tx_task.radio_frame))
+                            .await;
+                        Err(off_driver)
+                    }
                 }
             }
             DrvSvcRequest::CompleteThenStartRx(task_rx) => {
@@ -1421,8 +1443,17 @@ where
                         //     .await;
                         Ok(DriverState::WaitingForFrame(this_state))
                     }
-                    // Safety: The off task doesn't roll back.
-                    CompletedRadioTransition::Rollback(..) => unreachable!(),
+                    CompletedRadioTransition::Rollback(
+                        off_driver,
+                        _radio_task_error,
+                        _prev_task_result,
+                        recovered_rx_task,
+                    ) => {
+                        self.event_sender
+                            .send(DrvSvcEvent::RxWindowEnded(recovered_rx_task.radio_frame))
+                            .await;
+                        Err(off_driver)
+                    }
                     // Safety: Scheduling an rx task doesn't fall back.
                     CompletedRadioTransition::Fallback(..) => unreachable!(),
                 }
