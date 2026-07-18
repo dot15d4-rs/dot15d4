@@ -133,6 +133,7 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateRequestTask<'_, RadioDr
                             let coord_address = Address::Extended(ExtendedAddress::new_owned(
                                 request.coord_address,
                             ));
+                            mpdu_parser.set_ack_request(true);
                             let mut addressing = mpdu_parser.addressing_fields_mut();
                             addressing.dst_pan_id_mut().set(&pan_id);
                             addressing.src_address_mut().set(&extended_src_addr);
@@ -372,6 +373,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
         let mut response_parser =
             associate_response_frame::<RadioDriverImpl>(buffer_allocator, assigned_short_address)
                 .ok()?;
+        response_parser.set_ack_request(true);
         let mut addressing = response_parser.addressing_fields_mut();
         addressing
             .dst_pan_id_mut()
