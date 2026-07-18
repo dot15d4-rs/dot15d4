@@ -7,12 +7,17 @@ use core::{cell::Cell, marker::PhantomData};
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{RadioFrame, RadioFrameUnsized},
+        frame::{
+            Address, ExtendedAddress, FrameType, FrameVersion, RadioFrame, RadioFrameUnsized,
+        },
         DriverConfig,
     },
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
-use dot15d4_frame::{fields::TschLinkOption, mpdu::MpduFrame};
+use dot15d4_frame::{
+    fields::TschLinkOption,
+    mpdu::{MpduFrame, DATA_FRAME_REPR},
+};
 use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 use heapless::Vec;
 
@@ -66,6 +71,29 @@ impl TschCsmaBackoff {
     }
 }
 
+/// Who a transmission belongs to, and therefore what happens with its
+/// outcome.
+///
+/// A MAC-originated frame carries the response token that returns the frame
+/// and the result to the upper layer. Beacons and keep-alives are generated
+/// inside the scheduler: nobody upstream waits for them, so their outcome is
+/// consumed internally (the beacon buffer is recycled, the keep-alive buffer
+/// is released).
+///
+/// [`TschOperation::TxSlot`] only ever carries `Mac` or `KeepAlive`; beacons
+/// travel as [`TschOperation::AdvertisementSlot`] and take the `Beacon`
+/// origin when they enter the TX states.
+#[derive(Debug)]
+pub enum TxOrigin {
+    /// Frame submitted by the MAC layer on behalf of an upper layer.
+    Mac(ResponseToken),
+    /// Scheduler-internal Enhanced Beacon.
+    Beacon,
+    /// Scheduler-internal keep-alive frame toward the time source
+    /// (IEEE 802.15.4-2024, 10.3.10.8).
+    KeepAlive,
+}
+
 /// TSCH operation to be executed during a timeslot.
 #[derive(Debug)]
 pub enum TschOperation {
@@ -80,7 +108,7 @@ pub enum TschOperation {
         shared: bool,
         /// TSCH CSMA-CA backoff state for retransmissions on shared links.
         backoff: TschCsmaBackoff,
-        response_token: ResponseToken,
+        origin: TxOrigin,
     },
     /// Reception slot.
     RxSlot {
@@ -137,6 +165,17 @@ impl TschOperation {
     pub fn is_advertisement(&self) -> bool {
         matches!(self, TschOperation::AdvertisementSlot { .. })
     }
+
+    /// Check if this is a scheduler-internal keep-alive transmission.
+    pub fn is_keep_alive(&self) -> bool {
+        matches!(
+            self,
+            TschOperation::TxSlot {
+                origin: TxOrigin::KeepAlive,
+                ..
+            }
+        )
+    }
 }
 
 fn operation_wins_over(new_op: &TschOperation, existing: &TschOperation) -> bool {
@@ -163,13 +202,13 @@ pub enum TschState {
     Idle,
     /// TX slot - driver request sent, waiting for TxStarted.
     WaitingForTxStart {
-        response_token: Option<ResponseToken>,
+        origin: TxOrigin,
         shared: bool,
         backoff: TschCsmaBackoff,
     },
     /// TX slot - TxStarted received, waiting for Sent/Nack.
     Transmitting {
-        response_token: Option<ResponseToken>,
+        origin: TxOrigin,
         shared: bool,
         backoff: TschCsmaBackoff,
     },
@@ -287,6 +326,10 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub beacon_config: BeaconConfig,
     /// Timestamp of last beacon transmission.
     pub last_beacon_time: Option<NsInstant>,
+    /// Instant at which the next keep-alive toward the time source is due.
+    pub next_keep_alive: NsInstant,
+    /// Sequence number of the next keep-alive frame.
+    keep_alive_seq: u8,
     /// Marker for radio driver implementation
     _marker: PhantomData<RadioDriverImpl>,
 }
@@ -306,6 +349,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
             last_beacon_time: None,
+            next_keep_alive: NsInstant::from_ticks(0),
+            keep_alive_seq: 0,
             _marker: PhantomData,
         }
     }
@@ -333,6 +378,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
 
         let current_time = context.timer.now();
+
+        // Arm the keep-alive one period from entry: the node either just
+        // synchronized to a beacon (join) or is the time root (in which case
+        // the deadline is never consulted).
+        self.touch_keep_alive(current_time, context);
+
         let current_asn = context.pib.tsch.asn_at(current_time);
 
         if !self.queue_next_rx(current_asn, context) {
@@ -406,8 +457,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
-    /// Get the deadline of the next pending operation.
+    /// Get the next instant the scheduler has to wake up at: the deadline of
+    /// the next pending operation, advanced to the keep-alive deadline when
+    /// that comes first. Waking at the keep-alive deadline lets the idle
+    /// handler queue the keep-alive transmission even when no operation is
+    /// due (or pending) for a long time.
     pub fn peek_deadline(&self, context: &SchedulerContext<RadioDriverImpl>) -> NsInstant {
+        let op_deadline = self.op_deadline(context);
+        match self.keep_alive_deadline(context) {
+            Some(keep_alive) => op_deadline.min(keep_alive),
+            None => op_deadline,
+        }
+    }
+
+    /// Get the deadline of the next pending operation.
+    pub fn op_deadline(&self, context: &SchedulerContext<RadioDriverImpl>) -> NsInstant {
         let timeslot_length_us = context.pib.tsch.timeslot_length_us();
         match self.pending_operations.last() {
             Some(op) => {
@@ -560,18 +624,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Build the TX operation for a frame at the next suitable link to the
     /// given destination neighbor.
     ///
-    /// Returns the frame and response token unconsumed when no suitable link
-    /// exists so that the caller can fail the request properly (dropping a
-    /// `ResponseToken` is not allowed).
+    /// Returns the frame and origin unconsumed when no suitable link exists
+    /// so that the caller can fail the request properly (a MAC origin
+    /// carries a `ResponseToken`, which must not be dropped).
     pub fn next_tx_operation(
         &self,
         current_asn: TschAsn,
         mpdu: MpduFrame,
-        response_token: ResponseToken,
+        origin: TxOrigin,
         backoff: TschCsmaBackoff,
         dst: Option<NeighborId>,
         context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> Result<TschOperation, (MpduFrame, ResponseToken)> {
+    ) -> Result<TschOperation, (MpduFrame, TxOrigin)> {
         match self.select_tx_link(current_asn, &backoff, dst, context) {
             Some((asn, slotframe_handle, channel, shared)) => Ok(TschOperation::TxSlot {
                 mpdu,
@@ -581,9 +645,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 cca: context.pib.tsch.tsch_cca,
                 shared,
                 backoff,
-                response_token,
+                origin,
             }),
-            None => Err((mpdu, response_token)),
+            None => Err((mpdu, origin)),
         }
     }
 
@@ -632,13 +696,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 operation.asn().unwrap_or(0),
                 operation.is_tx()
             );
-            if let TschOperation::TxSlot {
-                mpdu,
-                response_token,
-                ..
-            } = operation
-            {
-                self.fail_tx(mpdu, response_token, context);
+            if let TschOperation::TxSlot { mpdu, origin, .. } = operation {
+                self.fail_tx(mpdu, origin, context);
             }
             return false;
         }
@@ -647,9 +706,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 mpdu,
                 asn,
                 backoff,
-                response_token,
+                origin,
                 ..
-            } => self.queue_tx_with_backoff(response_token, mpdu, asn, backoff, context),
+            } => self.queue_tx_with_backoff(origin, mpdu, asn, backoff, context),
             TschOperation::RxSlot { asn, .. } => self.queue_next_rx(asn, context),
             TschOperation::AdvertisementSlot { .. } => self.queue_next_beacon(context),
             _ => unreachable!(),
@@ -679,8 +738,8 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
-    /// Queue a fresh transmission, starting the TSCH CSMA-CA state from the
-    /// PIB defaults.
+    /// Queue a fresh MAC-originated transmission, starting the TSCH CSMA-CA
+    /// state from the PIB defaults.
     ///
     /// Returns `true` if the operation was queued. When no suitable link exists
     /// the request is failed immediately and `false` is returned.
@@ -692,25 +751,25 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
         let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
-        self.queue_tx_with_backoff(token, mpdu, from_asn, backoff, context)
+        self.queue_tx_with_backoff(TxOrigin::Mac(token), mpdu, from_asn, backoff, context)
     }
 
     /// Queue a transmission carrying an explicit TSCH CSMA-CA backoff state
     /// (fresh request, retransmission, or displaced operation).
     ///
-    /// When no suitable link exists, the request is failed with
-    /// `ChannelAccessFailure` so that the response token is consumed and the
-    /// frame is returned to the upper layer.
+    /// When no suitable link exists, the transmission is failed through its
+    /// origin: a MAC frame is returned to the upper layer as
+    /// `ChannelAccessFailure`, a keep-alive frame is released.
     pub fn queue_tx_with_backoff(
         &mut self,
-        token: ResponseToken,
+        origin: TxOrigin,
         mpdu: MpduFrame,
         from_asn: TschAsn,
         backoff: TschCsmaBackoff,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
         let dst = Self::frame_dst_neighbor(&mpdu, context);
-        match self.next_tx_operation(from_asn, mpdu, token, backoff, dst, context) {
+        match self.next_tx_operation(from_asn, mpdu, origin, backoff, dst, context) {
             Ok(op) => {
                 if let TschOperation::TxSlot {
                     asn,
@@ -736,49 +795,61 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     Err(op) => self.reschedule_operation(op, context),
                 }
             }
-            Err((mpdu, token)) => {
+            Err((mpdu, origin)) => {
                 tsch_info!(
                     "tsch tx drop from-asn={} nb={} result=channel-access-failure cause=no-tx-link",
                     from_asn,
                     backoff.nb
                 );
-                self.fail_tx(mpdu, token, context);
+                self.fail_tx(mpdu, origin, context);
                 false
             }
         }
     }
 
-    /// Fail a transmission request outside of a state machine transition:
-    /// consume the response token with a `ChannelAccessFailure` carrying the
-    /// frame back to the upper layer.
+    /// Fail a transmission outside of a state machine transition, according
+    /// to its origin: a MAC frame consumes its response token with a
+    /// `ChannelAccessFailure` carrying the frame back to the upper layer; a
+    /// keep-alive frame is simply released (the keep-alive deadline was
+    /// already re-armed when it was queued, so it is retried one period
+    /// later). Beacons never travel as `TxSlot` operations.
     fn fail_tx(
         &self,
         mpdu: MpduFrame,
-        token: ResponseToken,
+        origin: TxOrigin,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) {
-        let frame = mpdu.into_radio_frame::<RadioDriverImpl>();
-        context.request_receiver.received(
-            token,
-            SchedulerResponse::Transmission(SchedulerTransmissionResult::ChannelAccessFailure(
-                frame,
-            )),
-        );
+        match origin {
+            TxOrigin::Mac(token) => {
+                let frame = mpdu.into_radio_frame::<RadioDriverImpl>();
+                context.request_receiver.received(
+                    token,
+                    SchedulerResponse::Transmission(
+                        SchedulerTransmissionResult::ChannelAccessFailure(frame),
+                    ),
+                );
+            }
+            TxOrigin::KeepAlive => {
+                // Safety: the keep-alive frame was allocated from this
+                // allocator by `build_keep_alive_frame`.
+                unsafe {
+                    context
+                        .buffer_allocator
+                        .deallocate_buffer(mpdu.into_buffer())
+                };
+            }
+            TxOrigin::Beacon => unreachable!(),
+        }
     }
 
     /// Terminate TSCH scheduler by releasing resources owned by the scheduler,
-    /// i.e. buffers for beacons and RX frames, and by failing pending TX
-    /// operations so that their response tokens are consumed and the frames
-    /// are returned to the upper layer.
+    /// i.e. buffers for beacons, keep-alives and RX frames, and by failing
+    /// pending MAC TX operations so that their response tokens are consumed
+    /// and the frames are returned to the upper layer.
     pub fn terminate(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
         while let Some(op) = self.pending_operations.pop() {
-            if let TschOperation::TxSlot {
-                mpdu,
-                response_token,
-                ..
-            } = op
-            {
-                self.fail_tx(mpdu, response_token, context);
+            if let TschOperation::TxSlot { mpdu, origin, .. } = op {
+                self.fail_tx(mpdu, origin, context);
             }
         }
         if let Some(radio_frame) = self.take_rx_frame() {
@@ -904,5 +975,114 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Mark beacon as sent and record the time.
     pub fn on_beacon_sent(&mut self, instant: NsInstant) {
         self.last_beacon_time = Some(instant);
+    }
+}
+
+// ========================================================================
+// Time-source keep-alive
+// ========================================================================
+impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
+    /// The keep-alive deadline, or `None` while the mechanism is disarmed
+    /// (no time source designated - time root or not joined - or
+    /// `macKeepAlivePeriod` set to zero).
+    pub fn keep_alive_deadline(
+        &self,
+        context: &SchedulerContext<RadioDriverImpl>,
+    ) -> Option<NsInstant> {
+        (context.pib.tsch.time_source.is_some() && context.pib.tsch.keep_alive_period > 0)
+            .then_some(self.next_keep_alive)
+    }
+
+    /// Re-arm the keep-alive deadline one period after `now`.
+    ///
+    /// Called on TSCH entry, on every synchronizing exchange with the time
+    /// source, and whenever a keep-alive is queued (so a keep-alive whose
+    /// every retransmission failed is retried one period later, not every
+    /// wake-up).
+    pub fn touch_keep_alive(
+        &mut self,
+        now: NsInstant,
+        context: &SchedulerContext<RadioDriverImpl>,
+    ) {
+        let period_us =
+            context.pib.tsch.keep_alive_period as u64 * context.pib.tsch.timeslot_length_us();
+        self.next_keep_alive = now + NsDuration::micros(period_us);
+    }
+
+    /// Queue a keep-alive transmission toward the time source when it is
+    /// due. Called from the idle handler on every timer wake-up.
+    pub fn maybe_queue_keep_alive(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
+        let now = context.timer.now();
+        match self.keep_alive_deadline(context) {
+            Some(deadline) if deadline <= now => {}
+            _ => return,
+        }
+        if self.pending_operations.iter().any(|op| op.is_keep_alive()) {
+            return;
+        }
+
+        // Pace the next keep-alive from now on, whatever becomes of this
+        // one; a synchronizing exchange in the meantime pushes it further.
+        self.touch_keep_alive(now, context);
+
+        let Some(mpdu) = self.build_keep_alive_frame(context) else {
+            // No buffer or no (evicted) time source entry: skip this round
+            // and retry a period later. With the allocator sized per
+            // `MAC_NUM_REQUIRED_BUFFERS` and a pinned time source, this does
+            // not happen.
+            tsch_warn!("tsch keep-alive skipped: no buffer or time source entry");
+            return;
+        };
+
+        tsch_info!(
+            "tsch keep-alive queue asn={} seq={}",
+            context.pib.tsch.asn,
+            self.keep_alive_seq
+        );
+        let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
+        let from_asn = context.pib.tsch.asn_at(now);
+        self.queue_tx_with_backoff(TxOrigin::KeepAlive, mpdu, from_asn, backoff, context);
+    }
+
+    /// Build the keep-alive frame: an empty Data frame to the time source
+    /// with the AR field set (IEEE 802.15.4-2024, 10.3.10.8). 
+    /// Returns `None` when no buffer is available or the time source has 
+    /// no neighbor table entry.
+    fn build_keep_alive_frame(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> Option<MpduFrame> {
+        let time_source = context.pib.tsch.time_source?;
+        let dst = *context.pib.neighbors.get(time_source)?.ext_addr();
+
+        let repr = DATA_FRAME_REPR.without_ies();
+        let size = repr.min_buffer_size::<RadioDriverImpl>(0).ok()?;
+        let buffer = context.buffer_allocator.try_allocate_buffer(size).ok()?;
+        let mut writer = match repr.into_writer::<RadioDriverImpl>(
+            FrameVersion::Ieee802154,
+            FrameType::Data,
+            0,
+            buffer,
+        ) {
+            Ok(writer) => writer,
+            Err(buffer) => {
+                // Safety: this is the buffer we just allocated.
+                unsafe { context.buffer_allocator.deallocate_buffer(buffer) };
+                return None;
+            }
+        };
+
+        self.keep_alive_seq = self.keep_alive_seq.wrapping_add(1);
+        writer.set_sequence_number(self.keep_alive_seq);
+        writer.set_ack_request(true);
+
+        let dst_addr = Address::Extended(ExtendedAddress::new_owned(dst));
+        let mut addressing = writer.addressing_fields_mut();
+        addressing
+            .src_address_mut()
+            .set(&context.pib.extended_address);
+        addressing.dst_address_mut().set(&dst_addr);
+
+        Some(writer.into_mpdu_frame())
     }
 }

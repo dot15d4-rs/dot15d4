@@ -11,8 +11,8 @@ use heapless::Vec;
 
 use crate::constants::{
     MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_DRIFT_BUFFER_LEN,
-    MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS, MAC_TSCH_MAX_BE, MAC_TSCH_MAX_DRIFT_PPM,
-    MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
+    MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS, MAC_TSCH_KEEP_ALIVE_PERIOD, MAC_TSCH_MAX_BE,
+    MAC_TSCH_MAX_DRIFT_PPM, MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 use crate::mac::neighbors::NeighborId;
@@ -243,6 +243,9 @@ pub struct TschPib {
     /// Frame- and acknowledgment-based corrections only apply to exchanges
     /// with this neighbor.
     pub time_source: Option<NeighborId>,
+    /// Keep-alive period in timeslots (macKeepAlivePeriod, IEEE
+    /// 802.15.4-2024, 10.3.10.8). Ignored while no time source is set.
+    pub keep_alive_period: u16,
     /// Slotframe table (macSlotframeTable).
     pub slotframes: Vec<TschSlotframe, MAC_TSCH_MAX_SLOTFRAMES>,
     /// Link table (macLinkTable).
@@ -614,6 +617,7 @@ impl Default for TschPib {
             join_metric: MAC_JOIN_METRIC,
             role: TschRoleConfig::default(),
             time_source: None,
+            keep_alive_period: MAC_TSCH_KEEP_ALIVE_PERIOD,
             slotframes: Vec::new(),
             links: Vec::new(),
             timeslot_timings: TschTimeslotTimings::default(),

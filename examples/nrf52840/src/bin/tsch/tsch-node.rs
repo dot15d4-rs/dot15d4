@@ -43,10 +43,6 @@ static DRIVER_REQUEST_CHANNEL: StaticCell<DriverRequestChannel> = StaticCell::ne
 static DRIVER_EVENT_CHANNEL: StaticCell<DriverEventChannel> = StaticCell::new();
 static MAC_INDICATION_CHANNEL: StaticCell<MacIndicationChannel> = StaticCell::new();
 
-const KEEP_ALIVE_MAX_IDLE: NsDuration = NsDuration::secs(15);
-/// How often the keep-alive condition is checked.
-const KEEP_ALIVE_PERIOD: NsDuration = NsDuration::secs(7);
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     #[cfg(feature = "rtos-trace")]
@@ -108,10 +104,6 @@ async fn main(spawner: Spawner) {
             mac_indication_channel.sender(),
         )
         .unwrap(),
-    );
-    // Periodic time-source keep-alive (a no-op on the time root).
-    spawner.spawn(
-        keep_alive_task(timer, buffer_allocator, mac_request_channel.sender()).unwrap(),
     );
 
     #[cfg(any(feature = "log", feature = "defmt"))]
@@ -191,33 +183,6 @@ async fn driver_service_task(
     );
 
     driver_service.run().await
-}
-
-#[embassy_executor::task]
-async fn keep_alive_task(
-    mut timer: NrfRadioSleepTimer,
-    buffer_allocator: MacBufferAllocator,
-    request_sender: MacRequestSender<'static>,
-) -> ! {
-    use dot15d4::mac::procedures::keep_alive_tick;
-
-    let mut seq_nr: u8 = 0;
-    loop {
-        let wake_at = timer.now() + KEEP_ALIVE_PERIOD;
-        // Safety: this task drives one timer future at a time to completion
-        // and is never migrated to another executor task.
-        unsafe {
-            let _ = timer.wait_until(wake_at).await;
-        }
-        let _ = keep_alive_tick::<NrfRadioDriver, _>(
-            &request_sender,
-            buffer_allocator,
-            timer,
-            KEEP_ALIVE_MAX_IDLE,
-            &mut seq_nr,
-        )
-        .await;
-    }
 }
 
 #[cfg(any(feature = "log", feature = "defmt"))]

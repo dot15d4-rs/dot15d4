@@ -101,13 +101,17 @@ const _: () = {
 /// - tx token
 /// - indication task
 /// - driver service (2 pre-allocated buffers for RX/TX ACKs)
+/// - scheduler keep-alive (one buffer, TSCH only)
 ///
 /// Required buffers:
 /// - one buffer per max outstanding upper layer tx token (= max request tasks)
 /// - one buffer for indication task
 /// - one pre-allocated buffer for outgoing ACKs
 /// - one pre-allocated buffer for incoming ACKs
-pub const MAC_NUM_REQUIRED_BUFFERS: usize = UL_MAX_TX_TOKENS + MAC_NUM_INDICATION_TASKS + 3;
+/// - one buffer for the TSCH keep-alive frame, held from build to
+///   acknowledgment (or retry exhaustion)
+pub const MAC_NUM_REQUIRED_BUFFERS: usize =
+    UL_MAX_TX_TOKENS + MAC_NUM_INDICATION_TASKS + 3 + cfg!(feature = "tsch") as usize;
 // TODO: Make this generic over the radio driver configuration.
 pub const MAC_BUFFER_SIZE: usize =
     <Phy<OQpsk250KBit> as PhyConfig>::PHY_MAX_PACKET_SIZE as usize + MAX_DRIVER_OVERHEAD;

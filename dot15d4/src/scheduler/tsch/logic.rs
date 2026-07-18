@@ -15,7 +15,7 @@ use dot15d4_driver::{
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::sync::ResponseToken;
+use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
@@ -33,7 +33,7 @@ use crate::{
 };
 
 use super::log::{ch, ft, tsch_debug, tsch_info, tsch_trace};
-use super::task::{TschCsmaBackoff, TschOperation, TschState, TschTask};
+use super::task::{TschCsmaBackoff, TschOperation, TschState, TschTask, TxOrigin};
 
 impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<RadioDriverImpl> {
     fn step(
@@ -44,15 +44,15 @@ impl<RadioDriverImpl: DriverConfig> SchedulerTask<RadioDriverImpl> for TschTask<
         match mem::replace(&mut self.state, TschState::Placeholder) {
             TschState::Idle => self.execute_idle(event, context),
             TschState::WaitingForTxStart {
-                response_token,
+                origin,
                 shared,
                 backoff,
-            } => self.execute_waiting_for_tx_start(response_token, shared, backoff, event, context),
+            } => self.execute_waiting_for_tx_start(origin, shared, backoff, event, context),
             TschState::Transmitting {
-                response_token,
+                origin,
                 shared,
                 backoff,
-            } => self.execute_transmitting(response_token, shared, backoff, event, context),
+            } => self.execute_transmitting(origin, shared, backoff, event, context),
             TschState::Listening => self.execute_listening(event, context),
             TschState::Receiving => self.execute_receiving(event, context),
             _ => unreachable!(),
@@ -106,15 +106,32 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     unreachable!()
                 }
             },
-            // Timer expired: time to execute next operation in the upcoming timeslot
-            SchedulerTaskEvent::TimerExpired => match self.pending_operations.last() {
-                Some(TschOperation::TxSlot { .. }) => self.schedule_tx_operation(context),
-                Some(TschOperation::RxSlot { .. }) => self.schedule_rx_operation(context),
-                Some(TschOperation::AdvertisementSlot { .. }) => {
-                    self.schedule_advertisement_operation(context)
+            // Timer expired: queue a due keep-alive first, then execute the
+            // next pending operation. When the wake-up was for the keep-alive
+            // deadline alone (keep-alive due, no operation due yet, the
+            // freshly queued keep-alive included), return to idle instead so
+            // the deadline is re-armed for the keep-alive's own timeslot.
+            SchedulerTaskEvent::TimerExpired => {
+                let now = context.timer.now();
+                let keep_alive_was_due = matches!(
+                    self.keep_alive_deadline(context),
+                    Some(deadline) if deadline <= now
+                );
+                self.maybe_queue_keep_alive(context);
+                if keep_alive_was_due && self.op_deadline(context) > now {
+                    return SchedulerTaskTransition::Execute(self.go_idle(context), None);
                 }
-                _ => unreachable!(),
-            },
+                match self.pending_operations.last() {
+                    Some(TschOperation::TxSlot { .. }) => self.schedule_tx_operation(context),
+                    Some(TschOperation::RxSlot { .. }) => self.schedule_rx_operation(context),
+                    Some(TschOperation::AdvertisementSlot { .. }) => {
+                        self.schedule_advertisement_operation(context)
+                    }
+                    // Nothing pending : re-arm and keep waiting.
+                    None => SchedulerTaskTransition::Execute(self.go_idle(context), None),
+                    _ => unreachable!(),
+                }
+            }
             _ => unreachable!(),
         }
     }
@@ -122,7 +139,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Handle WaitingForTxStart state - CCA/TX preparation in progress.
     fn execute_waiting_for_tx_start(
         &mut self,
-        response_token: Option<ResponseToken>,
+        origin: TxOrigin,
         shared: bool,
         backoff: TschCsmaBackoff,
         event: SchedulerTaskEvent,
@@ -132,7 +149,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::TxStarted(_instant)) => {
                 tsch_trace!("tsch tx-started asn={}", context.pib.tsch.asn);
                 self.state = TschState::Transmitting {
-                    response_token,
+                    origin,
                     shared,
                     backoff,
                 };
@@ -141,7 +158,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CcaBusy(radio_frame, _instant)) => {
                 // CCA reported the channel busy before the frame went out.
                 tsch_debug!("tsch tx-abort asn={} cause=cca-busy", context.pib.tsch.asn);
-                self.handle_tx_start_failure(radio_frame, shared, backoff, response_token, context)
+                self.handle_tx_start_failure(radio_frame, shared, backoff, origin, context)
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::SchedulingFailed(radio_frame)) => {
                 // The driver could not schedule the transmission (timer rejection,
@@ -152,7 +169,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     "tsch tx-abort asn={} cause=sched-failed",
                     context.pib.tsch.asn
                 );
-                self.handle_tx_start_failure(radio_frame, shared, backoff, response_token, context)
+                self.handle_tx_start_failure(radio_frame, shared, backoff, origin, context)
             }
             // WaitingForTxStart legitimately only sees the events above; recover
             // to idle rather than aborting.
@@ -165,34 +182,29 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Handle a pre-transmission failure in `WaitingForTxStart`: CCA reported the
     /// channel busy, or the driver could not schedule the TX. Both mean the frame
-    /// never went out, so they are handled identically: a shared link applies the
-    /// CSMA-CA backoff, a dedicated link reports channel-access failure to the
-    /// upper layer, and a beacon restores the frame and reschedules the
-    /// advertisement.
+    /// never went out, so they are handled identically: MAC and keep-alive
+    /// frames enter the channel-access/retransmission procedure (a shared link
+    /// applies the CSMA-CA backoff, a dedicated link retries without delay),
+    /// and a beacon restores the frame and reschedules the advertisement.
     fn handle_tx_start_failure(
         &mut self,
         radio_frame: RadioFrame<RadioFrameSized>,
         shared: bool,
         backoff: TschCsmaBackoff,
-        response_token: Option<ResponseToken>,
+        origin: TxOrigin,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        match response_token {
+        match origin {
             // A frame that never went out (CCA busy or scheduling failure)
             // retries on both shared and dedicated links, up to
             // macMaxFrameRetries; only the backoff delay and BE increase are
             // shared-specific. The dedicated and early-attempt cases add no delay
             // and leave BE unchanged.
-            Some(response_token) => self.handle_tx_failure(
-                radio_frame,
-                backoff,
-                response_token,
-                None,
-                shared,
-                context,
-            ),
+            origin @ (TxOrigin::Mac(_) | TxOrigin::KeepAlive) => {
+                self.handle_tx_failure(radio_frame, backoff, origin, None, shared, context)
+            }
             // Beacon: restore the frame and reschedule the advertisement.
-            None => {
+            TxOrigin::Beacon => {
                 self.recover_beacon(radio_frame, context);
                 SchedulerTaskTransition::Execute(self.go_idle(context), None)
             }
@@ -202,7 +214,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// Handle Transmitting state - frame transmission in progress.
     fn execute_transmitting(
         &mut self,
-        response_token: Option<ResponseToken>,
+        origin: TxOrigin,
         shared: bool,
         backoff: TschCsmaBackoff,
         event: SchedulerTaskEvent,
@@ -210,52 +222,98 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Sent(tx_frame, instant, _timesync_us)) => {
-                if let Some(response_token) = response_token {
-                    tsch_info!(
-                        "tsch tx sent asn={} shared={} attempts={}",
-                        context.pib.tsch.asn,
-                        shared,
-                        backoff.nb.saturating_add(1)
-                    );
-                    // Neighbor statistics: the exchange completed, score it on
-                    // the destination neighbor (nb failures + this attempt).
-                    let mpdu = MpduFrame::from_radio_frame(tx_frame);
-                    let dst_id = self.note_unicast_tx_result(
-                        &mpdu,
-                        true,
-                        backoff.nb.saturating_add(1),
-                        instant,
-                        context,
-                    );
-                    let resp = SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
-                        mpdu.into_radio_frame::<RadioDriverImpl>()
-                            .forget_size::<RadioDriverImpl>(),
-                        instant,
-                    ));
-                    // Acknowledgment-based synchronization: only from an ACK
-                    // sent by the time source, and never on the time root.
-                    // An ACK from a child must not steer this node's clock.
-                    #[cfg(not(feature = "no-tsch-ack-sync"))]
-                    if !self.is_time_root
-                        && dst_id.is_some()
-                        && dst_id == context.pib.tsch.time_source
-                    {
-                        if let Some(timesync_us) = _timesync_us {
-                            context.pib.tsch.sync_ack(timesync_us);
+                match origin {
+                    TxOrigin::Mac(response_token) => {
+                        tsch_info!(
+                            "tsch tx sent asn={} shared={} attempts={}",
+                            context.pib.tsch.asn,
+                            shared,
+                            backoff.nb.saturating_add(1)
+                        );
+                        // Neighbor statistics: the exchange completed, score it on
+                        // the destination neighbor (nb failures + this attempt).
+                        let mpdu = MpduFrame::from_radio_frame(tx_frame);
+                        let dst_id = self.note_unicast_tx_result(
+                            &mpdu,
+                            true,
+                            backoff.nb.saturating_add(1),
+                            instant,
+                            context,
+                        );
+                        let resp =
+                            SchedulerResponse::Transmission(SchedulerTransmissionResult::Sent(
+                                mpdu.into_radio_frame::<RadioDriverImpl>()
+                                    .forget_size::<RadioDriverImpl>(),
+                                instant,
+                            ));
+                        // Acknowledgment-based synchronization: only from an ACK
+                        // sent by the time source, and never on the time root.
+                        // An ACK from a child must not steer this node's clock.
+                        #[cfg(not(feature = "no-tsch-ack-sync"))]
+                        if !self.is_time_root
+                            && dst_id.is_some()
+                            && dst_id == context.pib.tsch.time_source
+                        {
+                            if let Some(timesync_us) = _timesync_us {
+                                context.pib.tsch.sync_ack(timesync_us);
+                                // The exchange resynchronized this node: a
+                                // keep-alive is not needed for another period.
+                                self.touch_keep_alive(instant, context);
+                            }
                         }
+                        #[cfg(feature = "no-tsch-ack-sync")]
+                        let _ = dst_id;
+                        let action = self.go_idle(context);
+                        SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                     }
-                    #[cfg(feature = "no-tsch-ack-sync")]
-                    let _ = dst_id;
-                    let action = self.go_idle(context);
-                    SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
-                } else {
-                    // Record the beacon transmission time (used for the next
-                    // period calculation), then put the frame back and
-                    // schedule the next advertisement.
-                    tsch_info!("tsch beacon sent asn={}", context.pib.tsch.asn);
-                    self.on_beacon_sent(instant);
-                    self.recover_beacon(tx_frame, context);
-                    SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                    TxOrigin::KeepAlive => {
+                        tsch_info!(
+                            "tsch keep-alive sent asn={} attempts={}",
+                            context.pib.tsch.asn,
+                            backoff.nb.saturating_add(1)
+                        );
+                        // Same bookkeeping as a MAC frame - neighbor statistics
+                        // and acknowledgment-based synchronization (the whole
+                        // point of the keep-alive) - but the outcome is consumed
+                        // internally: release the frame, respond to nobody.
+                        let mpdu = MpduFrame::from_radio_frame(tx_frame);
+                        let dst_id = self.note_unicast_tx_result(
+                            &mpdu,
+                            true,
+                            backoff.nb.saturating_add(1),
+                            instant,
+                            context,
+                        );
+                        #[cfg(not(feature = "no-tsch-ack-sync"))]
+                        if !self.is_time_root
+                            && dst_id.is_some()
+                            && dst_id == context.pib.tsch.time_source
+                        {
+                            if let Some(timesync_us) = _timesync_us {
+                                context.pib.tsch.sync_ack(timesync_us);
+                                self.touch_keep_alive(instant, context);
+                            }
+                        }
+                        #[cfg(feature = "no-tsch-ack-sync")]
+                        let _ = dst_id;
+                        // Safety: the keep-alive frame was allocated from this
+                        // allocator by `build_keep_alive_frame`.
+                        unsafe {
+                            context
+                                .buffer_allocator
+                                .deallocate_buffer(mpdu.into_buffer())
+                        };
+                        SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                    }
+                    TxOrigin::Beacon => {
+                        // Record the beacon transmission time (used for the next
+                        // period calculation), then put the frame back and
+                        // schedule the next advertisement.
+                        tsch_info!("tsch beacon sent asn={}", context.pib.tsch.asn);
+                        self.on_beacon_sent(instant);
+                        self.recover_beacon(tx_frame, context);
+                        SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                    }
                 }
             }
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Nack(
@@ -265,21 +323,21 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 _timesync_us,
             )) => {
                 tsch_debug!("tsch tx no-ack asn={}", context.pib.tsch.asn);
-                match response_token {
+                match origin {
                     // Both shared and dedicated links retransmit on a missing
                     // ACK, up to macMaxFrameRetries; the dedicated path adds no
-                    // delay and does not bump BE.
-                    Some(response_token) => self.handle_tx_failure(
+                    // delay and does not bump BE. 
+                    origin @ (TxOrigin::Mac(_) | TxOrigin::KeepAlive) => self.handle_tx_failure(
                         tx_frame,
                         backoff,
-                        response_token,
+                        origin,
                         Some(instant),
                         shared,
                         context,
                     ),
                     // Beacon: restore the frame and reschedule the
                     // advertisement.
-                    None => {
+                    TxOrigin::Beacon => {
                         self.recover_beacon(tx_frame, context);
                         SchedulerTaskTransition::Execute(self.go_idle(context), None)
                     }
@@ -293,7 +351,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         &mut self,
         tx_frame: RadioFrame<RadioFrameSized>,
         backoff: TschCsmaBackoff,
-        response_token: ResponseToken,
+        origin: TxOrigin,
         noack_instant: Option<NsInstant>,
         failed_on_shared: bool,
         context: &mut SchedulerContext<RadioDriverImpl>,
@@ -318,16 +376,36 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             let now = noack_instant.unwrap_or_else(|| context.timer.now());
             let mpdu = MpduFrame::from_radio_frame(tx_frame);
             let _ = self.note_unicast_tx_result(&mpdu, false, nb, now, context);
-            let tx_frame = mpdu.into_radio_frame::<RadioDriverImpl>();
-            let result = match noack_instant {
-                Some(instant) => SchedulerTransmissionResult::NoAck(tx_frame, instant),
-                None => SchedulerTransmissionResult::ChannelAccessFailure(tx_frame),
-            };
             let action = self.go_idle(context);
-            return SchedulerTaskTransition::Execute(
-                action,
-                Some((response_token, SchedulerResponse::Transmission(result))),
-            );
+            return match origin {
+                TxOrigin::Mac(response_token) => {
+                    let tx_frame = mpdu.into_radio_frame::<RadioDriverImpl>();
+                    let result = match noack_instant {
+                        Some(instant) => SchedulerTransmissionResult::NoAck(tx_frame, instant),
+                        None => SchedulerTransmissionResult::ChannelAccessFailure(tx_frame),
+                    };
+                    SchedulerTaskTransition::Execute(
+                        action,
+                        Some((response_token, SchedulerResponse::Transmission(result))),
+                    )
+                }
+                TxOrigin::KeepAlive => {
+                    // The time source acknowledged none of the attempts.
+                    // Release the frame; the deadline was re-armed when this
+                    // keep-alive was queued, so the next one goes out a 
+                    // period later.
+                    //
+                    // Safety: the keep-alive frame was allocated from this
+                    // allocator by `build_keep_alive_frame`.
+                    unsafe {
+                        context
+                            .buffer_allocator
+                            .deallocate_buffer(mpdu.into_buffer())
+                    };
+                    SchedulerTaskTransition::Execute(action, None)
+                }
+                TxOrigin::Beacon => unreachable!(),
+            };
         }
 
         let (be, backoff_remaining, retransmitting) = if is_cca_busy && !backoff.retransmitting {
@@ -376,7 +454,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         };
         let mpdu = MpduFrame::from_radio_frame(tx_frame);
         let current_asn = context.pib.tsch.asn_at(context.timer.now());
-        self.queue_tx_with_backoff(response_token, mpdu, current_asn, backoff, context);
+        self.queue_tx_with_backoff(origin, mpdu, current_asn, backoff, context);
 
         SchedulerTaskTransition::Execute(self.go_idle(context), None)
     }
@@ -478,6 +556,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 {
                     let asn = beacon_asn.unwrap_or(context.pib.tsch.asn);
                     context.pib.tsch.sync_asn(asn, rx_instant);
+                    // The exchange resynchronized this node: a keep-alive is
+                    // not needed for another period.
+                    self.touch_keep_alive(rx_instant, context);
                 }
                 #[cfg(feature = "no-tsch-frame-sync")]
                 let _ = beacon_asn;
@@ -664,7 +745,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 cca,
                 shared,
                 backoff,
-                response_token,
+                origin,
             } => {
                 tsch_debug!(
                     "tsch tx-slot asn={} sf={} ch={} shared={} cca={} nb={} be={}",
@@ -677,7 +758,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     backoff.be
                 );
                 self.state = TschState::WaitingForTxStart {
-                    response_token: Some(response_token),
+                    origin,
                     shared,
                     backoff,
                 };
@@ -799,7 +880,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 );
 
                 self.state = TschState::WaitingForTxStart {
-                    response_token: None,
+                    origin: TxOrigin::Beacon,
                     shared: false,
                     backoff: TschCsmaBackoff::new(0),
                 };

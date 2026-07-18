@@ -311,6 +311,11 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                         self.pib.tsch.join_metric = metric;
                         SetPibResult::Success
                     }
+                    #[cfg(feature = "tsch")]
+                    SetRequestAttribute::MacKeepAlivePeriod(period) => {
+                        self.pib.tsch.keep_alive_period = period;
+                        SetPibResult::Success
+                    }
                     SetRequestAttribute::MacHoppingSequenceList(seq) => {
 			// TODO: handle Seq Id only
                         if seq.is_empty() {

@@ -24,6 +24,10 @@ mod customizable {
     pub const MAC_ETX_NOACK_PENALTY: u16 = 12;
     pub const MAC_DISCONNECT_TIME: u16 = 0x00ff;
 
+    // Default macKeepAlivePeriod in timeslots (10.3.10.8); 0 disables the
+    // keep-alive. 1500 slots = 15 s with the default 10 ms timeslot.
+    pub const MAC_TSCH_KEEP_ALIVE_PERIOD: u16 = 1500;
+
     pub const MAC_TSCH_MAX_LINKS: usize = 5;
     pub const MAC_TSCH_MAX_SLOTFRAMES: usize = 1;
     pub const MAC_TSCH_MAX_PENDING_OPERATIONS: usize = 5;

@@ -48,6 +48,12 @@ pub enum SetRequestAttribute {
     /// (typically parent metric + 1, so it grows along the chain).
     #[cfg(feature = "tsch")]
     MacJoinMetric(u16),
+    /// Keep-alive period in timeslots (macKeepAlivePeriod, IEEE
+    /// 802.15.4-2024, 10.3.10.8); `0` disables the stack-internal keep-alive
+    /// toward the time source. Takes effect from the next keep-alive
+    /// re-arming (a synchronizing exchange or a keep-alive transmission).
+    #[cfg(feature = "tsch")]
+    MacKeepAlivePeriod(u16),
     /// Hopping sequence list used for TSCH channel hopping.
     MacHoppingSequenceList(Vec<Channel, MAC_HOPPING_SEQUENCE_MAX_LENGTH>),
 }

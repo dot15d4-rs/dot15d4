@@ -36,8 +36,7 @@ Environment variables (compile time):
 | `STATS_PERIOD_MS` | `0` (off) | Period of the neighbor-table dump (needs a log backend). |
 
 Every node installs its own cells; the schedule advertised in the parent's
-beacon is not adopted. Joined nodes send a periodic keep-alive to their time
-source so they stay synchronized even without data traffic.
+beacon is not adopted. 
 
 ## Scenarios
 

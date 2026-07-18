@@ -34,8 +34,8 @@ use crate::scheduler::tests::{
     DRIVER_EVENT_CHANNEL, DRIVER_REQUEST_CHANNEL,
 };
 use crate::scheduler::tsch::{
-    TschCsmaBackoff, TschLink, TschLinkType, TschOperation, TschState, TschTask, INFINITE_DEADLINE,
-    TIMESLOT_GUARD_TIME_US,
+    TschCsmaBackoff, TschLink, TschLinkType, TschOperation, TschState, TschTask, TxOrigin,
+    INFINITE_DEADLINE, TIMESLOT_GUARD_TIME_US,
 };
 use crate::scheduler::SchedulerCommandResult;
 use crate::scheduler::{
@@ -139,24 +139,21 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
 
     pub fn terminate(&mut self) {
         while let Some(op) = self.task.pending_operations.pop() {
-            if let TschOperation::TxSlot {
-                mpdu,
-                response_token,
-                ..
-            } = op
-            {
+            if let TschOperation::TxSlot { mpdu, origin, .. } = op {
                 // Safety: the buffer was allocated from this allocator.
                 unsafe {
                     self.context
                         .buffer_allocator
                         .deallocate_buffer(mpdu.into_buffer())
                 };
-                self.context.request_receiver.received(
-                    response_token,
-                    SchedulerResponse::Command(SchedulerCommandResult::CsmaCommand(
-                        CsmaCommandResult::UseCsma(UseCsmaResult::Success),
-                    )),
-                );
+                if let TxOrigin::Mac(response_token) = origin {
+                    self.context.request_receiver.received(
+                        response_token,
+                        SchedulerResponse::Command(SchedulerCommandResult::CsmaCommand(
+                            CsmaCommandResult::UseCsma(UseCsmaResult::Success),
+                        )),
+                    );
+                }
             }
         }
         self.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::TschCommand(
@@ -3684,6 +3681,272 @@ mod neighbor_stats_tests {
         assert_eq!(neighbor.tx_acked(), 0);
         assert_eq!(neighbor.tx_attempts(), 0);
         assert_eq!(neighbor.etx_q7(), 0);
+        runner.terminate();
+    }
+}
+
+// ============================================================================
+// Integration Tests: Time-Source Keep-Alive (IEEE 802.15.4-2024, 10.3.10.8)
+// ============================================================================
+
+#[cfg(test)]
+mod keep_alive_tests {
+    use super::*;
+    use crate::mac::mlme::set::SetRequestAttribute;
+
+    /// This node's own address (matches the address `setup()` writes to the
+    /// PIB).
+    const SRC: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+    /// Keep-alive period used by most tests, in timeslots: 50 slots = 500 ms
+    /// with the 10 ms test timeslot.
+    const PERIOD_SLOTS: u16 = 50;
+
+    fn period(period_slots: u16) -> NsDuration {
+        NsDuration::micros(period_slots as u64 * TIMESLOT_LENGTH_US)
+    }
+
+    /// Device runner with the given schedule, keep-alive period and the
+    /// coordinator as its time source, entered at t = 0. The period is set
+    /// before entry so the entry-time re-arming already uses it.
+    fn setup_keep_alive_runner(
+        period_slots: u16,
+        install: fn(&mut TschPib),
+    ) -> TestRunner<'static, TschTask<FakeDriverConfig>> {
+        let mut runner = setup();
+        install(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.keep_alive_period = period_slots;
+        runner.enter_as_device();
+        runner.set_time_source(&COORD_ADDRESS);
+        runner
+    }
+
+    /// Assert that exactly one keep-alive is pending and that its frame is
+    /// an acknowledged Data frame addressed to the time source.
+    fn assert_pending_keep_alive_frame(runner: &TestRunner<'static, TschTask<FakeDriverConfig>>) {
+        let keep_alives = runner
+            .task
+            .pending_operations
+            .iter()
+            .filter(|op| op.is_keep_alive())
+            .count();
+        assert_eq!(keep_alives, 1);
+        let mpdu = runner
+            .task
+            .pending_operations
+            .iter()
+            .find_map(|op| match op {
+                TschOperation::TxSlot {
+                    mpdu,
+                    origin: TxOrigin::KeepAlive,
+                    ..
+                } => Some(mpdu),
+                _ => None,
+            })
+            .unwrap();
+        let reader = mpdu.reader();
+        assert!(reader.frame_control().ack_request());
+        let parsed = reader.parse_addressing().unwrap();
+        let addressing = parsed.try_addressing_fields().unwrap();
+        let dst = addressing.try_dst_address().unwrap();
+        assert!(matches!(&dst, Address::Extended(ext) if ext.as_ref() == COORD_ADDRESS));
+    }
+
+    #[test]
+    fn test_keep_alive_disarmed_on_time_root() {
+        // Time root: a period is configured but no time source exists, so
+        // the keep-alive is disarmed.
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.keep_alive_period = PERIOD_SLOTS;
+        runner.enter_as_coordinator();
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_none());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_keep_alive_disarmed_with_zero_period() {
+        // Device with a time source but a zero period: also disarmed. With a
+        // non-zero period it is armed.
+        let mut runner = setup_keep_alive_runner(0, setup_one_link_schedule);
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_none());
+        runner.context.pib.tsch.keep_alive_period = PERIOD_SLOTS;
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_some());
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_peek_deadline_includes_keep_alive() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_one_link_schedule);
+
+        // Entry at t=0 armed the keep-alive at t=500ms; the first RX
+        // operation (ASN 100) is only due at ~998ms, so the keep-alive
+        // deadline is the earlier wake-up.
+        let keep_alive_at = NsInstant::from_ticks(0) + period(PERIOD_SLOTS);
+        assert_eq!(runner.task.next_keep_alive, keep_alive_at);
+        assert_eq!(runner.task.peek_deadline(&runner.context), keep_alive_at);
+        assert!(runner.task.op_deadline(&runner.context) > keep_alive_at);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_keep_alive_queued_after_idle_period() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_one_link_schedule);
+        assert_eq!(runner.pending_operation_count(), 1); // RX at ASN 100
+
+        // Wake at the keep-alive deadline: the keep-alive is built and
+        // queued (displacing the same-ASN RX to the next cycle), but its own
+        // timeslot is not due yet, so the scheduler re-arms and keeps
+        // waiting.
+        runner.set_timer_time(NsInstant::from_ticks(0) + period(PERIOD_SLOTS));
+        runner.step_timer_expired();
+
+        assert!(runner.is_idle());
+        assert_eq!(
+            runner.last_action().unwrap(),
+            ActionType::WaitForTimeoutOrSchedulerRequest
+        );
+        assert_eq!(runner.pending_operation_count(), 2); // keep-alive + displaced RX
+        assert_pending_keep_alive_frame(&runner);
+        // Queueing re-armed the deadline one period ahead of "now".
+        assert_eq!(
+            runner.task.next_keep_alive,
+            NsInstant::from_ticks(0) + period(PERIOD_SLOTS) + period(PERIOD_SLOTS)
+        );
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_keep_alive_sent_resyncs_and_responds_to_nobody() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_one_link_schedule);
+        runner.set_timer_time(NsInstant::from_ticks(0) + period(PERIOD_SLOTS));
+        runner.step_timer_expired(); // queue the keep-alive (ASN 100)
+        runner.step_timer_expired(); // dispatch it
+
+        assert!(matches!(
+            runner.state(),
+            TschState::WaitingForTxStart { .. }
+        ));
+        assert!(runner.last_request_is_tx());
+
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+        let bt_before = runner.last_base_time();
+
+        let sent_instant = NsInstant::from_ticks(1_002_120_000);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Sent(frame, sent_instant, Some(40i16)));
+
+        assert!(runner.is_idle());
+        assert!(!runner.last_action_has_response());
+        assert_eq!(runner.last_base_time(), bt_before + NsDuration::micros(40));
+        assert_eq!(runner.task.next_keep_alive, sent_instant + period(PERIOD_SLOTS));
+        assert!(!runner
+            .task
+            .pending_operations
+            .iter()
+            .any(|op| op.is_keep_alive()));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_time_source_rx_defers_keep_alive() {
+        // Period longer than the first RX slot so no keep-alive interferes.
+        const LONG_PERIOD_SLOTS: u16 = 150;
+        let mut runner = setup_keep_alive_runner(LONG_PERIOD_SLOTS, setup_one_link_schedule);
+
+        runner.step_timer_expired(); // dispatch RX at ASN 100
+        assert!(matches!(runner.state(), TschState::Listening));
+        runner.step_driver_event(DrvSvcEvent::FrameStarted);
+
+        let rx_instant = NsInstant::from_ticks(1_002_120_000);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &SRC)
+                .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Received(frame, rx_instant));
+
+        assert!(runner.is_idle());
+        assert_eq!(
+            runner.task.next_keep_alive,
+            rx_instant + period(LONG_PERIOD_SLOTS)
+        );
+        assert!(!runner
+            .task
+            .pending_operations
+            .iter()
+            .any(|op| op.is_keep_alive()));
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_keep_alive_retry_exhaustion_is_internal() {
+        // Shared TX-only schedule: no RX links, so the keep-alive is the
+        // only pending operation and consecutive retransmission attempts are
+        // not interleaved with RX slots.
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        assert_eq!(runner.pending_operation_count(), 0);
+
+        // Wake at the keep-alive deadline: queue it (its slot is not due).
+        runner.set_timer_time(NsInstant::from_ticks(0) + period(PERIOD_SLOTS));
+        runner.step_timer_expired();
+        assert_pending_keep_alive_frame(&runner);
+        let armed_at = runner.task.next_keep_alive;
+
+        // macMaxFrameRetries is 3 in the test config: attempts 1..=3 fail
+        // and re-queue silently, the 4th failure drops the frame - still
+        // without any upper-layer response.
+        for attempt in 1..=4u8 {
+            runner.step_timer_expired();
+            assert!(runner.last_request_is_tx());
+            runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(
+                1_000_000_000,
+            )));
+            let frame = create_addressed_data_frame(
+                &runner.context.buffer_allocator,
+                &SRC,
+                &COORD_ADDRESS,
+            )
+            .into_radio_frame::<FakeDriverConfig>();
+            runner.step_driver_event(DrvSvcEvent::Nack(
+                frame,
+                NsInstant::from_ticks(1_001_000_000),
+                None,
+                None,
+            ));
+
+            assert!(runner.is_idle());
+            assert!(!runner.last_action_has_response());
+            if attempt < 4 {
+                assert_pending_keep_alive_frame(&runner);
+            }
+        }
+
+        // Dropped internally: nothing pending, and the deadline armed when
+        // the keep-alive was queued still stands, so the next keep-alive
+        // goes out a full period later.
+        assert_eq!(runner.pending_operation_count(), 0);
+        assert_eq!(runner.task.next_keep_alive, armed_at);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_set_keep_alive_period_attribute() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_one_link_schedule);
+
+        runner.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::PibCommand(
+            PibCommand::Set(SetRequestAttribute::MacKeepAlivePeriod(0)),
+        )));
+        assert!(runner.last_response_is_command());
+        assert_eq!(runner.context.pib.tsch.keep_alive_period, 0);
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_none());
+
+        runner.step_scheduler_request(SchedulerRequest::Command(SchedulerCommand::PibCommand(
+            PibCommand::Set(SetRequestAttribute::MacKeepAlivePeriod(75)),
+        )));
+        assert!(runner.last_response_is_command());
+        assert_eq!(runner.context.pib.tsch.keep_alive_period, 75);
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_some());
         runner.terminate();
     }
 }
