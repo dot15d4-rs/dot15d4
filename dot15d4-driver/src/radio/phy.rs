@@ -181,10 +181,8 @@ impl PhyConfig for Phy<OQpsk250KBit> {
     const A_MIN_CAP_LENGTH: NsDuration = Self::SymbolPeriods::from_ticks(440).convert();
 
     const MAC_FCS_TYPE: u8 = 1;
-    const MAC_UNIT_BACKOFF_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(
-        Self::A_TURNAROUND_TIME.ticks() + Self::PHY_CCA_DURATION.ticks(),
-    )
-    .convert();
+    const MAC_UNIT_BACKOFF_PERIOD: NsDuration = 
+        Self::A_TURNAROUND_TIME.checked_add(Self::PHY_CCA_DURATION).unwrap();
     const MAC_SIFS_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(12).convert();
     const MAC_LIFS_PERIOD: NsDuration = Self::SymbolPeriods::from_ticks(40).convert();
     const AIFS: NsDuration = Self::MAC_SIFS_PERIOD;
