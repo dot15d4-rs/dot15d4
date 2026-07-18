@@ -28,6 +28,8 @@ mod customizable {
     pub const MAC_TSCH_MAX_SLOTFRAMES: usize = 1;
     pub const MAC_TSCH_MAX_PENDING_OPERATIONS: usize = 5;
     pub const MAC_TSCH_DRIFT_BUFFER_LEN: usize = 8;
+    pub const MAC_TSCH_MAX_DRIFT_PPM: u32 = 200;
+    pub const MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS: u32 = 100;
 }
 
 #[cfg(not(test))]

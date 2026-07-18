@@ -10,7 +10,8 @@ use dot15d4_driver::timer::{NsDuration, NsInstant};
 use heapless::Vec;
 
 use crate::constants::{
-    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_DRIFT_BUFFER_LEN, MAC_TSCH_MAX_BE,
+    MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_DRIFT_BUFFER_LEN,
+    MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS, MAC_TSCH_MAX_BE, MAC_TSCH_MAX_DRIFT_PPM,
     MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
@@ -50,7 +51,10 @@ impl<const N: usize> DriftEstimator<N> {
         if delta_asn == 0 {
             return;
         }
-        let max = (delta_asn as i64).saturating_mul((timeslot_length_us.saturating_mul(1000) / 2) as i64);
+        // max ns per slot = slot_ns * ppm / 1e6 = slot_us * ppm / 1e3
+        let max_per_slot_ns =
+            (timeslot_length_us.saturating_mul(MAC_TSCH_MAX_DRIFT_PPM as u64) / 1_000) as i64;
+        let max = (delta_asn as i64).saturating_mul(max_per_slot_ns.max(1));
         let dev_ns = dev_ns.clamp(-max, max);
         self.buf[self.head] = Some(DriftSample { dev_ns, delta_asn });
         self.head = (self.head + 1) % N;
@@ -512,15 +516,28 @@ impl TschPib {
         );
     }
 
+    pub fn reset_time_base(&mut self, asn: TschAsn, instant: NsInstant) {
+        let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
+        self.asn = asn;
+        self.last_base_time = instant - NsDuration::micros(tx_offset_us);
+        self.last_rx = None;
+        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
+        self.drift.clear();
+
+        tsch_trace!("tsch time-base reset asn={}", asn);
+    }
+
     /// Update clock drift relative to timesource with an instant derived from
     /// communication with timesource neighbor (i.e. when receiving a frame
     /// or using Time Sync information in Time Correction IE).
     #[cfg(not(feature = "no-tsch-drift-adjustment"))]
     fn update_drift(&mut self, asn: TschAsn, timeslot_start: NsInstant) {
         if let Some((last_slot_start, last_rx_asn)) = self.last_rx {
-            let delta_asn = asn - last_rx_asn;
+            let delta_asn = asn.saturating_sub(last_rx_asn);
 
-            if delta_asn == 0 {
+            // Below the minimum baseline the sample is dominated by per-event
+            // phase noise, not frequency.
+            if delta_asn < MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS as u64 {
                 return;
             }
 

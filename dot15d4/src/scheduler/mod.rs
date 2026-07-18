@@ -261,7 +261,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
                     }
                     #[cfg(feature = "tsch")]
                     SetRequestAttribute::MacAsn(asn, instant) => {
-                        self.pib.tsch.sync_asn(asn, instant);
+                        // A join/explicit ASN set is a fresh anchor, not a
+                        // resync: it must not seed the drift estimator's
+                        // baseline.
+                        self.pib.tsch.reset_time_base(asn, instant);
                         SetPibResult::Success
                     }
                     #[cfg(feature = "tsch")]

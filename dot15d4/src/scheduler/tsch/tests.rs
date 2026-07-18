@@ -2374,18 +2374,89 @@ mod clock_drift_tests {
     }
 
     #[test]
-    fn test_drift_small_delta_asn() {
+    fn test_drift_ignores_short_baseline() {
         let mut pib: TschPib = TschPib::new();
 
         let slot_start_1: u64 = 1_000_000_000;
         pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
 
-        // delta_asn = 5, expected = 50_000µs = 50_000_000ns
-        // elapsed = 50_000_000 - 2_500 = 49_997_500ns -> drift = 2500/5 = 500
+        // delta_asn = 5 < MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS: a 2.5µs deviation
+        // over 5 slots would read as 500 ns/slot (50 ppm) although it is
+        // indistinguishable from per-event phase noise. The sample must be
+        // rejected; the sync still corrects phase (anchor moves).
         let slot_start_2: u64 = slot_start_1 + 49_997_500;
         pib.sync_asn(105, rmarker_for_slot_start(slot_start_2));
 
-        assert_eq!(pib.drift_ns(), 500);
+        assert_eq!(pib.drift_ns(), 0);
+        assert_eq!(
+            pib.last_base_time,
+            NsInstant::from_ticks(slot_start_2),
+            "phase must still be corrected even when the drift sample is rejected"
+        );
+    }
+
+    #[test]
+    fn test_join_then_ack_correction_does_not_fake_drift() {
+        let mut pib: TschPib = TschPib::new();
+
+        // Join: anchor ASN 1100 to a scan timestamp 61µs late of the grid.
+        let grid = |asn: u64| asn * TIMESLOT_LENGTH_US * 1_000;
+        pib.reset_time_base(1100, rmarker_for_slot_start(grid(1100) + 61_000));
+        assert!(pib.last_rx.is_none(), "join must not seed a resync baseline");
+        assert_eq!(pib.drift_ns(), 0);
+
+        // TX slots 1102/1103, then the Enh-ACK carries TC = -59µs.
+        pib.update_timing(1102);
+        pib.update_timing(1103);
+        pib.sync_ack(-59);
+
+        assert_eq!(
+            pib.drift_ns(),
+            0,
+            "a phase correction over a 3-slot baseline must not become drift"
+        );
+
+        // The schedule must stay on the (phase-corrected) 10ms grid: 97 slots
+        // later, slot 1200 starts 97 * 10ms after slot 1103, not ~1.9ms early.
+        let base_1103 = pib.last_base_time;
+        let start_1200 = pib.expected_slot_start(1200, TIMESLOT_LENGTH_US);
+        assert_eq!(
+            start_1200,
+            base_1103 + NsDuration::micros(97 * TIMESLOT_LENGTH_US)
+        );
+    }
+
+    #[test]
+    fn test_drift_sample_clamped_to_max_ppm() {
+        let mut pib: TschPib = TschPib::new();
+
+        let slot_start_1: u64 = 1_000_000_000;
+        pib.sync_asn(100, rmarker_for_slot_start(slot_start_1));
+
+        // A 20ms deviation over 200 slots (10_000 ppm) is physically
+        // impossible crystal drift; the estimator clamps it to
+        // MAC_TSCH_MAX_DRIFT_PPM (200 ppm = 2_000 ns/slot at 10ms slots).
+        let slot_start_2: u64 = slot_start_1 + 2_000_000_000 - 20_000_000;
+        pib.sync_asn(300, rmarker_for_slot_start(slot_start_2));
+
+        assert_eq!(pib.drift_ns(), 2_000);
+    }
+
+    #[test]
+    fn test_reset_time_base_clears_sync_history() {
+        let mut pib: TschPib = TschPib::new();
+
+        pib.sync_asn(100, rmarker_for_slot_start(1_000_000_000));
+        pib.sync_asn(300, rmarker_for_slot_start(1_000_000_000 + 1_999_940_000));
+        assert_eq!(pib.drift_ns(), 300);
+        assert!(pib.last_rx.is_some());
+
+        pib.reset_time_base(1000, rmarker_for_slot_start(5_000_000_000));
+
+        assert_eq!(pib.asn, 1000);
+        assert_eq!(pib.last_base_time, NsInstant::from_ticks(5_000_000_000));
+        assert!(pib.last_rx.is_none());
+        assert_eq!(pib.drift_ns(), 0);
     }
 
     #[test]

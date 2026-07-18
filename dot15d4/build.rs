@@ -29,6 +29,8 @@ fn const_config(out_dir: &Path) {
         ("MAC_TSCH_MAX_PENDING_OPERATIONS", ("usize", "5")),
         ("MAC_HOPPING_SEQUENCE_MAX_LENGTH", ("usize", "16")),
         ("MAC_TSCH_DRIFT_BUFFER_LEN", ("usize", "8")),
+        ("MAC_TSCH_MAX_DRIFT_PPM", ("u32", "200")),
+        ("MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS", ("u32", "100")),
     ]);
 
     // Make sure we get rerun if needed
