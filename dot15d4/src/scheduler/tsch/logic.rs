@@ -424,11 +424,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     ) -> SchedulerTaskTransition {
         match event {
             SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(rx_frame, rx_instant)) => {
-                // Slot complete: queue the next RX exactly once.
-                let current_asn = context.pib.tsch.asn;
-                self.queue_next_rx(current_asn, context);
-                let action = self.go_idle(context);
-
                 // Convert to an MPDU once; the sync decision and the frame
                 // routing below both work on this view.
                 let mpdu = MpduFrame::from_radio_frame(rx_frame);
@@ -437,6 +432,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // frame to its source neighbor (created on first contact).
                 // Enhanced Beacons also record the advertised join metric
                 // (the IE walk only runs for the rare beacon frames).
+                let mut beacon_asn = None;
                 let src_id = if let Ok(parsed) = mpdu.reader().parse_addressing() {
                     let src_id = match parsed.try_addressing_fields() {
                         Ok(addressing) => addressing
@@ -452,7 +448,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                                     .parse_ies::<RadioDriverImpl>()
                                     .ok()
                                     .and_then(|with_ies| {
-                                        with_ies.ies_fields().tsch_sync().map(|ts| ts.join_metric())
+                                        with_ies.ies_fields().tsch_sync().map(|ts| {
+                                            beacon_asn = Some(ts.asn());
+                                            ts.join_metric()
+                                        })
                                     })
                             } else {
                                 None
@@ -477,9 +476,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     && src_id.is_some()
                     && src_id == context.pib.tsch.time_source
                 {
-                    let asn = context.pib.tsch.asn;
+                    let asn = beacon_asn.unwrap_or(context.pib.tsch.asn);
                     context.pib.tsch.sync_asn(asn, rx_instant);
                 }
+                #[cfg(feature = "no-tsch-frame-sync")]
+                let _ = beacon_asn;
+
+                // Slot complete: queue the next RX exactly once.
+                let current_asn = context.pib.tsch.asn;
+                self.queue_next_rx(current_asn, context);
+                let action = self.go_idle(context);
 
                 tsch_debug!(
                     "tsch rx asn={} type={} known-src={} from-timesrc={}",
