@@ -995,8 +995,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
     /// Re-arm the keep-alive deadline one period after `now`.
     ///
-    /// Called on TSCH entry, on every synchronizing exchange with the time
-    /// source, and whenever a keep-alive is queued (so a keep-alive whose
+    /// Called on TSCH entry, on every exchange with the time source (frame
+    /// heard from it or ACK received from it, whether or not the matching
+    /// clock correction is compiled in), and whenever a keep-alive is queued
+    /// (so a keep-alive whose
     /// every retransmission failed is retried one period later, not every
     /// wake-up).
     pub fn touch_keep_alive(

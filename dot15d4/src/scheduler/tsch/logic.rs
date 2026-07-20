@@ -249,20 +249,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                         // Acknowledgment-based synchronization: only from an ACK
                         // sent by the time source, and never on the time root.
                         // An ACK from a child must not steer this node's clock.
-                        #[cfg(not(feature = "no-tsch-ack-sync"))]
                         if !self.is_time_root
                             && dst_id.is_some()
                             && dst_id == context.pib.tsch.time_source
                         {
+                            // The exchange reached the time source: a keep-alive
+                            // is not needed for another period, whether or not
+                            // the ack-sync correction is compiled in.
+                            self.touch_keep_alive(instant, context);
                             if let Some(timesync_us) = _timesync_us {
                                 context.pib.tsch.sync_ack(timesync_us);
-                                // The exchange resynchronized this node: a
-                                // keep-alive is not needed for another period.
-                                self.touch_keep_alive(instant, context);
                             }
                         }
-                        #[cfg(feature = "no-tsch-ack-sync")]
-                        let _ = dst_id;
                         let action = self.go_idle(context);
                         SchedulerTaskTransition::Execute(action, Some((response_token, resp)))
                     }
@@ -284,18 +282,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             instant,
                             context,
                         );
-                        #[cfg(not(feature = "no-tsch-ack-sync"))]
                         if !self.is_time_root
                             && dst_id.is_some()
                             && dst_id == context.pib.tsch.time_source
                         {
+                            self.touch_keep_alive(instant, context);
                             if let Some(timesync_us) = _timesync_us {
                                 context.pib.tsch.sync_ack(timesync_us);
-                                self.touch_keep_alive(instant, context);
                             }
                         }
-                        #[cfg(feature = "no-tsch-ack-sync")]
-                        let _ = dst_id;
                         // Safety: the keep-alive frame was allocated from this
                         // allocator by `build_keep_alive_frame`.
                         unsafe {
@@ -549,19 +544,17 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 // Frame-based synchronization: only steer the local clock
                 // from frames sent by the designated time source, never from
                 // arbitrary neighbors, and never on the time root.
-                #[cfg(not(feature = "no-tsch-frame-sync"))]
                 if !self.is_time_root
                     && src_id.is_some()
                     && src_id == context.pib.tsch.time_source
                 {
                     let asn = beacon_asn.unwrap_or(context.pib.tsch.asn);
                     context.pib.tsch.sync_asn(asn, rx_instant);
-                    // The exchange resynchronized this node: a keep-alive is
-                    // not needed for another period.
+                    // Heard from the time source: a keep-alive is not needed
+                    // for another period, whether or not the frame-sync
+                    // correction is compiled in.
                     self.touch_keep_alive(rx_instant, context);
                 }
-                #[cfg(feature = "no-tsch-frame-sync")]
-                let _ = beacon_asn;
 
                 // Slot complete: queue the next RX exactly once.
                 let current_asn = context.pib.tsch.asn;

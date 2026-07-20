@@ -258,6 +258,12 @@ pub struct TschPib {
     pub last_base_time: NsInstant,
     /// RMARKER and ASN of last received frame
     pub last_rx: Option<(NsInstant, TschAsn)>,
+    /// Whether a timing observation from the time source was made since the
+    /// last time-base reset. Kept separate from `last_rx` (which only tracks
+    /// applied corrections) so the sync-error log still works when the
+    /// corrections are compiled out.
+    #[cfg(feature = "sync-error-log")]
+    had_sync_obs: bool,
     /// Sliding-window estimate of the per-slot clock drift against the time
     /// source.
     drift: DriftEstimator<MAC_TSCH_DRIFT_BUFFER_LEN>,
@@ -500,23 +506,31 @@ impl TschPib {
         let timeslot_start = instant - NsDuration::micros(tx_offset_us);
 
         #[cfg(feature = "sync-error-log")]
-        if self.last_rx.is_some() {
-            let predicted = self.expected_slot_start(asn, self.timeslot_length_us());
-            let err_ns = signed_delta_ns(predicted, timeslot_start);
-            dot15d4_util::info!("tsch sync asn={=u64} src=frame err_ns={=i64}", asn, err_ns);
+        {
+            if self.last_rx.is_some() || self.had_sync_obs {
+                let predicted = self.expected_slot_start(asn, self.timeslot_length_us());
+                let err_ns = signed_delta_ns(predicted, timeslot_start);
+                dot15d4_util::info!("tsch sync asn={=u64} src=frame err_ns={=i64}", asn, err_ns);
+            }
+            self.had_sync_obs = true;
         }
 
-        self.asn = asn;
-        self.last_base_time = timeslot_start;
-        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-        self.update_drift(asn, timeslot_start);
-        self.last_rx = Some((timeslot_start, asn));
+        #[cfg(not(feature = "no-tsch-frame-sync"))]
+        {
+            self.asn = asn;
+            self.last_base_time = timeslot_start;
+            #[cfg(not(feature = "no-tsch-drift-adjustment"))]
+            self.update_drift(asn, timeslot_start);
+            self.last_rx = Some((timeslot_start, asn));
 
-        tsch_trace!(
-            "tsch resync src=frame asn={} drift_ns_per_slot={}",
-            asn,
-            self.drift_ns()
-        );
+            tsch_trace!(
+                "tsch resync src=frame asn={} drift_ns_per_slot={}",
+                asn,
+                self.drift_ns()
+            );
+        }
+        #[cfg(all(feature = "no-tsch-frame-sync", not(feature = "sync-error-log")))]
+        let _ = (asn, timeslot_start);
     }
 
     pub fn reset_time_base(&mut self, asn: TschAsn, instant: NsInstant) {
@@ -524,6 +538,10 @@ impl TschPib {
         self.asn = asn;
         self.last_base_time = instant - NsDuration::micros(tx_offset_us);
         self.last_rx = None;
+        #[cfg(feature = "sync-error-log")]
+        {
+            self.had_sync_obs = false;
+        }
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
         self.drift.clear();
 
@@ -534,6 +552,10 @@ impl TschPib {
     /// communication with timesource neighbor (i.e. when receiving a frame
     /// or using Time Sync information in Time Correction IE).
     #[cfg(not(feature = "no-tsch-drift-adjustment"))]
+    #[cfg_attr(
+        all(feature = "no-tsch-frame-sync", feature = "no-tsch-ack-sync"),
+        allow(dead_code)
+    )]
     fn update_drift(&mut self, asn: TschAsn, timeslot_start: NsInstant) {
         if let Some((last_slot_start, last_rx_asn)) = self.last_rx {
             let delta_asn = asn.saturating_sub(last_rx_asn);
@@ -554,30 +576,37 @@ impl TschPib {
     }
 
     /// Acknowledgment-based synchronization.
-    #[cfg(not(feature = "no-tsch-ack-sync"))]
     pub fn sync_ack(&mut self, timesync_us: i16) {
-        let asn = self.asn;
         #[cfg(feature = "sync-error-log")]
-        dot15d4_util::info!(
-            "tsch sync asn={=u64} src=ack err_ns={=i64}",
-            asn,
-            (timesync_us as i64) * 1000
-        );
-        if timesync_us < 0 {
-            self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
-        } else {
-            self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
+        {
+            dot15d4_util::info!(
+                "tsch sync asn={=u64} src=ack err_ns={=i64}",
+                self.asn,
+                (timesync_us as i64) * 1000
+            );
+            self.had_sync_obs = true;
         }
-        #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-        self.update_drift(asn, self.last_base_time);
-        self.last_rx = Some((self.last_base_time, asn));
+        #[cfg(not(feature = "no-tsch-ack-sync"))]
+        {
+            let asn = self.asn;
+            if timesync_us < 0 {
+                self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
+            } else {
+                self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
+            }
+            #[cfg(not(feature = "no-tsch-drift-adjustment"))]
+            self.update_drift(asn, self.last_base_time);
+            self.last_rx = Some((self.last_base_time, asn));
 
-        tsch_trace!(
-            "tsch resync src=ack asn={} correction_us={} drift_ns_per_slot={}",
-            asn,
-            timesync_us,
-            self.drift_ns()
-        );
+            tsch_trace!(
+                "tsch resync src=ack asn={} correction_us={} drift_ns_per_slot={}",
+                asn,
+                timesync_us,
+                self.drift_ns()
+            );
+        }
+        #[cfg(all(feature = "no-tsch-ack-sync", not(feature = "sync-error-log")))]
+        let _ = timesync_us;
     }
 
     /// Get iterator over slotframes.
@@ -624,6 +653,8 @@ impl Default for TschPib {
             asn: 0,
             last_base_time: NsInstant::from_ticks(0),
             last_rx: None,
+            #[cfg(feature = "sync-error-log")]
+            had_sync_obs: false,
             drift: DriftEstimator::new(),
         }
     }
