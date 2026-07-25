@@ -338,7 +338,8 @@ mod test {
 
     #[test]
     fn test_enh_ack_frame() {
-        const ENH_ACK_LEN: u8 = 7;
+        const ENH_ACK_LEN: u8 = 15;
+        const TEST_DST: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
 
         const ENH_ACK_FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameSized> =
             RadioFrameRepr::<_, RadioFrameUnsized>::new()
@@ -350,7 +351,7 @@ mod test {
         let buffer = BufferToken::new(unsafe { &mut BUFFER });
 
         const TEST_SEQ_NUM: u8 = 55;
-        let mut frame = enh_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, buffer);
+        let mut frame = enh_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, &TEST_DST, buffer);
         let mut ies = frame.ies_fields_mut();
         let mut time_correction_ie = ies.time_correction_mut().unwrap();
         time_correction_ie.set_time_sync(42);
@@ -363,9 +364,19 @@ mod test {
 
         let expected_buffer = [
             0,
-            FrameType::Ack as u8,
-            2 | (FrameVersion::Ieee802154 as u8) << 4, // IE Present + Enhanced
+            FrameType::Ack as u8 | (1 << 6), // PAN ID Compression
+            // IE Present + Enhanced + dst addressing mode extended
+            2 | (FrameVersion::Ieee802154 as u8) << 4 | 0b11 << 2,
             TEST_SEQ_NUM,
+            // Destination extended address, little endian (on-air order).
+            TEST_DST[0],
+            TEST_DST[1],
+            TEST_DST[2],
+            TEST_DST[3],
+            TEST_DST[4],
+            TEST_DST[5],
+            TEST_DST[6],
+            TEST_DST[7],
             2,      // Header IE Time sync
             15,     // Header IE Time sync
             42,     // time sync value

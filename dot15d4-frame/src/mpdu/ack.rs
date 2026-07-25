@@ -6,6 +6,10 @@ use dot15d4_util::allocator::BufferToken;
 
 #[cfg(feature = "ies")]
 use dot15d4_driver::radio::frame::{IeListRepr, IeRepr, IeReprList};
+#[cfg(feature = "ies")]
+use dot15d4_driver::radio::frame::{
+    Address, AddressingMode, AddressingRepr, ExtendedAddress, PanIdCompressionRepr,
+};
 
 use crate::{
     fields::MpduParser,
@@ -60,13 +64,15 @@ pub const ENH_ACK_IE_LIST: &[IeRepr<'static>] = &[IeRepr::TimeCorrectionHeaderIe
 /// - Time Correction Header IE (4 bytes total):
 ///   - Header (2 bytes): Element ID = 0x1e, Length = 2
 ///   - Content (2 bytes): Time Sync Info + NACK bit
-/// - HT2 Termination IE (2 bytes): Element ID = 0x7f, Length = 0
-///
-/// Total: 9 bytes (without FCS)
 #[cfg(feature = "ies")]
 pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
-    .without_addressing()
+    .with_addressing(AddressingRepr::new(
+        AddressingMode::Extended,
+        AddressingMode::Absent,
+        false,
+        PanIdCompressionRepr::Yes,
+    ))
     .without_security()
     .with_ies(IeListRepr::WithoutTerminationIes(IeReprList::new(
         ENH_ACK_IE_LIST,
@@ -74,8 +80,8 @@ pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
 
 /// Size of an Enhanced ACK MPDU without FCS.
 ///
-/// Frame Control (2) + Seq Nr (1) + Time Correction IE Header (2) +
-/// Time Correction IE Content (2) = 7 bytes
+/// Frame Control (2) + Seq Nr (1) + Dst Extended Address (8) + Time Correction
+/// IE Header (2) + Time Correction IE Content (2) = 15 bytes
 #[cfg(feature = "ies")]
 pub const ENH_ACK_MPDU_SIZE_WO_FCS: u16 = {
     match ENH_ACK_FRAME_REPR.mpdu_length_wo_fcs(0) {
@@ -86,8 +92,9 @@ pub const ENH_ACK_MPDU_SIZE_WO_FCS: u16 = {
 
 #[cfg(feature = "ies")]
 const _: () = {
-    // FC(2) + SeqNr(1) + Time Correction Headr(2) + TimeCorrection Content(2) = 7
-    assert!(ENH_ACK_MPDU_SIZE_WO_FCS == 7);
+    // FC(2) + SeqNr(1) + DstExtAddr(8) + Time Correction Header(2) +
+    // TimeCorrection Content(2) = 15
+    assert!(ENH_ACK_MPDU_SIZE_WO_FCS == 15);
 };
 
 /// Instantiates a reader/writer for an Enhanced ACK frame with Time Correction IE.
@@ -99,6 +106,8 @@ const _: () = {
 /// # Arguments
 ///
 /// * `seq_num` - The sequence number to ACK
+/// * `dst_le_bytes` - Extended address of the acknowledged frame's originator,
+///   in little-endian (on-air) byte order
 /// * `buffer` - Buffer token to hold the frame
 ///
 /// # Returns
@@ -107,6 +116,7 @@ const _: () = {
 #[cfg(feature = "ies")]
 pub fn enh_ack_frame<Config: DriverConfig>(
     seq_num: u8,
+    dst_le_bytes: &[u8; 8],
     buffer: BufferToken,
 ) -> MpduParser<MpduFrame, MpduWithAllFields> {
     // Safety: We give a valid configuration and therefore expect the operation
@@ -115,6 +125,10 @@ pub fn enh_ack_frame<Config: DriverConfig>(
         .into_writer::<Config>(FrameVersion::Ieee802154, FrameType::Ack, 0, buffer)
         .unwrap();
     let _ = ack_frame.try_set_sequence_number(seq_num);
+
+    // Address the acknowledgment to the originator of the acknowledged frame.
+    let dst = Address::Extended(ExtendedAddress::new_owned(*dst_le_bytes));
+    ack_frame.addressing_fields_mut().dst_address_mut().set(&dst);
 
     // Initialize Time Correction IE to zero values
     if let Some(mut tc) = ack_frame.ies_fields_mut().time_correction_mut() {

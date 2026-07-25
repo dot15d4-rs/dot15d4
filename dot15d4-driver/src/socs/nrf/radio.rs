@@ -1327,8 +1327,10 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                         SEQ_NR_LEN
                     };
 
-                    let [dst_pan_id_len, dst_addr_len, ..] = addressing_fields_lengths.unwrap();
+                    let [dst_pan_id_len, dst_addr_len, src_pan_id_len, src_addr_len] =
+                        addressing_fields_lengths.unwrap();
                     let dst_len = (dst_pan_id_len + dst_addr_len) as usize;
+                    let addressing_len = dst_len + (src_pan_id_len + src_addr_len) as usize;
 
                     let pdu_ref = radio_frame.pdu_ref();
                     let mpdu_length = pdu_ref[0] as u16;
@@ -1346,9 +1348,9 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     let ended = if !ended {
                         // Note: BCMATCH counts are calculated relative to the MPDU
                         //       (i.e. w/o headroom).
-                        let bcc = ((FC_LEN + seq_nr_len + dst_len) as u32) << 3;
+                        let bcc = ((FC_LEN + seq_nr_len + addressing_len) as u32) << 3;
 
-                        // Wait until the sequence number and/or destination address
+                        // Wait until the sequence number and/or the addressing
                         // fields have been received.
                         r.bcc.write(|w| w.bcc().variant(bcc));
 
@@ -1397,8 +1399,8 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     let addressing_bytes = &pdu_ref[addressing_offset..];
 
                     // Safety: We checked that we do actually have addressing fields.
-                    //         The bit counter guarantees that all bytes up to the
-                    //         addressing fields have been received.
+                    //         The bit counter guarantees that the addressing block
+                    //         has been received in full, source address included.
                     let addressing_fields =
                         AddressingFields::new_unchecked(addressing_bytes, addressing_repr);
 

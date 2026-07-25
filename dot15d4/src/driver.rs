@@ -11,6 +11,8 @@ use crate::{mac::MacBufferAllocator, utils::is_frame_valid_and_for_us};
 
 #[cfg(feature = "tsch")]
 use crate::mac::frame::mpdu::{enh_ack_frame, ENH_ACK_MPDU_SIZE_WO_FCS};
+#[cfg(feature = "tsch")]
+use dot15d4_driver::radio::frame::Address;
 
 use self::{
     radio::{
@@ -238,6 +240,8 @@ pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
     //
     // Kept unconditional; only the TSCH logic that reads it is gated.
     expected_rx_framestart: Cell<Option<NsInstant>>,
+
+    extended_address: [u8; 8],
 }
 
 impl<'svc, RadioDriverImpl: DriverConfig> DriverService<'svc, RadioDriverImpl>
@@ -254,6 +258,7 @@ where
         driver_response_sender: DriverEventSender<'svc>,
         buffer_allocator: MacBufferAllocator,
     ) -> Self {
+        let extended_address = driver.ieee802154_address();
         Self {
             driver_state: Cell::new(Some(DriverState::Idle(driver))),
             request_receiver: driver_request_receiver,
@@ -265,6 +270,7 @@ where
             pending_request: Cell::new(None),
             rx_window_end: Cell::new(None),
             expected_rx_framestart: Cell::new(None),
+            extended_address,
         }
     }
 
@@ -290,6 +296,7 @@ where
 
             enh_ack_frame::<RadioDriverImpl>(
                 0,
+                &[0u8; 8],
                 buffer_allocator
                     .try_allocate_buffer(outbound_ack_buffer_size)
                     .expect("no capacity"),
@@ -631,7 +638,11 @@ where
                     // Expect rx ACK frame
                     let (event, recovered_ack_frame) = match rx_task_result {
                         RxResult::Frame(rx_ack_frame, _) => {
-                            match validate_ack_frame::<RadioDriverImpl>(rx_ack_frame, seq_nb) {
+                            match validate_ack_frame::<RadioDriverImpl>(
+                                rx_ack_frame,
+                                seq_nb,
+                                &this.extended_address,
+                            ) {
                                 Ok((validated_ack_frame, time_sync_us)) => (
                                     DrvSvcEvent::Sent(tx_radio_frame, tx_timestamp, time_sync_us),
                                     validated_ack_frame,
@@ -877,6 +888,7 @@ where
         receiving_rx_driver: impl ReceivingRxState<RadioDriverImpl>,
         seq_nb: u8,
         frame_version: FrameVersion,
+        #[cfg(feature = "tsch")] dst_le_bytes: [u8; 8],
         ifs: Ifs<PhyOf<RadioDriverImpl>>,
         #[cfg(feature = "tsch")] rx_instant: NsInstant,
     ) -> DriverState<RadioDriverImpl> {
@@ -892,7 +904,8 @@ where
             }
             #[cfg(feature = "tsch")]
             FrameVersion::Ieee802154 => {
-                let mut writer = enh_ack_frame::<RadioDriverImpl>(seq_nb, outbound_ack_buffer);
+                let mut writer =
+                    enh_ack_frame::<RadioDriverImpl>(seq_nb, &dst_le_bytes, outbound_ack_buffer);
 
                 // For TSCH mode, update the Time Correction IE in the enhanced ACK
                 if let Some(mut tc) = writer.ies_fields_mut().time_correction_mut() {
@@ -1188,12 +1201,31 @@ where
             let ack_request = fc.ack_request();
             let seq_nb = preliminary_frame_info.seq_nr;
             let frame_version = fc.frame_version();
+
+            #[cfg(feature = "tsch")]
+            let src_le_bytes: Option<[u8; 8]> = preliminary_frame_info
+                .addressing_fields
+                .as_ref()
+                .and_then(|addressing| addressing.try_src_address())
+                .and_then(|src| match src {
+                    Address::Extended(ext) => <[u8; 8]>::try_from(ext.as_ref()).ok(),
+                    _ => None,
+                });
+
+            #[cfg(feature = "tsch")]
+            let can_ack =
+                !matches!(frame_version, FrameVersion::Ieee802154) || src_le_bytes.is_some();
+            #[cfg(not(feature = "tsch"))]
+            let can_ack = true;
+
             match seq_nb {
-                Some(seq_nb) if ack_request => {
+                Some(seq_nb) if ack_request && can_ack => {
                     self.complete_reception_with_ack(
                         receiving_rx_driver,
                         seq_nb,
                         frame_version,
+                        #[cfg(feature = "tsch")]
+                        src_le_bytes.unwrap_or([0u8; 8]),
                         next_ifs,
                         #[cfg(feature = "tsch")]
                         rx_instant,
@@ -1466,14 +1498,11 @@ where
     }
 }
 
-/// Validates an incoming ACK frame and checks if it matches the expected sequence number.
-///
-/// This function supports both:
-/// - Immediate ACK
-/// - Enhanced ACK
+#[cfg_attr(not(feature = "tsch"), allow(unused_variables))]
 fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
     rx_ack_frame: RadioFrame<RadioFrameSized>,
     expected_seq_nb: u8,
+    own_extended_address: &[u8; 8],
 ) -> Result<(RadioFrame<RadioFrameUnsized>, Option<i16>), RadioFrame<RadioFrameUnsized>> {
     use dot15d4_driver::radio::frame::{FrameType, FrameVersion};
 
@@ -1499,17 +1528,31 @@ fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                 {
                     let reader = reader.parse_addressing();
                     if let Ok(reader) = reader {
-                        let reader = reader.parse_security().parse_ies::<RadioDriverImpl>();
-                        if let Ok(reader) = reader {
-                            let ies = reader.ies_fields();
-                            if let Some(tc) = ies.time_correction() {
-                                // If NACK bit is set, this is a negative acknowledgement
-                                (!tc.nack(), Some(tc.time_sync()))
+                        let addressed_to_us = match reader.try_addressing_fields() {
+                            Ok(addressing) => {
+                                addressing.try_dst_address().is_some_and(|dst| match dst {
+                                    Address::Extended(ext) => own_extended_address == ext.as_ref(),
+                                    _ => false,
+                                })
+                            }
+                            Err(_) => false,
+                        };
+
+                        if !addressed_to_us {
+                            (false, None)
+                        } else {
+                            let reader = reader.parse_security().parse_ies::<RadioDriverImpl>();
+                            if let Ok(reader) = reader {
+                                let ies = reader.ies_fields();
+                                if let Some(tc) = ies.time_correction() {
+                                    // If NACK bit is set, this is a negative acknowledgement
+                                    (!tc.nack(), Some(tc.time_sync()))
+                                } else {
+                                    (false, None)
+                                }
                             } else {
                                 (false, None)
                             }
-                        } else {
-                            (false, None)
                         }
                     } else {
                         (false, None)

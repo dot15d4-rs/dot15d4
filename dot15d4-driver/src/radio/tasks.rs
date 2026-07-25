@@ -577,6 +577,7 @@ pub struct PreliminaryFrameInfo<'frame> {
     pub mpdu_length: u16,
     pub frame_control: Option<FrameControl<[u8; 2]>>,
     pub seq_nr: Option<u8>,
+    /// The frame's addressing fields, borrowed from the rx buffer.
     pub addressing_fields: Option<AddressingFields<&'frame [u8]>>,
 }
 
