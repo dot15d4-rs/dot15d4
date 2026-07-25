@@ -22,6 +22,12 @@ static_cell = "2.1"
 strict = []                             # enable to deny warnings
 security = []
 ies = []
+
+# Build Enhanced ACKs without a destination address, i.e. matched by sequence
+# number alone. Reproduces pre-fix behaviour; see the dot15d4 crate's feature
+# of the same name.
+no-enh-ack-addressing = []
+
 default = ["strict", "security", "ies"]
 
 _clippy-std = []

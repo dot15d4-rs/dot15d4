@@ -337,6 +337,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(not(feature = "no-enh-ack-addressing"))]
     fn test_enh_ack_frame() {
         const ENH_ACK_LEN: u8 = 15;
         const TEST_DST: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];

@@ -65,6 +65,17 @@ tsch-coordinator = ["tsch"]
 # instrumentation compiles away entirely.
 tsch-log = ["tsch"]
 
+# Build and accept Enhanced ACKs without a destination address, i.e. matched by
+# sequence number alone.
+#
+# This reverts the acknowledgment to a frame that identifies no recipient. Every
+# device that transmitted with the same sequence number in the same
+# acknowledgment window then accepts it, so several senders contending in one
+# shared TSCH cell all report success although at most one frame was received,
+# and the CSMA-CA retransmission procedure never runs. Provided to reproduce and
+# measure that failure mode; not for production use.
+no-enh-ack-addressing = ["dot15d4-frame/no-enh-ack-addressing"]
+
 # Disable Enh-Ack-based synchronization in TSCH network
 no-tsch-ack-sync = []
 

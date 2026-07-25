@@ -86,6 +86,11 @@ tsch-coordinator = ["tsch", "dot15d4/tsch-coordinator"]
 # i.e. be built with "tsch-coordinator".
 tsch-association = ["tsch"]
 
+# Build and accept Enhanced ACKs without a destination address (matched by
+# sequence number alone). Reproduces the shared-cell acknowledgment
+# misattribution; see the dot15d4 crate's feature of the same name.
+no-enh-ack-addressing = ["dot15d4/no-enh-ack-addressing"]
+
 # Disable Enh-Ack-based synchronization in TSCH network
 no-tsch-ack-sync = ["dot15d4/no-tsch-ack-sync"]
 

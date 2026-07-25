@@ -6,7 +6,7 @@ use dot15d4_util::allocator::BufferToken;
 
 #[cfg(feature = "ies")]
 use dot15d4_driver::radio::frame::{IeListRepr, IeRepr, IeReprList};
-#[cfg(feature = "ies")]
+#[cfg(all(feature = "ies", not(feature = "no-enh-ack-addressing")))]
 use dot15d4_driver::radio::frame::{
     Address, AddressingMode, AddressingRepr, ExtendedAddress, PanIdCompressionRepr,
 };
@@ -64,7 +64,7 @@ pub const ENH_ACK_IE_LIST: &[IeRepr<'static>] = &[IeRepr::TimeCorrectionHeaderIe
 /// - Time Correction Header IE (4 bytes total):
 ///   - Header (2 bytes): Element ID = 0x1e, Length = 2
 ///   - Content (2 bytes): Time Sync Info + NACK bit
-#[cfg(feature = "ies")]
+#[cfg(all(feature = "ies", not(feature = "no-enh-ack-addressing")))]
 pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(
@@ -78,10 +78,24 @@ pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
         ENH_ACK_IE_LIST,
     )));
 
+/// Unaddressed Enhanced ACK, matched by sequence number alone.
+///
+/// See the `no-enh-ack-addressing` feature: this reproduces the acknowledgment
+/// misattribution described above and is not for production use.
+#[cfg(all(feature = "ies", feature = "no-enh-ack-addressing"))]
+pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
+    .with_frame_control(SeqNrRepr::Yes)
+    .without_addressing()
+    .without_security()
+    .with_ies(IeListRepr::WithoutTerminationIes(IeReprList::new(
+        ENH_ACK_IE_LIST,
+    )));
+
 /// Size of an Enhanced ACK MPDU without FCS.
 ///
-/// Frame Control (2) + Seq Nr (1) + Dst Extended Address (8) + Time Correction
-/// IE Header (2) + Time Correction IE Content (2) = 15 bytes
+/// Frame Control (2) + Seq Nr (1) + Dst Extended Address (8, unless
+/// `no-enh-ack-addressing`) + Time Correction IE Header (2) + Time Correction
+/// IE Content (2)
 #[cfg(feature = "ies")]
 pub const ENH_ACK_MPDU_SIZE_WO_FCS: u16 = {
     match ENH_ACK_FRAME_REPR.mpdu_length_wo_fcs(0) {
@@ -90,11 +104,17 @@ pub const ENH_ACK_MPDU_SIZE_WO_FCS: u16 = {
     }
 };
 
-#[cfg(feature = "ies")]
+#[cfg(all(feature = "ies", not(feature = "no-enh-ack-addressing")))]
 const _: () = {
     // FC(2) + SeqNr(1) + DstExtAddr(8) + Time Correction Header(2) +
     // TimeCorrection Content(2) = 15
     assert!(ENH_ACK_MPDU_SIZE_WO_FCS == 15);
+};
+
+#[cfg(all(feature = "ies", feature = "no-enh-ack-addressing"))]
+const _: () = {
+    // FC(2) + SeqNr(1) + Time Correction Header(2) + TimeCorrection Content(2) = 7
+    assert!(ENH_ACK_MPDU_SIZE_WO_FCS == 7);
 };
 
 /// Instantiates a reader/writer for an Enhanced ACK frame with Time Correction IE.
@@ -116,7 +136,7 @@ const _: () = {
 #[cfg(feature = "ies")]
 pub fn enh_ack_frame<Config: DriverConfig>(
     seq_num: u8,
-    dst_le_bytes: &[u8; 8],
+    _dst_le_bytes: &[u8; 8],
     buffer: BufferToken,
 ) -> MpduParser<MpduFrame, MpduWithAllFields> {
     // Safety: We give a valid configuration and therefore expect the operation
@@ -127,8 +147,11 @@ pub fn enh_ack_frame<Config: DriverConfig>(
     let _ = ack_frame.try_set_sequence_number(seq_num);
 
     // Address the acknowledgment to the originator of the acknowledged frame.
-    let dst = Address::Extended(ExtendedAddress::new_owned(*dst_le_bytes));
-    ack_frame.addressing_fields_mut().dst_address_mut().set(&dst);
+    #[cfg(not(feature = "no-enh-ack-addressing"))]
+    {
+        let dst = Address::Extended(ExtendedAddress::new_owned(*_dst_le_bytes));
+        ack_frame.addressing_fields_mut().dst_address_mut().set(&dst);
+    }
 
     // Initialize Time Correction IE to zero values
     if let Some(mut tc) = ack_frame.ies_fields_mut().time_correction_mut() {

@@ -1212,10 +1212,10 @@ where
                     _ => None,
                 });
 
-            #[cfg(feature = "tsch")]
+            #[cfg(all(feature = "tsch", not(feature = "no-enh-ack-addressing")))]
             let can_ack =
                 !matches!(frame_version, FrameVersion::Ieee802154) || src_le_bytes.is_some();
-            #[cfg(not(feature = "tsch"))]
+            #[cfg(any(not(feature = "tsch"), feature = "no-enh-ack-addressing"))]
             let can_ack = true;
 
             match seq_nb {
@@ -1498,7 +1498,10 @@ where
     }
 }
 
-#[cfg_attr(not(feature = "tsch"), allow(unused_variables))]
+#[cfg_attr(
+    any(not(feature = "tsch"), feature = "no-enh-ack-addressing"),
+    allow(unused_variables)
+)]
 fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
     rx_ack_frame: RadioFrame<RadioFrameSized>,
     expected_seq_nb: u8,
@@ -1528,6 +1531,7 @@ fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                 {
                     let reader = reader.parse_addressing();
                     if let Ok(reader) = reader {
+                        #[cfg(not(feature = "no-enh-ack-addressing"))]
                         let addressed_to_us = match reader.try_addressing_fields() {
                             Ok(addressing) => {
                                 addressing.try_dst_address().is_some_and(|dst| match dst {
@@ -1537,6 +1541,8 @@ fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                             }
                             Err(_) => false,
                         };
+                        #[cfg(feature = "no-enh-ack-addressing")]
+                        let addressed_to_us = true;
 
                         if !addressed_to_us {
                             (false, None)
