@@ -20,7 +20,7 @@ pub mod trace;
 pub use log::*;
 
 /// A generic error.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error;
 
 /// A type alias for `Result<T, dot15d4-util::Error>`.
