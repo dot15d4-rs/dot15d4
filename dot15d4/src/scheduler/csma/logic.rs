@@ -652,6 +652,11 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
     ) -> SchedulerAction {
         self.state = CsmaState::WaitingForTxStart;
 
+        // Stamp macDsn on the fresh request. Retransmissions re-use the frame
+        // as it stands and therefore keep this sequence number.
+        let mut mpdu = mpdu;
+        let _ = mpdu.try_set_sequence_number(context.pib.next_dsn());
+
         self.base_time = context.timer.now();
         self.backoff.reset(context.pib.min_be);
         self.tx_token = Some(token);

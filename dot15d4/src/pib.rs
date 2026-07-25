@@ -34,6 +34,7 @@ pub struct Pib {
     /// only using its extended address. A value of 0xffff indicates that this
     /// value is unknown.
     pub(crate) coord_short_address: u16,
+    pub(crate) dsn: u8,
     /// The maximum value of the backoff exponent, BE, in the CSMA-CA
     /// algorithm.
     pub(crate) max_be: u8,
@@ -82,6 +83,7 @@ impl Pib {
             association_permit: false,
             coord_extended_address: Address::Extended(ExtendedAddress::new_owned([0xff; 8])),
             coord_short_address: 0xffff,
+            dsn: 0,
             max_be: MAC_MAX_BE,
             min_be: MAC_MIN_BE,
             max_frame_retries: MAC_MAX_FRAME_RETRIES,
@@ -97,5 +99,11 @@ impl Pib {
             #[cfg(feature = "tsch")]
             tsch: TschPib::new(),
         }
+    }
+
+    pub(crate) fn next_dsn(&mut self) -> u8 {
+        let dsn = self.dsn;
+        self.dsn = self.dsn.wrapping_add(1);
+        dsn
     }
 }

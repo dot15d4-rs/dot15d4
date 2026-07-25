@@ -198,8 +198,13 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
         driver_request_sender: DriverRequestSender<'svc>,
         driver_event_receiver: DriverEventReceiver<'svc>,
     ) -> Self {
+        let mut pib = Pib::new(address);
+        // macDsn shall be initialized to a random value (IEEE 802.15.4-2024,
+        // section 8.4.3.1). The scheduler context owns the only RNG in the
+        // stack, so the seeding happens here.
+        pib.dsn = rng.next_u32() as u8;
         Self {
-            pib: Pib::new(address),
+            pib,
             buffer_allocator,
             rng,
             timer,

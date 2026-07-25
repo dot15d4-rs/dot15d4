@@ -276,12 +276,11 @@ async fn upper_layer_task(
         let src_addr = get_device_extended_address(&request_sender).await;
         let dst_addr = Address::Extended(ExtendedAddress::new_owned(dst));
         let payload = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let mut seq_nr: u8 = 0;
 
         let interval = NsDuration::millis(config.send_period_ms as u64);
         let mut next_tx = timer.now() + interval;
         loop {
-            let request = data_request(buffer_allocator, seq_nr, &src_addr, &dst_addr, &payload);
+            let request = data_request(buffer_allocator, &src_addr, &dst_addr, &payload);
             let request_token = request_sender.allocate_request_token().await;
             let _mac_confirm = request_sender
                 .send_request_awaiting_response(request_token, request)
@@ -291,8 +290,6 @@ async fn upper_layer_task(
             if let dot15d4::mac::primitives::MacConfirm::McpsData(Some(timestamp)) = &_mac_confirm {
                 info!("Tx Timestamp: {}", timestamp.ticks());
             }
-
-            seq_nr = seq_nr.wrapping_add(1);
 
             let now = timer.now();
             if next_tx <= now {
@@ -376,7 +373,6 @@ fn parse_hex_addr(s: &str) -> Option<[u8; 8]> {
 
 fn data_request(
     buffer_allocator: MacBufferAllocator,
-    seq_nr: u8,
     src_addr: &Address<[u8; 8]>,
     dst_addr: &Address<[u8; 8]>,
     payload: &[u8],
@@ -387,7 +383,6 @@ fn data_request(
         data_frame::<NrfRadioDriver>(Some(IE_REPR_LIST), payload.len() as u16, buffer_allocator)
             .unwrap();
 
-    mpdu_writer.set_sequence_number(seq_nr);
     mpdu_writer.set_ack_request(true);
 
     let mut addressing = mpdu_writer.addressing_fields_mut();

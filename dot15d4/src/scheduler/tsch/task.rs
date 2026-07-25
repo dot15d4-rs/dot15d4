@@ -328,8 +328,6 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub last_beacon_time: Option<NsInstant>,
     /// Instant at which the next keep-alive toward the time source is due.
     pub next_keep_alive: NsInstant,
-    /// Sequence number of the next keep-alive frame.
-    keep_alive_seq: u8,
     /// Marker for radio driver implementation
     _marker: PhantomData<RadioDriverImpl>,
 }
@@ -350,7 +348,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             beacon_config: BeaconConfig::disabled(),
             last_beacon_time: None,
             next_keep_alive: NsInstant::from_ticks(0),
-            keep_alive_seq: 0,
             _marker: PhantomData,
         }
     }
@@ -750,6 +747,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         from_asn: TschAsn,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> bool {
+        // Stamp macDsn here, on the fresh request only: retransmissions go
+        // through `queue_tx_with_backoff` and must keep the sequence number
+        // of the frame that is already on the air, or the acknowledgment
+        // would no longer match.
+        let mut mpdu = mpdu;
+        let _ = mpdu.try_set_sequence_number(context.pib.next_dsn());
+
         let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
         self.queue_tx_with_backoff(TxOrigin::Mac(token), mpdu, from_asn, backoff, context)
     }
@@ -1027,7 +1031,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         // one; a synchronizing exchange in the meantime pushes it further.
         self.touch_keep_alive(now, context);
 
-        let Some(mpdu) = self.build_keep_alive_frame(context) else {
+        let Some((mpdu, seq_nr)) = self.build_keep_alive_frame(context) else {
             // No buffer or no (evicted) time source entry: skip this round
             // and retry a period later. With the allocator sized per
             // `MAC_NUM_REQUIRED_BUFFERS` and a pinned time source, this does
@@ -1039,7 +1043,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         tsch_info!(
             "tsch keep-alive queue asn={} seq={}",
             context.pib.tsch.asn,
-            self.keep_alive_seq
+            seq_nr
         );
         let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
         let from_asn = context.pib.tsch.asn_at(now);
@@ -1050,10 +1054,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// with the AR field set (IEEE 802.15.4-2024, 10.3.10.8). 
     /// Returns `None` when no buffer is available or the time source has 
     /// no neighbor table entry.
+    ///
+    /// The sequence number stamped on the frame is returned along with it, so
+    /// callers can report it without a second copy being kept anywhere.
     fn build_keep_alive_frame(
         &mut self,
         context: &mut SchedulerContext<RadioDriverImpl>,
-    ) -> Option<MpduFrame> {
+    ) -> Option<(MpduFrame, u8)> {
         let time_source = context.pib.tsch.time_source?;
         let dst = *context.pib.neighbors.get(time_source)?.ext_addr();
 
@@ -1074,8 +1081,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             }
         };
 
-        self.keep_alive_seq = self.keep_alive_seq.wrapping_add(1);
-        writer.set_sequence_number(self.keep_alive_seq);
+        // Keep-alives are Data frames and draw from macDsn like every other
+        // transmission. A counter of their own would let one device emit two
+        // different frames carrying the same sequence number.
+        let seq_nr = context.pib.next_dsn();
+        writer.set_sequence_number(seq_nr);
         writer.set_ack_request(true);
 
         let dst_addr = Address::Extended(ExtendedAddress::new_owned(dst));
@@ -1085,6 +1095,6 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             .set(&context.pib.extended_address);
         addressing.dst_address_mut().set(&dst_addr);
 
-        Some(writer.into_mpdu_frame())
+        Some((writer.into_mpdu_frame(), seq_nr))
     }
 }
