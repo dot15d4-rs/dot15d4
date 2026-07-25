@@ -72,7 +72,7 @@ impl<const N: usize> DriftEstimator<N> {
     }
 
     /// Mean per-slot drift in nanoseconds (0 with no samples). Used for logging;
-    /// the slot-start math uses [`Self::compensation_ns`] so it does not multiply
+    /// the slot-start math uses [`Self::compensation_q32`] so it does not multiply
     /// a rounded value again.
     fn per_slot_ns(&self) -> i32 {
         let (num, den) = self.sums();
@@ -83,12 +83,12 @@ impl<const N: usize> DriftEstimator<N> {
         }
     }
 
-    fn compensation_ns(&self, slots_diff: u32) -> i64 {
+    fn compensation_q32(&self, slots_diff: u32) -> i128 {
         let (num, den) = self.sums();
         if den == 0 {
             0
         } else {
-            ((slots_diff as i128 * num as i128) / den as i128) as i64
+            ((slots_diff as i128 * num as i128) << 32) / den as i128
         }
     }
 
@@ -267,6 +267,15 @@ pub struct TschPib {
     /// Sliding-window estimate of the per-slot clock drift against the time
     /// source.
     drift: DriftEstimator<MAC_TSCH_DRIFT_BUFFER_LEN>,
+    /// Sub-nanosecond drift compensation not yet applied to `last_base_time`,
+    /// as a Q32 fraction of a nanosecond (invariant: `< 2^32`). Carried across
+    /// [`Self::update_timing`] re-anchors so that chained whole-nanosecond
+    /// floors stay exactly equal to one flooring over the whole span; without
+    /// the carry, each re-anchor discards up to 1 ns of compensation in a
+    /// drift-sign-fixed direction, accumulating tens of nanoseconds of phase
+    /// bias between resyncs. Reset whenever the anchor is replaced by an
+    /// actual measurement.
+    comp_rem_q32: u64,
 }
 
 impl TschPib {
@@ -456,7 +465,9 @@ impl TschPib {
     /// Update base time and ASN after executing an operation.
     pub fn update_timing(&mut self, asn: TschAsn) {
         let timeslot_length_us = self.timeslot_length_us();
-        self.last_base_time = self.expected_slot_start(asn, timeslot_length_us);
+        let (base, rem) = self.slot_start_and_rem(asn, timeslot_length_us);
+        self.last_base_time = base;
+        self.comp_rem_q32 = rem;
         self.asn = asn;
     }
 
@@ -480,13 +491,33 @@ impl TschPib {
     /// `asn - self.asn` span instead of a rounded per-slot duration multiplied
     /// out, so the error does not build up with distance from the anchor.
     pub fn expected_slot_start(&self, asn: TschAsn, timeslot_length_us: u64) -> NsInstant {
+        self.slot_start_and_rem(asn, timeslot_length_us).0
+    }
+
+    /// Drift-compensated start of `asn`'s timeslot, plus the subnanosecond
+    /// compensation remainder (Q32, `< 2^32`) left after flooring the applied
+    /// correction to whole nanoseconds.
+    fn slot_start_and_rem(&self, asn: TschAsn, timeslot_length_us: u64) -> (NsInstant, u64) {
         let slots_diff = asn.saturating_sub(self.asn) as u32;
         let nominal_ns = (timeslot_length_us.saturating_mul(1000) as i64).saturating_mul(slots_diff as i64);
         #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-        let total_ns = nominal_ns - self.drift.compensation_ns(slots_diff);
+        let (comp_ns, rem) = {
+            // Exact compensation over the span period in Q32 ns, including the
+            // fraction carried over from earlier re-anchors. `>> 32` on the
+            // signed value floors, so the new remainder is always in
+            // `[0, 2^32)`.
+            let comp_q32 = self.drift.compensation_q32(slots_diff) + self.comp_rem_q32 as i128;
+            let comp_ns = (comp_q32 >> 32) as i64;
+            let rem = (comp_q32 - ((comp_ns as i128) << 32)) as u64;
+            (comp_ns, rem)
+        };
         #[cfg(feature = "no-tsch-drift-adjustment")]
-        let total_ns = nominal_ns;
-        self.last_base_time + NsDuration::nanos(total_ns.max(0) as u64)
+        let (comp_ns, rem) = (0i64, 0u64);
+        let total_ns = nominal_ns - comp_ns;
+        (
+            self.last_base_time + NsDuration::nanos(total_ns.max(0) as u64),
+            rem,
+        )
     }
 
     /// Calculate current ASN from timestamp.
@@ -519,6 +550,9 @@ impl TschPib {
         {
             self.asn = asn;
             self.last_base_time = timeslot_start;
+            // The anchor is now a fresh measurement; any sub-ns compensation
+            // left over from the previous model chain no longer applies.
+            self.comp_rem_q32 = 0;
             #[cfg(not(feature = "no-tsch-drift-adjustment"))]
             self.update_drift(asn, timeslot_start);
             self.last_rx = Some((timeslot_start, asn));
@@ -537,6 +571,7 @@ impl TschPib {
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
         self.asn = asn;
         self.last_base_time = instant - NsDuration::micros(tx_offset_us);
+        self.comp_rem_q32 = 0;
         self.last_rx = None;
         #[cfg(feature = "sync-error-log")]
         {
@@ -548,14 +583,10 @@ impl TschPib {
         tsch_trace!("tsch time-base reset asn={}", asn);
     }
 
-    /// Update clock drift relative to timesource with an instant derived from
-    /// communication with timesource neighbor (i.e. when receiving a frame
-    /// or using Time Sync information in Time Correction IE).
+    /// Update clock drift relative to timesource from a measured RMARKER of a
+    /// frame received from the time source. 
     #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-    #[cfg_attr(
-        all(feature = "no-tsch-frame-sync", feature = "no-tsch-ack-sync"),
-        allow(dead_code)
-    )]
+    #[cfg_attr(feature = "no-tsch-frame-sync", allow(dead_code))]
     fn update_drift(&mut self, asn: TschAsn, timeslot_start: NsInstant) {
         if let Some((last_slot_start, last_rx_asn)) = self.last_rx {
             let delta_asn = asn.saturating_sub(last_rx_asn);
@@ -594,9 +625,6 @@ impl TschPib {
             } else {
                 self.last_base_time += NsDuration::micros(timesync_us.unsigned_abs() as u64);
             }
-            #[cfg(not(feature = "no-tsch-drift-adjustment"))]
-            self.update_drift(asn, self.last_base_time);
-            self.last_rx = Some((self.last_base_time, asn));
 
             tsch_trace!(
                 "tsch resync src=ack asn={} correction_us={} drift_ns_per_slot={}",
@@ -656,6 +684,7 @@ impl Default for TschPib {
             #[cfg(feature = "sync-error-log")]
             had_sync_obs: false,
             drift: DriftEstimator::new(),
+            comp_rem_q32: 0,
         }
     }
 }

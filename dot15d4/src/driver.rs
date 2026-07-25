@@ -898,11 +898,14 @@ where
                 if let Some(mut tc) = writer.ies_fields_mut().time_correction_mut() {
                     let delta = match self.expected_rx_framestart.get() {
                         Some(expected_rx_framestart) => {
-                            if expected_rx_framestart > rx_instant {
-                                (expected_rx_framestart - rx_instant).to_micros() as i16
+                            let delta_us = if expected_rx_framestart > rx_instant {
+                                ((expected_rx_framestart - rx_instant).to_nanos() as i64 + 500)
+                                    / 1000
                             } else {
-                                -((rx_instant - expected_rx_framestart).to_micros() as i16)
-                            }
+                                -(((rx_instant - expected_rx_framestart).to_nanos() as i64 + 500)
+                                    / 1000)
+                            };
+                            delta_us.clamp(-2048, 2047) as i16
                         }
                         None => 0i16,
                     };
