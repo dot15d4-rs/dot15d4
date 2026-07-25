@@ -78,9 +78,15 @@ impl<PB: PriorityBits> InterruptPriority<PB> {
 
     /// Convert the internal representation to the left-aligned ARM NVIC
     /// interrupt priority representation.
-    pub fn to_arm_nvic_repr(&self) -> u8 {
+    pub const fn to_arm_nvic_repr(&self) -> u8 {
         // NVIC priorities are left aligned.
         self.0 << (8 - PB::PRIORITY_BITS)
+    }
+
+    /// Const equivalent of lowering the priority by `n` levels.
+    pub const fn lower_by(self, n: u8) -> Self {
+        assert!(self.0 + n <= Self::LOWEST_U8);
+        Self(self.0 + n, PhantomData)
     }
 
     /// Convert the left-aligned ARM NVIC interrupt priority representation to

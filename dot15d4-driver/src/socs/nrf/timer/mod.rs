@@ -1,16 +1,24 @@
 //! Radio timer implementation for nRF SoCs.
 
+mod queue;
+
 // No need to use portable atomics in the driver as this is platform-specific
 // code.
 use core::{
     cell::{Cell, UnsafeCell},
-    future::poll_fn,
+    future::{poll_fn, Future},
+    marker::PhantomPinned,
     num::{NonZero, NonZeroU32},
+    pin::Pin,
     sync::atomic::{compiler_fence, AtomicU32, AtomicU8, AtomicUsize, Ordering},
-    task::{Poll, Waker},
+    task::{Context, Poll, Waker},
 };
 
-use cortex_m::{asm::wfe, peripheral::Peripherals as CorePeripherals};
+use cortex_m::{
+    asm::wfe,
+    peripheral::{scb::VectActive, Peripherals as CorePeripherals, SCB},
+    register::{basepri, basepri_max},
+};
 use dot15d4_util::sync::CancellationGuard;
 use fugit::TimerRateU64;
 #[cfg(feature = "timer-trace")]
@@ -25,17 +33,21 @@ use crate::{
     },
 };
 
-/// Alarm channels represent shared resources that need to be synchronized
-/// between scheduling context and interrupts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AlarmChannel {
-    HighPrecisionTimer = 0,
-    SleepTimer1,
-    SleepTimer2,
-    NumRtcChannels,
-}
+const RTC_CC_HP_TIMER_START: usize = 0;
+const RTC_CC_SLEEP_QUEUE: usize = 1;
+const RTC_CC_HFXO_PREWARM: usize = 2;
+const RTC_CC_HALF_PERIOD: usize = 3;
 
-/// This flag atomically represents the current state of an alarm.
+/// Priority of the TIMER0 interrupt: one below the radio's interrupt executor.
+const TIMER_IRQ_PRIORITY: NrfInterruptPriority = NrfInterruptPriority::HIGHEST.lower_by(1);
+
+/// Priority of the RTC2 interrupt.
+const RTC_IRQ_PRIORITY: NrfInterruptPriority = TIMER_IRQ_PRIORITY.lower_by(1);
+
+const _: () = assert!(RTC_IRQ_PRIORITY.to_arm_nvic_repr() != 0);
+
+/// This flag atomically represents the current state of the high-precision
+/// timer's RTC alarm (CC0).
 ///
 /// # Safety
 ///
@@ -60,7 +72,6 @@ pub enum AlarmChannel {
 /// - RTC interrupts remain disabled while we wait for the active half period
 /// - Depending on the configuration, several distinct RTC interrupts may be
 ///   involved.
-/// - Several instances of the sleep timer may concurrently access RTC alarms.
 ///
 /// Synchronization via a special value of the RTC tick (Self::OFF):
 /// - The overflow-protected RTC tick is 64 bits wide. A 64 bit value cannot
@@ -97,16 +108,25 @@ enum AlarmState {
     /// The alarm has fired and exclusive ownership was transferred back to the
     /// scheduling context.
     Fired,
-    /// The alarm is a borrowed HFXO pre-warm compare driving HFCLKSTART via PPI.
-    /// Owned by scheduling context; its compare interrupt is enabled so it frees
-    /// itself early. Release is decided by a `PreWarm -> Unused` compare-exchange
-    /// (interrupt early-release vs token drop), so the overflow ISR must handle it
-    /// specially rather than as a normal alarm.
-    PreWarm,
 }
 
-// Resources shared and synchronized between scheduling context and RTC
-// interrupt context.
+/// State of the dedicated HFXO pre-warm compare (CC2), which drives
+/// CLOCK.TASKS_HFCLKSTART through PPI.
+///
+/// # Safety
+///
+/// While `Idle`, the compare and the pre-warm tick are exclusively owned by
+/// scheduling context (only a single high-precision timer can exist, and only
+/// its start arms the pre-warm). While `Armed`, the compare interrupt is
+/// enabled so the channel frees itself early once it fired; release is decided
+/// by an `Armed -> Idle` compare-exchange electing exactly one winner between
+/// the interrupt's early release and the timer token's drop.
+#[repr(u8)]
+enum PrewarmState {
+    Idle,
+    Armed,
+}
+
 struct Alarm {
     /// The current alarm state. See [`AlarmState`] for details and safety
     /// considerations.
@@ -117,15 +137,13 @@ struct Alarm {
     /// Safety: Access is synchronized via the alarm state, see above.
     rtc_tick: Cell<u64>,
 
-    /// Waker for the current alarm.
+    /// Waker for the high-precision timer's `wait_for()`.
     ///
-    /// Safety: In case of an RTC alarm, access is synchronized via the alarm
-    ///         state, see [`AlarmState`] for details. This is required as
-    ///         canceling the alarm races with firing (i.e.  waking) it. The
-    ///         waker itself is [`Sync`]. It's therefore ok, to wake it from
-    ///         interrupt context.
+    /// Safety: Access is synchronized via the TIMER interrupt-enable register,
+    ///         see [`State::timer_wait_for`]. The waker itself is [`Sync`].
+    ///         It's therefore ok, to wake it from interrupt context.
     ///
-    /// Note that the safety conditions of the [`RadioTimerApi`] disallow
+    /// Note that the safety conditions of the [`HighPrecisionTimer`] disallow
     /// migrating an active timer to a different task. This is required to grant
     /// exclusive access to the waker from the interrupt as long as it is
     /// active.
@@ -148,12 +166,36 @@ impl Alarm {
     }
 }
 
-const NUM_RTC_CHANNELS: usize = AlarmChannel::NumRtcChannels as usize;
-const RTC_CHANNELS: [AlarmChannel; NUM_RTC_CHANNELS] = [
-    AlarmChannel::HighPrecisionTimer,
-    AlarmChannel::SleepTimer1,
-    AlarmChannel::SleepTimer2,
-];
+/// The sleep-timer waiter queue behind a BASEPRI priority-ceiling lock.
+struct SleepQueue(UnsafeCell<queue::Inner>);
+
+// Safety: The inner queue is only ever accessed through `with()`, which masks
+//         every context that is allowed to access it (see above); wakers taken
+//         out of the queue are `Sync` and may be woken from any context. On
+//         the single-core nRF platform, compiler fences suffice as barriers.
+unsafe impl Sync for SleepQueue {}
+
+impl SleepQueue {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(queue::Inner::new()))
+    }
+
+    /// Runs `f` with exclusive access to the queue.
+    fn with<R>(&self, f: impl FnOnce(&mut queue::Inner) -> R) -> R {
+        let restore = basepri::read();
+        basepri_max::write(RTC_IRQ_PRIORITY.to_arm_nvic_repr());
+        compiler_fence(Ordering::SeqCst);
+
+        // Safety: All other queue users are masked, see the struct docs.
+        let result = f(unsafe { &mut *self.0.get() });
+
+        compiler_fence(Ordering::SeqCst);
+        // Safety: Restores a previously read value; `basepri_max` never
+        //         lowered it below an outer ceiling in the meantime.
+        unsafe { basepri::write(restore) };
+        result
+    }
+}
 
 /// The driver initialization state.
 #[repr(u8)]
@@ -189,11 +231,23 @@ struct State {
     // embassy contributors!
     half_period: AtomicU32,
 
-    /// Independent resource synchronization channels supported by the RTC
-    /// driver.
+    /// Synchronizes the high-precision timer's RTC channel (CC0).
     ///
     /// Safety: RTC alarms are Sync.
-    alarms: [Alarm; NUM_RTC_CHANNELS],
+    hp_alarm: Alarm,
+
+    /// The sleep-timer waiter queue (CC1).
+    sleep_queue: SleepQueue,
+
+    /// State of the dedicated HFXO pre-warm compare (CC2), see [`PrewarmState`].
+    prewarm_state: AtomicU8,
+
+    /// The RTC tick at which the pre-warm compare is set to fire.
+    ///
+    /// Safety: Written from scheduling context while the pre-warm state is
+    ///         [`PrewarmState::Idle`], read-only in both contexts while
+    ///         [`PrewarmState::Armed`]. The state store releases/acquires it.
+    prewarm_tick: Cell<u64>,
 
     /// Contains the reference overflow-protected RTC tick (losslessly
     /// represented as the corresponding radio clock instant) at which the
@@ -302,12 +356,13 @@ impl State {
         | 1 << Self::RTC_CC0_TIMER_START_CHANNEL;
 
     const fn new() -> Self {
-        // In const-context we cannot use array::from_fn and need to initialize
-        // array with non-copy values manually.
         Self {
             init_state: AtomicU8::new(InitializationState::Uninitialized as u8),
             half_period: AtomicU32::new(0),
-            alarms: [Alarm::new(), Alarm::new(), Alarm::new()],
+            hp_alarm: Alarm::new(),
+            sleep_queue: SleepQueue::new(),
+            prewarm_state: AtomicU8::new(PrewarmState::Idle as u8),
+            prewarm_tick: Cell::new(0),
             timer_epoch: Cell::new(NsInstant::from_ticks(0)),
             sleep_clock_uses_hfclk: AtomicU8::new(0),
             hfclk_active_use: AtomicUsize::new(0),
@@ -488,14 +543,18 @@ impl State {
             #[cfg(not(feature = "timer-trace"))]
             ppi.fork[Self::RTC_CC0_TIMER_START_CHANNEL].tep.reset();
 
-            // HFXO pre-warm: a borrowed sleep COMPARE -> CLOCK TASKS_HFCLKSTART.
-            // TEP is fixed; EEP is set per-arm in arrange_hfclk_prewarm() and the
-            // channel is on only while a borrow is active.
+            // HFXO pre-warm: the dedicated pre-warm COMPARE (CC2) -> CLOCK
+            // TASKS_HFCLKSTART. Both endpoints are fixed; the channel is only
+            // enabled while a pre-warm is armed (arrange_hfclk_prewarm()).
             // Safety: CLOCK is owned only by this subsystem; we just take the
             // address of its HFCLKSTART task register.
             let hfclkstart = unsafe { &*nrf52840_pac::CLOCK::ptr() }
                 .tasks_hfclkstart
                 .as_ptr() as u32;
+            ppi.ch[Self::RTC_HFCLKSTART_PPI_CHANNEL].eep.write(|w| {
+                w.eep()
+                    .variant(rtc.events_compare[RTC_CC_HFXO_PREWARM].as_ptr() as u32)
+            });
             ppi.ch[Self::RTC_HFCLKSTART_PPI_CHANNEL]
                 .tep
                 .write(|w| w.tep().variant(hfclkstart));
@@ -510,8 +569,28 @@ impl State {
             }
         }
 
-        // CC3 and overflow events trigger half-period counting.
-        rtc.cc[3].write(|w| w.compare().variant(0x800000));
+        rtc.intenclr.write(|w| {
+            w.tick().set_bit();
+            w.ovrflw().set_bit();
+            w.compare0().set_bit();
+            w.compare1().set_bit();
+            w.compare2().set_bit();
+            w.compare3().set_bit()
+        });
+        rtc.evtenclr.write(|w| {
+            w.ovrflw().set_bit();
+            w.compare0().set_bit();
+            w.compare1().set_bit();
+            w.compare2().set_bit();
+            w.compare3().set_bit()
+        });
+        rtc.events_ovrflw.reset();
+        rtc.events_tick.reset();
+        for events_compare in rtc.events_compare.iter() {
+            events_compare.reset();
+        }
+
+        rtc.cc[RTC_CC_HALF_PERIOD].write(|w| w.compare().variant(0x800000));
         rtc.intenset.write(|w| {
             w.ovrflw().set_bit();
             w.compare3().set_bit()
@@ -525,18 +604,11 @@ impl State {
 
         let mut nvic = Self::nvic();
 
-        let timer_interrupt_priority = NrfInterruptPriority::HIGHEST.one_lower().unwrap();
         // Safety: See the documented synchronization approach.
         unsafe {
-            nvic.set_priority(
-                interrupt::TIMER0,
-                timer_interrupt_priority.to_arm_nvic_repr(),
-            )
-        };
-
-        let rtc_interrupt_priority = timer_interrupt_priority.one_lower().unwrap();
-        // Safety: See the documented synchronization approach.
-        unsafe { nvic.set_priority(interrupt::RTC2, rtc_interrupt_priority.to_arm_nvic_repr()) };
+            nvic.set_priority(interrupt::TIMER0, TIMER_IRQ_PRIORITY.to_arm_nvic_repr());
+            nvic.set_priority(interrupt::RTC2, RTC_IRQ_PRIORITY.to_arm_nvic_repr());
+        }
 
         // Clear and enable timer interrupts.
         NVIC::unpend(interrupt::RTC2);
@@ -598,73 +670,61 @@ impl State {
 
     /// Make sure the HFXO is running by the time the timer starts at
     /// `timer_start_tick` (RTC2 CC0).
-    fn arrange_hfclk_prewarm(&self, timer_start_tick: u64) -> Option<AlarmChannel> {
+    fn arrange_hfclk_prewarm(&self, timer_start_tick: u64) -> bool {
         let rtc_now_tick = self.rtc_now_tick();
         if !self.sleep_clock_uses_hfclk()
             && timer_start_tick
                 > rtc_now_tick + Self::HFXO_PREWARM_LEAD_TICKS + Self::RTC_GUARD_TICKS
             && timer_start_tick - rtc_now_tick < Self::RTC_THREE_QUARTERS_PERIOD
         {
-            if let Some(channel) = [AlarmChannel::SleepTimer1, AlarmChannel::SleepTimer2]
-                .into_iter()
-                .find(|&channel| self.rtc_try_acquire_alarm(channel).is_ok())
-            {
-                let prewarm_tick = timer_start_tick - Self::HFXO_PREWARM_LEAD_TICKS;
-                let rtc = Self::rtc();
-                let cc = channel as usize;
+            debug_assert_eq!(
+                self.prewarm_state.load(Ordering::Relaxed),
+                PrewarmState::Idle as u8
+            );
 
-                rtc.events_compare[cc].reset();
-                rtc.cc[cc]
-                    .write(|w| w.compare().variant(prewarm_tick as u32 & 0xFFFFFF));
+            let prewarm_tick = timer_start_tick - Self::HFXO_PREWARM_LEAD_TICKS;
+            let rtc = Self::rtc();
 
-                // The ISR uses this tick to tell the real compare from a
-                // spurious early match on the stale CC value.
-                // Safety: We own the alarm (Pending) at this point; the value
-                //         is released to interrupt context by the PreWarm store
-                //         below.
-                unsafe { self.set_rtc_alarm_tick(channel, prewarm_tick) };
+            rtc.events_compare[RTC_CC_HFXO_PREWARM].reset();
+            rtc.cc[RTC_CC_HFXO_PREWARM]
+                .write(|w| w.compare().variant(prewarm_tick as u32 & 0xFFFFFF));
 
-                match channel {
-                    AlarmChannel::SleepTimer1 => rtc.evtenset.write(|w| w.compare1().set_bit()),
-                    AlarmChannel::SleepTimer2 => rtc.evtenset.write(|w| w.compare2().set_bit()),
-                    _ => {}
-                }
+            // The ISR uses this tick to tell the real compare from a
+            // spurious early match on the stale CC value.
+            // Safety: The pre-warm is idle, i.e. exclusively owned by this
+            //         scheduling context; the value is released to interrupt
+            //         context by the `Armed` store below.
+            self.prewarm_tick.set(prewarm_tick);
 
-                let ppi = Self::ppi();
-                ppi.ch[Self::RTC_HFCLKSTART_PPI_CHANNEL]
-                    .eep
-                    .write(|w| w.eep().variant(rtc.events_compare[cc].as_ptr() as u32));
-                ppi.chenset
-                    .write(|w| unsafe { w.bits(1 << Self::RTC_HFCLKSTART_PPI_CHANNEL) });
+            rtc.evtenset.write(|w| w.compare2().set_bit());
 
-                compiler_fence(Ordering::Release);
-                self.alarms[cc]
-                    .state
-                    .store(AlarmState::PreWarm as u8, Ordering::Relaxed);
-                match channel {
-                    AlarmChannel::SleepTimer1 => rtc.intenset.write(|w| w.compare1().set_bit()),
-                    AlarmChannel::SleepTimer2 => rtc.intenset.write(|w| w.compare2().set_bit()),
-                    _ => {}
-                }
+            Self::ppi()
+                .chenset
+                .write(|w| unsafe { w.bits(1 << Self::RTC_HFCLKSTART_PPI_CHANNEL) });
 
-                if self.rtc_now_tick() + Self::RTC_GUARD_TICKS <= prewarm_tick {
-                    return Some(channel);
-                }
-                self.rtc_release_prewarm(channel);
+            compiler_fence(Ordering::Release);
+            self.prewarm_state
+                .store(PrewarmState::Armed as u8, Ordering::Relaxed);
+            rtc.intenset.write(|w| w.compare2().set_bit());
+
+            if self.rtc_now_tick() + Self::RTC_GUARD_TICKS <= prewarm_tick {
+                return true;
             }
+            self.rtc_release_prewarm();
         }
 
         self.hfclk_start_blocking();
-        None
+        false
     }
 
-    fn rtc_release_prewarm(&self, channel: AlarmChannel) {
+    /// Tear down the HFXO pre-warm.
+    fn rtc_release_prewarm(&self) {
         compiler_fence(Ordering::Release);
-        let won = self.alarms[channel as usize]
-            .state
+        let won = self
+            .prewarm_state
             .compare_exchange(
-                AlarmState::PreWarm as u8,
-                AlarmState::Unused as u8,
+                PrewarmState::Armed as u8,
+                PrewarmState::Idle as u8,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             )
@@ -673,66 +733,56 @@ impl State {
 
         if won {
             let rtc = Self::rtc();
-            match channel {
-                AlarmChannel::SleepTimer1 => {
-                    rtc.intenclr.write(|w| w.compare1().set_bit());
-                    rtc.evtenclr.write(|w| w.compare1().set_bit());
-                }
-                AlarmChannel::SleepTimer2 => {
-                    rtc.intenclr.write(|w| w.compare2().set_bit());
-                    rtc.evtenclr.write(|w| w.compare2().set_bit());
-                }
-                _ => {}
-            }
+            rtc.intenclr.write(|w| w.compare2().set_bit());
+            rtc.evtenclr.write(|w| w.compare2().set_bit());
             Self::ppi()
                 .chenclr
                 .write(|w| unsafe { w.bits(1 << Self::RTC_HFCLKSTART_PPI_CHANNEL) });
-            rtc.events_compare[channel as usize].reset();
+            rtc.events_compare[RTC_CC_HFXO_PREWARM].reset();
         }
     }
 
-    /// Sets an RTC alarm's tick value.
+    /// Sets the high-precision timer alarm's tick value.
     ///
     /// Called exclusively from scheduling context.
     ///
     /// # Safety
     ///
     /// - The alarm state must be owned by the calling context.
-    unsafe fn set_rtc_alarm_tick(&self, channel: AlarmChannel, rtc_tick: u64) {
-        let alarm = &self.alarms[channel as usize];
-        alarm.rtc_tick.set(rtc_tick);
+    unsafe fn hp_set_alarm_tick(&self, rtc_tick: u64) {
+        self.hp_alarm.rtc_tick.set(rtc_tick);
     }
 
-    /// Read the alarm's RTC tick.
+    /// Read the high-precision timer alarm's RTC tick.
     ///
     /// # Safety
     ///
     /// - The alarm state must be owned by the calling context.
     /// - Compiler fences are required to acquire/release this value.
-    unsafe fn rtc_alarm_tick(&self, channel: AlarmChannel) -> u64 {
-        self.alarms[channel as usize].rtc_tick.get()
+    unsafe fn hp_alarm_tick(&self) -> u64 {
+        self.hp_alarm.rtc_tick.get()
     }
 
-    /// Returns `true` while the RTC alarm is active or synchronizing (and
-    /// therefore owned by interrupt context).
+    /// Returns `true` while the high-precision timer alarm is active or
+    /// synchronizing (and therefore owned by interrupt context).
     ///
     /// Acquires alarm memory.
     ///
     /// May be called from both, interrupt and scheduling context.
-    fn is_rtc_alarm_owned_by_interrupt(&self, channel: AlarmChannel) -> bool {
-        let state = self.alarms[channel as usize].state.load(Ordering::Relaxed);
+    fn is_hp_alarm_owned_by_interrupt(&self) -> bool {
+        let state = self.hp_alarm.state.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
         state == AlarmState::Active as u8 || state == AlarmState::Synchronizing as u8
     }
 
-    /// Returns `true` while the RTC alarm is pending (and owned by scheduling
-    /// context).
+    /// Returns `true` while the high-precision timer alarm is pending (and
+    /// owned by scheduling context).
     ///
     /// Acquires alarm memory.
     ///
     /// May be called from both, interrupt and scheduling context.
-    fn is_rtc_alarm_pending(&self, channel: AlarmChannel) -> bool {
-        let state = self.alarms[channel as usize].state.load(Ordering::Relaxed);
+    fn is_hp_alarm_pending(&self) -> bool {
+        let state = self.hp_alarm.state.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
         state == AlarmState::Pending as u8
     }
@@ -744,21 +794,19 @@ impl State {
     ///
     /// May be called from both, interrupt and scheduling context.
     fn is_rtc_pending_immediate_synchronization(&self) -> bool {
-        let state = self.alarms[AlarmChannel::HighPrecisionTimer as usize]
-            .state
-            .load(Ordering::Relaxed);
+        let state = self.hp_alarm.state.load(Ordering::Relaxed);
         compiler_fence(Ordering::Acquire);
         state == AlarmState::Synchronizing as u8
     }
 
-    /// Mark the RTC alarm as pending if it is unused.
+    /// Mark the high-precision timer alarm as pending if it is unused.
     ///
     /// Acquires, then releases alarm memory.
     ///
     /// Called exclusively from scheduling context.
-    fn rtc_try_acquire_alarm(&self, channel: AlarmChannel) -> Result<(), RadioTimerError> {
+    fn hp_try_acquire_alarm(&self) -> Result<(), RadioTimerError> {
         compiler_fence(Ordering::Release);
-        let result = self.alarms[channel as usize].state.compare_exchange(
+        let result = self.hp_alarm.state.compare_exchange(
             AlarmState::Unused as u8,
             AlarmState::Pending as u8,
             Ordering::Relaxed,
@@ -772,75 +820,63 @@ impl State {
         }
     }
 
-    /// Transfer ownership of the RTC alarm to interrupt context to synchronize
-    /// the high-precision timer via the "next tick" approach.
-    ///
-    /// Releases the high-precision timer alarm memory.
-    ///
-    /// Called exclusively from scheduling context.
+    /// Transfer ownership of the high-precision timer alarm to interrupt
+    /// context.
     fn rtc_start_immediate_timer_synchronization(&self) {
         compiler_fence(Ordering::Release);
-        self.alarms[AlarmChannel::HighPrecisionTimer as usize]
+        self.hp_alarm
             .state
             .store(AlarmState::Synchronizing as u8, Ordering::Relaxed);
     }
 
-    /// Transfer ownership of the RTC alarm to interrupt context.
+    /// Transfer ownership of the high-precision timer alarm to interrupt
+    /// context.
     ///
     /// Releases alarm memory.
     ///
     /// Called exclusively from scheduling context.
     ///
-    /// Note: This does _not_ also activate interrupts. These may have to remain
-    ///       inactive if we've not yet reached the target timer period.
-    fn rtc_activate_alarm(&self, channel: AlarmChannel) {
+    /// Note: This does _not_ also activate the compare event. It may have to
+    ///       remain inactive if we've not yet reached the target timer period.
+    fn hp_activate_alarm(&self) {
         compiler_fence(Ordering::Release);
-        self.alarms[channel as usize]
+        self.hp_alarm
             .state
             .store(AlarmState::Active as u8, Ordering::Relaxed);
     }
 
-    /// Disables timer interrupts and signals to the scheduling context that the
-    /// given RTC alarm has been fired and is now inactive.
-    ///
-    /// Transfers ownership of the RTC alarm from interrupt context to
-    /// scheduling context and releases alarm memory.
-    ///
-    /// May be called from both, interrupt and scheduling context.
-    fn rtc_fire_and_inactivate_alarm(&self, channel: AlarmChannel) {
-        let rtc = Self::rtc();
-
-        // Safety: We need to disable the interrupt before we transfer
-        //         ownership of the alarm to the scheduling context. We disable
-        //         the interrupt early, as it may take up to four cycles before
-        //         this operation takes effect. Should the interrupt be
-        //         spuriously woken it will additionally check alarm state.
-        match channel {
-            AlarmChannel::HighPrecisionTimer => {
-                rtc.evtenclr.write(|w| w.compare0().set_bit());
-            }
-            AlarmChannel::SleepTimer1 => rtc.intenclr.write(|w| w.compare1().set_bit()),
-            AlarmChannel::SleepTimer2 => rtc.intenclr.write(|w| w.compare2().set_bit()),
-            _ => unreachable!(),
-        }
-
-        self.rtc_fire_alarm(channel);
-    }
-
-    /// Mark the RTC alarm as fired.
+    /// Disables the timer-start compare event and signals to the scheduling
+    /// context that the high-precision timer alarm has been fired and is now
+    /// inactive.
     ///
     /// Transfers ownership of the alarm from interrupt context to scheduling
     /// context and releases alarm memory.
     ///
     /// May be called from both, interrupt and scheduling context.
-    fn rtc_fire_alarm(&self, channel: AlarmChannel) {
+    fn hp_fire_and_inactivate_alarm(&self) {
+        // Safety: We need to disable the event before we transfer ownership of
+        //         the alarm to the scheduling context. We disable it early, as
+        //         it may take up to four cycles before this operation takes
+        //         effect.
+        Self::rtc().evtenclr.write(|w| w.compare0().set_bit());
+        self.hp_fire_alarm();
+    }
+
+    /// Mark the high-precision timer alarm as fired.
+    ///
+    /// Transfers ownership of the alarm from interrupt context to scheduling
+    /// context and releases alarm memory.
+    ///
+    /// May be called from both, interrupt and scheduling context.
+    fn hp_fire_alarm(&self) {
         compiler_fence(Ordering::Release);
-        self.alarms[channel as usize]
+        self.hp_alarm
             .state
             .store(AlarmState::Fired as u8, Ordering::Relaxed);
     }
 
-    /// Mark the RTC alarm as unused. Expects the alarm to be fired.
+    /// Mark the high-precision timer alarm as unused. Expects the alarm to be
+    /// fired.
     ///
     /// Acquires, then releases alarm memory.
     ///
@@ -849,9 +885,9 @@ impl State {
     /// # Panics
     ///
     /// Panics if the alarm was not previously fired.
-    fn rtc_release_alarm(&self, channel: AlarmChannel) {
+    fn hp_release_alarm(&self) {
         compiler_fence(Ordering::Release);
-        self.alarms[channel as usize]
+        self.hp_alarm
             .state
             .compare_exchange(
                 AlarmState::Fired as u8,
@@ -867,14 +903,12 @@ impl State {
     ///
     /// # Safety
     ///
-    /// - Shared read-only access while the [`RtcChannel::TimerSynchronization`]
-    ///   is active.
+    /// - Shared read-only access while the high-precision timer alarm is
+    ///   active.
     /// - Must not be called in any other state.
     unsafe fn timer_epoch(&self) -> NsInstant {
         debug_assert_eq!(
-            self.alarms[AlarmChannel::HighPrecisionTimer as usize]
-                .state
-                .load(Ordering::Relaxed),
+            self.hp_alarm.state.load(Ordering::Relaxed),
             AlarmState::Active as u8
         );
         self.timer_epoch.get()
@@ -885,15 +919,13 @@ impl State {
     ///
     /// # Safety
     ///
-    /// - Writable from scheduling context while the
-    ///   [`RtcChannel::TimerSynchronization`] is neither synchronizing nor
-    ///   active.
-    /// - Writable from interrupt context while the channel is synchronizing.
+    /// - Writable from scheduling context while the high-precision timer alarm
+    ///   is neither synchronizing nor active.
+    /// - Writable from interrupt context while the alarm is synchronizing.
     /// - Must not be called in active state.
     unsafe fn set_timer_epoch(&self, rtc_tick: u64) {
         debug_assert!(
-            self.is_rtc_alarm_pending(AlarmChannel::HighPrecisionTimer)
-                || self.is_rtc_pending_immediate_synchronization()
+            self.is_hp_alarm_pending() || self.is_rtc_pending_immediate_synchronization()
         );
         self.timer_epoch
             .set(TickConversion::rtc_tick_to_instant(rtc_tick));
@@ -942,45 +974,44 @@ impl State {
             self.rtc_increment_half_period();
         }
 
-        if rtc.events_compare[3].read().events_compare().bit_is_set() {
-            rtc.events_compare[3].reset();
+        if rtc.events_compare[RTC_CC_HALF_PERIOD]
+            .read()
+            .events_compare()
+            .bit_is_set()
+        {
+            rtc.events_compare[RTC_CC_HALF_PERIOD].reset();
             self.rtc_increment_half_period();
         }
 
-        for channel in [AlarmChannel::SleepTimer1, AlarmChannel::SleepTimer2] {
-            if rtc.events_compare[channel as usize]
-                .read()
-                .events_compare()
-                .bit_is_set()
-            {
-                if self.alarms[channel as usize].state.load(Ordering::Relaxed)
-                    == AlarmState::PreWarm as u8
-                {
-                    compiler_fence(Ordering::Acquire);
-                    // Safety: While the alarm is PreWarm its tick was written
-                    //         once before the state store and is read-only in
-                    //         both contexts afterwards.
-                    let prewarm_tick = unsafe { self.rtc_alarm_tick(channel) };
-                    if self.rtc_now_tick() < prewarm_tick {
-                        rtc.events_compare[channel as usize].reset();
-                        continue;
-                    }
-
-                    let clock = Self::clock();
-                    if clock.hfclkrun.read().status().is_not_triggered() {
-                        super::start_hf_oscillator(&clock);
-                    }
-
-                    self.rtc_release_prewarm(channel);
-                    continue;
+        if rtc.events_compare[RTC_CC_HFXO_PREWARM]
+            .read()
+            .events_compare()
+            .bit_is_set()
+            && self.prewarm_state.load(Ordering::Relaxed) == PrewarmState::Armed as u8
+        {
+            compiler_fence(Ordering::Acquire);
+            // Safety: While the pre-warm is armed its tick was written once
+            //         before the state store and is read-only in both contexts
+            //         afterwards.
+            let prewarm_tick = self.prewarm_tick.get();
+            if self.rtc_now_tick() < prewarm_tick {
+                rtc.events_compare[RTC_CC_HFXO_PREWARM].reset();
+            } else {
+                let clock = Self::clock();
+                if clock.hfclkrun.read().status().is_not_triggered() {
+                    super::start_hf_oscillator(&clock);
                 }
 
-                // We don't reset the compare event here but only just before
-                // scheduling the next timeout: The timer may otherwise trigger
-                // the compare event again whenever it wraps.
-
-                self.rtc_trigger_alarm(channel);
+                self.rtc_release_prewarm();
             }
+        }
+
+        if rtc.events_compare[RTC_CC_SLEEP_QUEUE]
+            .read()
+            .events_compare()
+            .bit_is_set()
+        {
+            self.service_sleep_queue();
         }
     }
 
@@ -1016,14 +1047,9 @@ impl State {
         // Interrupt execution is atomic from the perspective of the scheduling
         // context, therefore we continue to own the waker even with the
         // interrupt now cleared.
-        let waker = unsafe {
-            self.alarms[AlarmChannel::HighPrecisionTimer as usize]
-                .waker
-                .get()
-                .as_mut()
-        }
-        .unwrap()
-        .take();
+        let waker = unsafe { self.hp_alarm.waker.get().as_mut() }
+            .unwrap()
+            .take();
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -1084,7 +1110,7 @@ impl State {
     fn rtc_now_tick(&self) -> u64 {
         // The `half_period` MUST be read before `counter`, see method docs.
         let half_period = self.half_period.load(Ordering::Relaxed);
-        compiler_fence(Ordering::Acquire);
+        compiler_fence(Ordering::SeqCst);
         let counter = Self::rtc().counter.read().counter().bits();
         ((half_period as u64) << 23) + ((counter ^ ((half_period & 1) << 23)) as u64)
     }
@@ -1100,82 +1126,72 @@ impl State {
         compiler_fence(Ordering::AcqRel);
         let next_half_period_start_tick = (next_half_period as u64) << 23;
 
-        for channel in RTC_CHANNELS {
-            // Safety: Ensure that we own the alarm before accessing it.
-            if self.is_rtc_alarm_owned_by_interrupt(channel) {
-                // Safety: The call to `is_rtc_alarm_owned_by_interrupt()`
-                //         atomically acquires the RTC tick value and ensures
-                //         exclusive access.
-                let pending_rtc_tick = unsafe { self.rtc_alarm_tick(channel) };
-                if pending_rtc_tick < next_half_period_start_tick + Self::RTC_THREE_QUARTERS_PERIOD
-                {
-                    // Just enable the compare interrupt. The correct CC value
-                    // has already been set when scheduling the alarm.
-                    let rtc = Self::rtc();
-                    match channel {
-                        AlarmChannel::HighPrecisionTimer => {
-                            rtc.evtenset.write(|w| w.compare0().set_bit())
-                        }
-                        AlarmChannel::SleepTimer1 => rtc.intenset.write(|w| w.compare1().set_bit()),
-                        AlarmChannel::SleepTimer2 => rtc.intenset.write(|w| w.compare2().set_bit()),
-                        _ => unreachable!(),
-                    }
-                }
+        // Only the high-precision timer start (CC0) may be armed beyond the
+        // current three-quarters window: the sleep queue clamps its target to
+        // within it (see `rearm`) and the pre-warm rejects longer leads (see
+        // `arrange_hfclk_prewarm`).
+        //
+        // Safety: Ensure that we own the alarm before accessing it.
+        if self.is_hp_alarm_owned_by_interrupt() {
+            // Safety: The call to `is_hp_alarm_owned_by_interrupt()`
+            //         atomically acquires the RTC tick value and ensures
+            //         exclusive access.
+            let pending_rtc_tick = unsafe { self.hp_alarm_tick() };
+            if pending_rtc_tick < next_half_period_start_tick + Self::RTC_THREE_QUARTERS_PERIOD {
+                // Just enable the compare event. The correct CC value has
+                // already been set when scheduling the alarm.
+                Self::rtc().evtenset.write(|w| w.compare0().set_bit());
             }
         }
     }
 
-    // Called exclusively from interrupt context.
-    //
-    // Note: May be preempted by higher-priority interrupts but _not_ by the
-    //       scheduling context.
-    //
-    // Tuning notes:
-    fn rtc_trigger_alarm(&self, channel: AlarmChannel) {
-        // Performance:
-        // - Switching if/else below doesn't yield a measurable improvement.
-        // - Using a waker over pending the SWI directly costs us ~60ns.
-
-        // Safety: Acquires alarm memory and ensures exclusive ownership. As the
-        //         scheduling context runs at a lower priority, the interrupt
-        //         operates atomically on alarm memory. We can therefore safely
-        //         access the alarm until the interrupt handler ends.
-        if !self.is_rtc_alarm_owned_by_interrupt(channel) {
-            // Spurious compare interrupt, possibly due to a race on disabling
-            // the interrupt when an overdue alarm is discovered.
-            return;
+    /// Services the sleep-timer waiter queue: fires every due waiter and
+    /// programs CC1 for the earliest remaining deadline.
+    fn service_sleep_queue(&self) {
+        loop {
+            let mut wakers = queue::WakerBatch::new();
+            let serviced = self.sleep_queue.with(|q| self.rearm(q, &mut wakers));
+            wakers.wake_all();
+            if serviced {
+                return;
+            }
         }
+    }
 
-        // Safety: We acquired alarm memory and ensured ownership above.
-        if self.rtc_now_tick() < unsafe { self.rtc_alarm_tick(channel) } {
-            // Spurious compare interrupt: If the COUNTER is N and the
-            // current CC register value is N+1 or N+2 when a new CC value
-            // is written, a match may trigger on the previous CC value
-            // before the new value takes effect, see nRF product
-            // specification.
-            Self::rtc().events_compare[channel as usize].reset();
-            return;
-        }
+    /// Program the sleep queue's compare (CC1) for the earliest queued
+    /// deadline, firing every waiter that can no longer be armed.
+    fn rearm(&self, q: &mut queue::Inner, wakers: &mut queue::WakerBatch) -> bool {
+        let rtc = Self::rtc();
+        loop {
+            let now = self.rtc_now_tick();
+            let min = match q.fire_and_min(now, Self::RTC_GUARD_TICKS, wakers) {
+                queue::FireOutcome::Truncated => return false,
+                queue::FireOutcome::Complete(min) => min,
+            };
+            let Some(min) = min else {
+                rtc.intenclr.write(|w| w.compare1().set_bit());
+                rtc.events_compare[RTC_CC_SLEEP_QUEUE].reset();
+                return true;
+            };
 
-        // Interrupts must be disabled before we wake the scheduling context.
-        self.rtc_fire_and_inactivate_alarm(channel);
+            let target = min.min(now + Self::RTC_THREE_QUARTERS_PERIOD);
 
-        let waker = unsafe { self.alarms[channel as usize].waker.get().as_mut() }
-            .unwrap()
-            .take();
-        if let Some(waker) = waker {
-            waker.wake();
-        } else {
-            self.rtc_release_alarm(channel);
+            rtc.events_compare[RTC_CC_SLEEP_QUEUE].reset();
+            rtc.cc[RTC_CC_SLEEP_QUEUE].write(|w| w.compare().variant(target as u32 & 0xFFFFFF));
+            rtc.intenset.write(|w| w.compare1().set_bit());
+
+            if self.rtc_now_tick() + Self::RTC_GUARD_TICKS <= target {
+                return true;
+            }
         }
     }
 
     // Called exclusively from scheduling context.
     #[inline(always)]
-    fn rtc_program_cc(&self, rtc_tick: u64, channel: AlarmChannel) -> Result<u64, ()> {
+    fn hp_program_cc(&self, rtc_tick: u64) -> Result<u64, ()> {
         // Safety: Ensure that the scheduling context exclusively owns the alarm
         //         and corresponding registers.
-        debug_assert!(self.is_rtc_alarm_pending(channel));
+        debug_assert!(self.is_hp_alarm_pending());
 
         // The nRF product spec says: If the COUNTER is N, writing N or N+1 to a
         // CC register may not trigger a COMPARE event.
@@ -1185,133 +1201,56 @@ impl State {
         // now() and writing to the CC register.
         let rtc_now_tick = self.rtc_now_tick();
         if rtc_tick <= rtc_now_tick + State::RTC_GUARD_TICKS {
-            self.rtc_fire_alarm(channel);
+            self.hp_fire_alarm();
             return Err(());
         }
 
-        unsafe { self.set_rtc_alarm_tick(channel, rtc_tick) };
+        unsafe { self.hp_set_alarm_tick(rtc_tick) };
 
         // Safety: The flag must be set before enabling event routing to
         //         transfer ownership. Releases alarm memory to
         //         interrupt context.
-        self.rtc_activate_alarm(channel);
+        self.hp_activate_alarm();
 
         let rtc = Self::rtc();
-        let cc = channel as usize;
-
-        rtc.events_compare[cc].reset();
-        rtc.cc[cc].write(|w| w.compare().variant(rtc_tick as u32 & 0xFFFFFF));
+        rtc.events_compare[RTC_CC_HP_TIMER_START].reset();
+        rtc.cc[RTC_CC_HP_TIMER_START].write(|w| w.compare().variant(rtc_tick as u32 & 0xFFFFFF));
 
         Ok(rtc_now_tick)
     }
 
     #[inline(always)]
-    fn rtc_safely_schedule_alarm(
-        &self,
-        rtc_tick: u64,
-        rtc_now_tick: u64,
-        channel: AlarmChannel,
-    ) -> Result<(), ()> {
+    fn hp_safely_schedule_alarm(&self, rtc_tick: u64, rtc_now_tick: u64) -> Result<(), ()> {
         let rtc = Self::rtc();
 
         if rtc_tick - rtc_now_tick < Self::RTC_THREE_QUARTERS_PERIOD {
             // If the alarm is imminent (i.e. safely within the currently
-            // running RTC period), enable the timer interrupt (resp. event)
-            // right away.
+            // running RTC period), enable the compare event right away.
 
             // Safety: From this point onwards we must no longer access the
             //         alarm until the alarm has been marked inactive again.
-            match channel {
-                AlarmChannel::HighPrecisionTimer => rtc.evtenset.write(|w| w.compare0().set_bit()),
-                AlarmChannel::SleepTimer1 => rtc.intenset.write(|w| w.compare1().set_bit()),
-                AlarmChannel::SleepTimer2 => rtc.intenset.write(|w| w.compare2().set_bit()),
-                _ => unreachable!(),
-            }
+            rtc.evtenset.write(|w| w.compare0().set_bit());
 
             // Safety: This method may have been preempted by higher-priority
             //         interrupts. Also, its execution time depends on compiler
             //         optimization. Therefore we need to ensure that the alarm
             //         was safely scheduled _after_ enabling the corresponding
-            //         interrupt.
+            //         event.
             let was_safely_scheduled = self.rtc_now_tick() + Self::RTC_GUARD_TICKS <= rtc_tick;
             if !was_safely_scheduled {
                 // Safety: The alarm may or may not have already fired at this
                 //         point. It may even spuriously fire later as disabling
-                //         interrupts is not immediate. Therefore the interrupt
-                //         handler additionally synchronizes on alarm state.
-                self.rtc_fire_and_inactivate_alarm(channel);
+                //         events is not immediate.
+                self.hp_fire_and_inactivate_alarm();
                 Err(())
             } else {
                 Ok(())
             }
         } else {
             // If the alarm is too far into the future, don't enable the compare
-            // interrupt yet. It will be enabled by `next_period()`.
+            // event yet. It will be enabled by `rtc_increment_half_period()`.
             Ok(())
         }
-    }
-
-    // Called exclusively from scheduling context.
-    fn rtc_try_activate_alarm(&self, rtc_tick: u64, channel: AlarmChannel) -> Result<(), ()> {
-        let rtc_now_tick = self.rtc_program_cc(rtc_tick, channel)?;
-        self.rtc_safely_schedule_alarm(rtc_tick, rtc_now_tick, channel)
-    }
-
-    // Called exclusively from scheduling context. Requires the given alarm
-    // channel to be acquired/released before/after calling/awaiting the method.
-    async fn rtc_wait_for(&self, rtc_tick: u64, channel: AlarmChannel) -> Result<(), ()> {
-        let cleanup_on_drop = CancellationGuard::new(|| {
-            // Safety: Clearing the interrupt is not immediate. It might still
-            //         fire. That's why interrupt context additionally
-            //         synchronizes on alarm state.
-            self.rtc_fire_and_inactivate_alarm(channel);
-            self.rtc_release_alarm(channel);
-
-            // No need to drop the waker. It'll save us cloning if it is still
-            // valid when scheduling the next alarm.
-        });
-
-        let result = poll_fn(|cx| {
-            if self.is_rtc_alarm_owned_by_interrupt(channel) {
-                // Safety: We must not access the waker as it is owned by the
-                //         interrupt. We may assume that the waker is still
-                //         valid, though, as it must not be migrated to a
-                //         different task, see safety conditions on the
-                //         `RadioTimerApi`.
-                Poll::Pending
-            } else {
-                // Safety: We acquired and exclusively own the alarm at this point.
-                let scheduled_waker =
-                    unsafe { self.alarms[channel as usize].waker.get().as_mut() }.unwrap();
-                if let Some(scheduled_waker) = scheduled_waker {
-                    scheduled_waker.clone_from(cx.waker());
-                } else {
-                    *scheduled_waker = Some(cx.waker().clone());
-                }
-
-                if self.is_rtc_alarm_pending(channel) {
-                    // Safety: To avoid a data race, we may only activate the
-                    //         alarm once we're sure that the waker has been
-                    //         safely installed. Activating the alarm
-                    //         establishes a happens-before relationship with
-                    //         all prior memory accesses and transfers ownership
-                    //         of the alarm to interrupt context.
-                    let result = self.rtc_try_activate_alarm(rtc_tick, channel);
-                    if result.is_ok() {
-                        Poll::Pending
-                    } else {
-                        Poll::Ready(result)
-                    }
-                } else {
-                    Poll::Ready(Ok(()))
-                }
-            }
-        })
-        .await;
-
-        cleanup_on_drop.inactivate();
-
-        result
     }
 
     // Called exclusively from scheduling context.
@@ -1615,7 +1554,7 @@ impl State {
         // Safety: This method is only called while the alarm is synchronizing.
         //         Therefore interrupt context has exclusive write access.
         unsafe { self.set_timer_epoch(rtc_tick) };
-        self.rtc_activate_alarm(AlarmChannel::HighPrecisionTimer);
+        self.hp_activate_alarm();
 
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::record_start_hp_timer(NsInstant::from_ticks(0), rtc_tick as u32);
@@ -1626,22 +1565,34 @@ impl State {
     fn timer_try_start_at_rtc_tick(&self, rtc_tick: u64) -> Result<(), ()> {
         // Safety: We're exclusively called from scheduling context which
         //         currently owns the high-precision timer alarm channel, see
-        //         the check in rtc_program_cc() which must be called _after_.
+        //         the check in hp_program_cc() which must be called _after_.
         unsafe { self.set_timer_epoch(rtc_tick) };
-        let rtc_now_tick = self.rtc_program_cc(rtc_tick, AlarmChannel::HighPrecisionTimer)?;
+        let rtc_now_tick = self.hp_program_cc(rtc_tick)?;
 
         // Safety: This is a pre-programmed PPI channel.
         Self::ppi()
             .chenset
             .write(|w| unsafe { w.bits(1 << Self::RTC_CC0_TIMER_START_CHANNEL) });
 
-        self.rtc_safely_schedule_alarm(rtc_tick, rtc_now_tick, AlarmChannel::HighPrecisionTimer)
+        self.hp_safely_schedule_alarm(rtc_tick, rtc_now_tick)
     }
 
     // Called exclusively from scheduling context.
     // The high-precision timer must be pending.
     fn timer_start_at_next_rtc_tick(&self) {
-        debug_assert!(self.is_rtc_alarm_pending(AlarmChannel::HighPrecisionTimer));
+        debug_assert!(self.is_hp_alarm_pending());
+
+        // The immediate-start path never programs CC0, but
+        // `rtc_increment_half_period` reads the alarm tick whenever the alarm
+        // is interrupt-owned (synchronizing or active) to decide whether to
+        // enable the CC0 compare event. Park the tick at the far future so a
+        // value left over from a previous timed session cannot spuriously
+        // re-enable a stale CC0 compare, upholding the documented alarm-tick
+        // ownership invariant.
+        // Safety: The alarm is pending, i.e. owned by this scheduling
+        //         context; the value is released to interrupt context by
+        //         `rtc_start_immediate_timer_synchronization` below.
+        unsafe { self.hp_set_alarm_tick(u64::MAX) };
 
         let rtc = Self::rtc();
         let timer = Self::timer();
@@ -1865,15 +1816,9 @@ impl State {
                 //         We just found that no interrupt is active, so
                 //         scheduling context cannot be interrupted and can
                 //         safely set the waker. (This differs from our approach
-                //         to synchronizing access to RTC alarms as the sleep
-                //         timer can be shared across tasks.)
-                let scheduled_waker = unsafe {
-                    self.alarms[AlarmChannel::HighPrecisionTimer as usize]
-                        .waker
-                        .get()
-                        .as_mut()
-                }
-                .unwrap();
+                //         to synchronizing the sleep-timer waiter queue, which
+                //         can be shared across tasks.)
+                let scheduled_waker = unsafe { self.hp_alarm.waker.get().as_mut() }.unwrap();
                 if let Some(scheduled_waker) = scheduled_waker {
                     scheduled_waker.clone_from(cx.waker());
                 } else {
@@ -1928,10 +1873,118 @@ fn TIMER0() {
     rtos_trace::trace::isr_exit();
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct NrfRadioTimer {
-    // Private field to inhibit direct instantiation.
-    _inner: (),
+/// Debug guard for the [`RadioTimerApi::wait_until`] safety condition: the
+/// calling context must run below the RTC interrupt priority.
+#[inline]
+fn debug_assert_below_rtc_priority() {
+    #[cfg(debug_assertions)]
+    {
+        let priority = match SCB::vect_active() {
+            VectActive::ThreadMode => return,
+            // Safety: Reading a single NVIC IPR byte.
+            VectActive::Interrupt { irqn } => unsafe { (*NVIC::PTR).ipr[irqn as usize].read() },
+            VectActive::Exception(exception) => {
+                let shpr_index = exception.irqn() + 12;
+                if shpr_index >= 0 {
+                    // Safety: Reading a single SHPR byte at a checked index.
+                    unsafe { (*SCB::PTR).shpr[shpr_index as usize].read() }
+                } else {
+                    0
+                }
+            }
+        };
+        debug_assert!(
+            priority > RTC_IRQ_PRIORITY.to_arm_nvic_repr(),
+            "wait_until() polled at or above the RTC interrupt priority"
+        );
+    }
+}
+
+/// The future returned by [`NrfRadioSleepTimer::wait_until`].
+struct WaitUntil {
+    node: queue::Node,
+    _pin: PhantomPinned,
+}
+
+// Safety: Every access to `node` happens under the queue lock (see
+//         [`SleepQueue`]), which any context polling or dropping this future
+//         is allowed to take per the `wait_until` safety conditions; the
+//         contained `Waker` is `Send + Sync`. The future may therefore move
+//         between tasks and executors, unlike its predecessor.
+unsafe impl Send for WaitUntil {}
+
+impl WaitUntil {
+    fn new(instant: NsInstant, rtc_tick: u64) -> Self {
+        Self {
+            node: queue::Node::new(rtc_tick, instant),
+            _pin: PhantomPinned,
+        }
+    }
+}
+
+impl Future for WaitUntil {
+    type Output = Result<(), RadioTimerError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Safety: We only take the node's address and never move out of it.
+        //         References into the node are formed under the queue lock
+        //         only and never kept alive across an unlocked region: once
+        //         the node is linked, the interrupt may mutate it through the
+        //         queue's pointers whenever the lock is free.
+        let node: *mut queue::Node = &mut unsafe { self.get_unchecked_mut() }.node;
+
+        let (result, displaced, linked) = STATE.sleep_queue.with(|q| {
+            // Safety: The lock is held, see above.
+            let node = unsafe { &mut *node };
+            match node.state() {
+                queue::NodeState::Fired(result) => (Poll::Ready(result), None, false),
+                queue::NodeState::Unlinked => {
+                    if node.tick() <= STATE.rtc_now_tick() + State::RTC_GUARD_TICKS {
+                        let result = Err(RadioTimerError::Overdue(node.instant()));
+                        node.fire_unlinked(result);
+                        (Poll::Ready(result), None, false)
+                    } else {
+                        let displaced = node.set_waker(cx.waker());
+                        q.link(node);
+                        (Poll::Pending, displaced, true)
+                    }
+                }
+                queue::NodeState::Linked => {
+                    (Poll::Pending, node.set_waker(cx.waker()), false)
+                }
+            }
+        });
+        drop(displaced);
+
+        if linked {
+            STATE.service_sleep_queue();
+
+            return STATE.sleep_queue.with(|_q| {
+                // Safety: The lock is held, see above.
+                match unsafe { &*node }.state() {
+                    queue::NodeState::Fired(result) => Poll::Ready(result),
+                    _ => Poll::Pending,
+                }
+            });
+        }
+        result
+    }
+}
+
+impl Drop for WaitUntil {
+    fn drop(&mut self) {
+        let was_linked = STATE.sleep_queue.with(|q| {
+            if matches!(self.node.state(), queue::NodeState::Linked) {
+                q.unlink(&mut self.node);
+                true
+            } else {
+                false
+            }
+        });
+        if was_linked {
+            STATE.service_sleep_queue();
+        }
+    }
 }
 
 // Tick-to-ns conversion (and back).
@@ -1982,9 +2035,22 @@ impl TickConversion {
         (integer_fraction >> N) as u64
     }
 
+    /// Like [`Self::instant_to_rtc_tick`], but rounds *up*: the returned tick
+    /// is the smallest one whose instant is not before `instant`.
+    #[inline(always)]
+    const fn instant_to_rtc_tick_ceil(instant: NsInstant) -> u64 {
+        let mut rtc_tick = Self::instant_to_rtc_tick(instant);
+
+        const _: () = assert!(NrfRadioSleepTimer::FREQUENCY.to_Hz() == 2_u64.pow(15));
+        while (rtc_tick as u128) * 5_u128.pow(9) < (instant.ticks() as u128) << 6 {
+            rtc_tick += 1;
+        }
+
+        rtc_tick
+    }
+
     #[inline(always)]
     const fn duration_to_timer_ticks(duration: NsDuration) -> u32 {
-        debug_assert!(duration.ticks() <= TickConversion::MAX_TIMER_DURATION.ticks());
 
         // To keep ns-to-tick conversion cheap we avoid division while
         // compromising between range and rounding error:
@@ -2021,10 +2087,10 @@ impl TickConversion {
 
     #[inline(always)]
     const fn instant_to_timer_ticks_with_epoch(timer_epoch: NsInstant, instant: NsInstant) -> u32 {
-        match instant.ticks().checked_sub(timer_epoch.ticks()) {
-            Some(delta_ns) => Self::duration_to_timer_ticks(NsDuration::from_ticks(delta_ns)),
-            None => 0,
-        }
+        debug_assert!(instant.ticks() > timer_epoch.ticks());
+        Self::duration_to_timer_ticks(NsDuration::from_ticks(
+            instant.ticks() - timer_epoch.ticks(),
+        ))
     }
 
     #[inline(always)]
@@ -2120,6 +2186,21 @@ const _: () = {
     assert!(max_timer_ticks == EXPECTED_MAX_TIMER_TICKS - 1);
 
     assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(875)) == 13);
+
+    assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(0)) == 0);
+    assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1)) == 1);
+    assert!(TickConversion::instant_to_rtc_tick(NsInstant::from_ticks(1_953_125)) == 63);
+    assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1_953_124)) == 64);
+    assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1_953_125)) == 64);
+    assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1_953_126)) == 65);
+    assert!(TickConversion::instant_to_rtc_tick(NsInstant::from_ticks(1_000_000_000)) == 32767);
+    assert!(
+        TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1_000_000_000)) == 32768
+    );
+    assert!(
+        TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(u64::MAX))
+            == TickConversion::MAX_RTC_TICKS + 1
+    );
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -2176,27 +2257,17 @@ impl RadioTimerApi for NrfRadioSleepTimer {
         TickConversion::rtc_tick_to_instant(rtc_tick)
     }
 
+    /// See [`RadioTimerApi::wait_until`].
     async unsafe fn wait_until(&mut self, instant: NsInstant) -> Result<(), RadioTimerError> {
         STATE.assert_initialized();
+        debug_assert_below_rtc_priority();
 
-        let rtc_tick = TickConversion::instant_to_rtc_tick(instant);
+        let rtc_tick = TickConversion::instant_to_rtc_tick_ceil(instant);
 
         #[cfg(feature = "rtos-trace")]
         crate::timer::trace::record_rtc_alarm(instant, rtc_tick as u32);
 
-        let channel = [AlarmChannel::SleepTimer1, AlarmChannel::SleepTimer2]
-            .into_iter()
-            .find(|&channel| STATE.rtc_try_acquire_alarm(channel).is_ok())
-            .ok_or(RadioTimerError::Busy)?;
-
-        let result = STATE
-            .rtc_wait_for(rtc_tick, channel)
-            .await
-            .map_err(|_| RadioTimerError::Overdue(instant));
-
-        STATE.rtc_release_alarm(channel);
-
-        result
+        WaitUntil::new(instant, rtc_tick).await
     }
 
     fn start_high_precision_timer(
@@ -2205,11 +2276,11 @@ impl RadioTimerApi for NrfRadioSleepTimer {
     ) -> Result<Self::HighPrecisionTimer, RadioTimerError> {
         STATE.assert_initialized();
 
-        STATE.rtc_try_acquire_alarm(AlarmChannel::HighPrecisionTimer)?;
+        STATE.hp_try_acquire_alarm()?;
         STATE.hfclk_request();
 
         let result = (|| {
-            let prewarm_channel = if let Some(at) = at.into() {
+            if let Some(at) = at.into() {
                 // We need to start at least two timer ticks earlier so we can
                 // schedule signals at non-zero ticks even accounting for a one-tick
                 // PPI delay.
@@ -2227,22 +2298,21 @@ impl RadioTimerApi for NrfRadioSleepTimer {
                     .timer_try_start_at_rtc_tick(rtc_tick)
                     .map_err(|_| RadioTimerError::Overdue(at))?;
 
-                STATE.arrange_hfclk_prewarm(rtc_tick)
+                STATE.arrange_hfclk_prewarm(rtc_tick);
             } else {
                 STATE.timer_start_at_next_rtc_tick();
                 STATE.hfclk_start_blocking();
-                None
-            };
+            }
 
             // The high-precision timer will automatically be stopped and the
             // corresponding alarm channel released when dropping the running
             // radio timer instance.
-            Ok(NrfRadioHighPrecisionTimer { prewarm_channel })
+            Ok(NrfRadioHighPrecisionTimer { _inner: () })
         })();
 
         if result.is_err() {
             STATE.hfclk_release();
-            STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer);
+            STATE.hp_release_alarm();
         }
 
         result
@@ -2250,8 +2320,8 @@ impl RadioTimerApi for NrfRadioSleepTimer {
 }
 
 pub struct NrfRadioHighPrecisionTimer {
-    /// The sleep compare borrowed to pre-warm the HFXO, if any. Released on drop.
-    prewarm_channel: Option<AlarmChannel>,
+    // Private field to block direct instantiation.
+    _inner: (),
 }
 
 impl NrfRadioHighPrecisionTimer {
@@ -2277,7 +2347,7 @@ impl NrfRadioHighPrecisionTimer {
         // Account for PPI delay, see nRF52840 PS, section 6.16: The timer is
         // synchronized to the 16 MHz clock and runs at 16 MHz, therefore PPI
         // will delay the compare event by one timer tick.
-        timer_ticks.saturating_sub(1)
+        timer_ticks - 1
     }
 }
 
@@ -2523,7 +2593,7 @@ impl Drop for NrfRadioHighPrecisionTimer {
 
         // Atomically cancel ongoing timer synchronization and re-acquire alarm
         // memory to scheduling context in which the drop handler runs.
-        STATE.rtc_fire_and_inactivate_alarm(AlarmChannel::HighPrecisionTimer);
+        STATE.hp_fire_and_inactivate_alarm();
 
         // In case synchronization was interrupted: Clean up registers that were
         // used for synchronization.
@@ -2534,12 +2604,10 @@ impl Drop for NrfRadioHighPrecisionTimer {
         // Clean up timer state.
         self.reset();
 
-        if let Some(channel) = self.prewarm_channel.take() {
-            STATE.rtc_release_prewarm(channel);
-        }
+        STATE.rtc_release_prewarm();
 
         // Atomically de-allocate the high precision timer.
-        STATE.rtc_release_alarm(AlarmChannel::HighPrecisionTimer);
+        STATE.hp_release_alarm();
         STATE.hfclk_release();
     }
 }

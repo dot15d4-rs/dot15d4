@@ -226,27 +226,12 @@ pub trait RadioTimerApi: Copy {
     /// Waits until the given instant using only the sleep timer, then wakes the
     /// current task.
     ///
-    /// Implementations SHALL be cancel-safe. Cancelling the future will cancel
-    /// the alarm.
-    ///
-    /// Note: This wakes the current task with latency and jitter depending on
-    ///       the surrounding executor implementation. To reduce latency and
-    ///       (almost) eliminate jitter, use the [`InterruptExecutor`].
-    ///
-    /// [`InterruptExecutor`]: crate::executor::InterruptExecutor
-    ///
-    /// # Panics
-    ///
-    /// Trying to create another future while the previous has not been driven
-    /// to completion and dropped, will panic.
-    ///
     /// # Safety
     ///
-    /// - This method SHALL be called from a context that runs at lower priority
-    ///   than the timer interrupt(s).
-    /// - The resulting future SHALL always be polled with the same waker, i.e.
-    ///   it SHALL NOT be migrated to a different task. Wakers MAY change on
-    ///   subsequent invocations of the method, though.
+    /// This method SHALL be called (and its future polled and dropped) from
+    /// contexts that run at lower priority than the timer interrupt(s). This
+    /// same condition underwrites the driver-internal synchronization of the
+    /// timer queue.
     unsafe fn wait_until(
         &mut self,
         instant: NsInstant,
