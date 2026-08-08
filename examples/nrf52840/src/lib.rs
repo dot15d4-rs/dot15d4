@@ -147,6 +147,8 @@ pub enum PpiChannel {
     RadioTimer1,
     RadioTimer2,
     RadioCrcGate,
+    RadioTxStart,
+    RadioTxRamp,
     #[cfg(feature = "timer-trace")]
     RadioTimerTick,
     #[cfg(feature = "radio-trace")]
@@ -229,6 +231,8 @@ pub fn config_peripherals(
         ],
         ppi_channel_group: TIMER_PPI_CHANNEL_GROUP,
         ppi_gate_channel: PpiChannel::RadioCrcGate as usize,
+        ppi_txstart_channel: PpiChannel::RadioTxStart as usize,
+        ppi_txramp_channel: PpiChannel::RadioTxRamp as usize,
 
         #[cfg(feature = "timer-trace")]
         tracing_config: NrfRadioTimerTracingConfig {

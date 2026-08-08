@@ -177,6 +177,13 @@ pub enum HardwareSignal {
     /// Toggle the outbound alarm pin.
     #[cfg(feature = "timer-trace")]
     GpioToggle,
+
+    /// Start a transmission that is already ramped up (radio in TXIDLE).
+    RadioTxStart,
+
+    /// Ramp the transmitter up on the *secondary* compare, leaving the primary
+    /// compare free for a concurrently armed [`HardwareSignal::RadioTxStart`].
+    RadioTxRamp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

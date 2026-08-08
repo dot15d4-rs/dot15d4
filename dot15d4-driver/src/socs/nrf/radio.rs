@@ -221,6 +221,44 @@ const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
     }
 }
 
+const T_TX_START_MARGIN: NsDuration = NsDuration::micros(16);
+
+const OFFSET_TX_RAMP: NsDuration = OQpsk250KBit::T_SHR
+    .checked_add(T_TXEN)
+    .unwrap()
+    .checked_add(T_RXDIS)
+    .unwrap()
+    .checked_add(T_TX_START_MARGIN)
+    .unwrap();
+
+const _: () = assert!(
+    Ifs::short().into_local_clock_duration().ticks()
+        >= OFFSET_TX_RAMP.ticks() - OQpsk250KBit::T_SHR.ticks()
+);
+
+/// Timed start of an already ramped-up transmission. `at` is the RMARKER.
+const fn timed_tx_start(at: NsInstant) -> TimedSignal {
+    TimedSignal::new(
+        at.checked_sub_duration(OQpsk250KBit::T_SHR).unwrap(),
+        HardwareSignal::RadioTxStart,
+    )
+}
+
+const OFFSET_TX_RAMP_FROM_OFF: NsDuration = OQpsk250KBit::T_SHR
+    .checked_add(T_TXEN)
+    .unwrap()
+    .checked_add(T_TX_START_MARGIN)
+    .unwrap();
+
+/// Timed ramp-up of a transmission that starts from the powered-down radio,
+/// on the secondary compare.
+const fn timed_tx_ramp(at: NsInstant) -> TimedSignal {
+    TimedSignal::new(
+        at.checked_sub_duration(OFFSET_TX_RAMP_FROM_OFF).unwrap(),
+        HardwareSignal::RadioTxRamp,
+    )
+}
+
 const fn timed_off(at: NsInstant) -> TimedSignal {
     TimedSignal::new(at, HardwareSignal::RadioDisable)
 }
@@ -750,13 +788,26 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 self.driver.request_radio_hfclk();
                 let result = (|| {
                     let cca = self.tx_task.cca;
-                    let timed_tx_enable = self.at.map(|instant| timed_tx_enable(instant, cca));
-                    let timer = self
-                        .driver
-                        .state()
-                        .start_timer(timed_tx_enable.map(|ts| ts.instant).into())?;
-                    if let Some(timed_tx_enable) = timed_tx_enable {
-                        timer.schedule_timed_signal(timed_tx_enable)?;
+                    let is_best_effort = self.at.is_none();
+
+                    radio().shorts.reset();
+
+                    let at: Option<NsInstant> = self.at.into();
+                    let timed_ramp = at
+                        .filter(|_| !cca)
+                        .map(|at| (timed_tx_ramp(at), timed_tx_start(at)));
+                    let timed_enable = at.filter(|_| cca).map(|at| timed_tx_enable(at, true));
+                    let first_signal = timed_ramp
+                        .map(|(ramp, _)| ramp.instant)
+                        .or(timed_enable.map(|enable| enable.instant));
+                    let timer = self.driver.state().start_timer(first_signal.into())?;
+                    if let Some((ramp, start)) = timed_ramp {
+                        debug_assert!(ramp.instant < start.instant);
+                        timer
+                            .schedule_timed_signal(ramp)?
+                            .schedule_timed_signal(start)?;
+                    } else if let Some(timed_enable) = timed_enable {
+                        timer.schedule_timed_signal(timed_enable)?;
                     }
                     timer.observe_event(HardwareEvent::RadioFrameStarted)?;
 
@@ -772,7 +823,6 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                     let packetptr = prepare_tx_frame(&mut self.tx_task.radio_frame);
                     r.packetptr.write(|w| w.packetptr().variant(packetptr));
 
-                    let is_best_effort = self.at.is_none();
                     dma_start_fence();
                     if cca {
                         r.shorts.write(|w| {
@@ -789,11 +839,10 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                         if is_best_effort {
                             r.tasks_rxen.write(|w| w.tasks_rxen().set_bit());
                         }
-                    } else {
+                    } else if is_best_effort {
                         r.shorts.write(|w| w.txready_start().enabled());
-                        if is_best_effort {
-                            r.tasks_txen.write(|w| w.tasks_txen().set_bit());
-                        }
+                        r.tasks_txen.write(|w| w.tasks_txen().set_bit());
+                    } else {
                     }
 
                     Ok(self.at)
@@ -1631,16 +1680,23 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     let is_best_effort = self.at.is_none();
 
                     let timed_signals = self.at.map(|at| {
-                        let tx_enable = timed_tx_enable(at, cca);
                         // No need for window-widening as it is the client's
                         // responsibility to cater for clock drift.
-                        let rx_off_at = if let Some(ifs) = self.ifs {
-                            tx_enable.instant + if cca { T_RXEN } else { T_TXEN }
-                                - NsDuration::from(ifs)
+                        if cca {
+                            let tx_enable = timed_tx_enable(at, true);
+                            let rx_off_at = if let Some(ifs) = self.ifs {
+                                tx_enable.instant + T_RXEN - NsDuration::from(ifs)
+                            } else {
+                                tx_enable.instant - T_RXDIS
+                            };
+                            (timed_off(rx_off_at), tx_enable)
                         } else {
-                            tx_enable.instant - T_RXDIS
-                        };
-                        (timed_off(rx_off_at), tx_enable)
+                            let ramp_at = match self.ifs {
+                                Some(ifs) => at - OQpsk250KBit::T_SHR - NsDuration::from(ifs),
+                                None => at - OFFSET_TX_RAMP,
+                            };
+                            (timed_off(ramp_at), timed_tx_start(at))
+                        }
                     });
                     let timer = self
                         .driver
@@ -1688,13 +1744,15 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                         });
                     } else {
                         r.shorts.write(|w| {
-                            // Ramp down and directly switch to TX state w/o CCA
-                            // including IFS timing.
-                            w.end_disable().enabled();
                             if is_best_effort {
+                                // Ramp down and directly switch to TX state w/o
+                                // CCA including IFS timing.
+                                w.end_disable().enabled();
                                 w.disabled_txen().enabled();
+                                w.txready_start().enabled()
+                            } else {
+                                w.disabled_txen().enabled()
                             }
-                            w.txready_start().enabled()
                         });
                     }
 
@@ -1723,9 +1781,14 @@ impl ReceivingRxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskRx> {
                     // manually, see conditions 1. and 2. in the method
                     // documentation.
                     //
+                    // Timed no-CCA: the CC1 disable does the parking; a manual
+                    // kick here would ramp TX twice and miss the start.
+                    //
                     // TODO: We currently have no way to enforce IFS in this
                     //       case.
-                    r.tasks_disable.write(|w| w.tasks_disable().set_bit());
+                    if self.at.is_none() || self.tx_task.cca {
+                        r.tasks_disable.write(|w| w.tasks_disable().set_bit());
+                    }
                 }
 
                 Ok(())
@@ -2017,7 +2080,10 @@ impl RadioState<NrfRadioDriver, TaskTx> for RadioDriver<NrfRadioDriver, TaskTx> 
             .timer()
             .poll_event(HardwareEvent::RadioFrameStarted)
             .map(|ts| ts - T_MEASURED_TX_FRAMESTART_ERROR)
-            .ok_or_else(|| self.scheduling_error());
+            .ok_or_else(|| {
+                warn!("tx start missed");
+                self.scheduling_error()
+            });
         state.stop_timer();
         entry
     }

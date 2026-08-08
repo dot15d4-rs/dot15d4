@@ -327,6 +327,12 @@ struct State {
     /// the type system.
     ppi_gate_channel: AtomicUsize,
 
+    /// PPI channel that routes TIMER CC0 -> RADIO TASKS_START.
+    ppi_txstart_channel: AtomicUsize,
+
+    /// PPI channel that routes TIMER CC1 -> RADIO TASKS_TXEN.
+    ppi_txramp_channel: AtomicUsize,
+
     /// The PPI channel mask containing all PPI channels used by this driver.
     ///
     /// May be accessed from scheduling and interrupt context.
@@ -383,6 +389,8 @@ impl State {
             ppi_channel2: AtomicUsize::new(0),
             ppi_channel_group: AtomicUsize::new(0),
             ppi_gate_channel: AtomicUsize::new(0),
+            ppi_txstart_channel: AtomicUsize::new(0),
+            ppi_txramp_channel: AtomicUsize::new(0),
             ppi_channel_mask: AtomicU32::new(0),
         }
     }
@@ -451,18 +459,38 @@ impl State {
 
         let [ppi_channel1, ppi_channel2] = config.ppi_channels;
         let ppi_gate_channel = config.ppi_gate_channel;
+        let ppi_txstart_channel = config.ppi_txstart_channel;
+        let ppi_txramp_channel = config.ppi_txramp_channel;
         debug_assert!(ppi_channel1 <= 19);
         debug_assert!(ppi_channel2 <= 19);
         debug_assert!(ppi_gate_channel <= 19);
+        debug_assert!(ppi_txstart_channel <= 19);
+        debug_assert!(ppi_txramp_channel <= 19);
         debug_assert_ne!(ppi_channel1, ppi_channel2);
         debug_assert_ne!(ppi_gate_channel, ppi_channel1);
         debug_assert_ne!(ppi_gate_channel, ppi_channel2);
+        debug_assert_ne!(ppi_txstart_channel, ppi_channel1);
+        debug_assert_ne!(ppi_txstart_channel, ppi_channel2);
+        debug_assert_ne!(ppi_txstart_channel, ppi_gate_channel);
+        debug_assert_ne!(ppi_txramp_channel, ppi_channel1);
+        debug_assert_ne!(ppi_txramp_channel, ppi_channel2);
+        debug_assert_ne!(ppi_txramp_channel, ppi_gate_channel);
+        debug_assert_ne!(ppi_txramp_channel, ppi_txstart_channel);
         self.ppi_channel1.store(ppi_channel1, Ordering::Relaxed);
         self.ppi_channel2.store(ppi_channel2, Ordering::Relaxed);
         self.ppi_gate_channel
             .store(ppi_gate_channel, Ordering::Relaxed);
+        self.ppi_txstart_channel
+            .store(ppi_txstart_channel, Ordering::Relaxed);
+        self.ppi_txramp_channel
+            .store(ppi_txramp_channel, Ordering::Relaxed);
         self.ppi_channel_mask.store(
-            1 << ppi_channel1 | 1 << ppi_channel2 | 1 << ppi_gate_channel | Self::PPI_CHANNEL_MASK,
+            1 << ppi_channel1
+                | 1 << ppi_channel2
+                | 1 << ppi_gate_channel
+                | 1 << ppi_txstart_channel
+                | 1 << ppi_txramp_channel
+                | Self::PPI_CHANNEL_MASK,
             Ordering::Relaxed,
         );
 
@@ -573,6 +601,31 @@ impl State {
                 .tep
                 .write(|w| w.tep().variant(hfclkstart));
             ppi.fork[Self::RTC_HFCLKSTART_PPI_CHANNEL].tep.reset();
+
+            // Timed TX start: TIMER CC0 compare -> RADIO TASKS_START.
+            // Endpoints are fixed; the channel is enabled per scheduled signal.
+            // Safety: we only take the address of the RADIO task register.
+            let radio_start = Self::radio().tasks_start.as_ptr() as u32;
+            let ch = &ppi.ch[ppi_txstart_channel];
+            ch.eep
+                .write(|w| w.eep().variant(timer.events_compare[0].as_ptr() as u32));
+            ch.tep.write(|w| w.tep().variant(radio_start));
+            ppi.fork[ppi_txstart_channel].tep.reset();
+
+            // Timed TX ramp: TIMER CC1 compare -> RADIO TASKS_TXEN. The
+            // pre-programmed TXEN route (PPI 20) is wired to CC0, which a timed
+            // transmission already needs for TASKS_START; this second route
+            // frees the ramp from that conflict so the transmitter can be
+            // brought up just before the launch instead of in scheduling
+            // context. Endpoints are fixed; the channel is enabled per
+            // scheduled signal.
+            // Safety: we only take the address of the RADIO task register.
+            let radio_txen = Self::radio().tasks_txen.as_ptr() as u32;
+            let ch = &ppi.ch[ppi_txramp_channel];
+            ch.eep
+                .write(|w| w.eep().variant(timer.events_compare[1].as_ptr() as u32));
+            ch.tep.write(|w| w.tep().variant(radio_txen));
+            ppi.fork[ppi_txramp_channel].tep.reset();
         }
 
         rtc.tasks_stop.write(|w| w.tasks_stop().set_bit());
@@ -1681,6 +1734,8 @@ impl State {
             HardwareSignal::RadioDisable => (Self::TIMER_CC1_RADIO_DISABLE_CHANNEL, 1),
             #[cfg(feature = "timer-trace")]
             HardwareSignal::GpioToggle => (self.ppi_channel1.load(Ordering::Relaxed), 0),
+            HardwareSignal::RadioTxStart => (self.ppi_txstart_channel.load(Ordering::Relaxed), 0),
+            HardwareSignal::RadioTxRamp => (self.ppi_txramp_channel.load(Ordering::Relaxed), 1),
         }
     }
 
@@ -2357,6 +2412,10 @@ pub struct NrfRadioTimerConfig {
     /// PPI channel used to gate a timed signal on a hardware event
     /// ("timed signal if event", e.g. Enh-ACK txen on CRCOK).
     pub ppi_gate_channel: usize,
+    /// PPI channel for the timed TX start (TIMER CC0 -> RADIO TASKS_START).
+    pub ppi_txstart_channel: usize,
+    /// PPI channel for the timed TX ramp (TIMER CC1 -> RADIO TASKS_TXEN).
+    pub ppi_txramp_channel: usize,
     #[cfg(feature = "timer-trace")]
     pub tracing_config: NrfRadioTimerTracingConfig,
 }
@@ -2485,11 +2544,13 @@ impl NrfRadioHighPrecisionTimer {
 /// STATE | METHOD         | SIGNALS              | EVENTS
 /// =========================================================================
 /// off   | sched_rx       | rxen                 | rx_enabled, framestarted
-/// off   | sched_tx       | txen                 | framestarted
+/// off   | sched_tx       | txen, or tx_ramp +   | framestarted
+///       |                | tx_start***          |
 /// off   | switch_off     |                      | disabled
 /// rx    | stop_listening | disable\framestarted | framestarted, disabled
 /// rx    | sched_rx       |                      | rx_enabled*, framestarted
-/// rx    | sched_tx       | disable, txen        | framestarted
+/// rx    | sched_tx       | disable, txen or     | framestarted
+///       |                | tx_start***          |
 /// rx    | sched_ack_tx   | txen if crcok        | framestarted
 /// rx    | sched_off      | disable**            | disabled**
 /// tx    | sched_rx       |                      | rx_enabled, framestarted
@@ -2500,6 +2561,13 @@ impl NrfRadioHighPrecisionTimer {
 ///
 /// **) Only if a frame was observed, otherwise the disabled event has already
 ///     been observed by the `stop_listening()` method.
+///
+/// ***) "tx_start" for a timed transmission without CCA, "txen" otherwise.
+///      "txen" and "tx_start" both occupy CC0, so only one of them is ever
+///      armed per operation. A timed transmission from the "off" state pairs
+///      "tx_start" (CC0) with "tx_ramp" (CC1) instead: the ramp has to be
+///      timed as well there, because unlike the "rx" state there is no
+///      DISABLED event left to hang a `disabled_txen` short on.
 ///
 /// Additionally we implement a GPIO test mode that requires a GPIO toggle
 /// signal and a GPIO toggled event, possibly used concurrently.
@@ -2512,6 +2580,14 @@ impl NrfRadioHighPrecisionTimer {
 /// - disable unless...: like "disable" + PPI-ChGroup
 /// - txen if crcok: like "txen" + PPI-ChGroup + gate PPI-Ch
 ///   (crcok -> chg.en; the txen channel starts disabled inside the group)
+/// - tx start: init-programmed PPI-Ch (CC0 -> RADIO.TASKS_START) + CC0, used
+///   instead of "txen" for timed transmissions without CCA. The transmitter is
+///   ramped up beforehand and parks in TXIDLE, so the compare alone determines
+///   the on-air RMARKER.
+/// - tx ramp: init-programmed PPI-Ch (CC1 -> RADIO.TASKS_TXEN) + CC1, the
+///   deferred ramp that puts the transmitter into TXIDLE shortly before a
+///   "tx start". Only needed from the "off" state; from "rx" the "disable"
+///   signal plus the `disabled_txen` short does the same job on CC1.
 ///
 /// events:
 /// - rx_enabled/disabled: PPI-Ch1.tep + CC0
@@ -2772,6 +2848,13 @@ pub(crate) fn request_hfclk() {
 pub(crate) fn release_hfclk() {
     STATE.assert_initialized();
     STATE.hfclk_release();
+}
+
+/// Start the HFXO now and block until it runs.
+#[allow(dead_code)]
+pub(crate) fn start_hfclk_blocking() {
+    STATE.assert_initialized();
+    STATE.hfclk_start_blocking();
 }
 
 /// RAII guard that keeps the HFXO (high-frequency crystal) running for as

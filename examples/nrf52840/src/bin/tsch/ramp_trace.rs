@@ -22,10 +22,10 @@ pub fn setup() {
         p.PPI.chenset.write(|w| unsafe { w.bits(1 << ppi_ch) });
     };
 
-    fork(p.TIMER0.events_compare[0].as_ptr() as u32, 7, 7, 8);
-    fork(p.RADIO.events_rxready.as_ptr() as u32, 6, 6, 9);
-    fork(p.RADIO.events_txready.as_ptr() as u32, 5, 5, 10);
-    fork(p.CLOCK.events_hfclkstarted.as_ptr() as u32, 4, 4, 11);
+    fork(p.TIMER0.events_compare[0].as_ptr() as u32, 7, 7, 9);
+    fork(p.RADIO.events_rxready.as_ptr() as u32, 6, 6, 10);
+    fork(p.RADIO.events_txready.as_ptr() as u32, 5, 5, 11);
+    fork(p.CLOCK.events_hfclkstarted.as_ptr() as u32, 4, 4, 12);
 
     p.GPIOTE.config[3].write(|w| {
         w.mode().task();
