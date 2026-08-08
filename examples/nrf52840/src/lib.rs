@@ -146,6 +146,7 @@ use gpio_trace::*;
 pub enum PpiChannel {
     RadioTimer1,
     RadioTimer2,
+    RadioCrcGate,
     #[cfg(feature = "timer-trace")]
     RadioTimerTick,
     #[cfg(feature = "radio-trace")]
@@ -227,6 +228,7 @@ pub fn config_peripherals(
             PpiChannel::RadioTimer2 as usize,
         ],
         ppi_channel_group: TIMER_PPI_CHANNEL_GROUP,
+        ppi_gate_channel: PpiChannel::RadioCrcGate as usize,
 
         #[cfg(feature = "timer-trace")]
         tracing_config: NrfRadioTimerTracingConfig {

@@ -45,13 +45,12 @@ pub trait RadioTask: Sized {
     ///
     /// Note: The same task outcome (e.g. a CRC error) MAY be interpreted as
     ///       both, a [`RadioTask::Result`] or a [`RadioTask::Error`], depending
-    ///       on the context: If an independent tx frame is scheduled after an
-    ///       rx task ending in a CRC error, then the tx frame must be scheduled
-    ///       nevertheless. The same is not true for an acknowledgment frame
-    ///       scheduled after an incoming frame whose CRC check fails. This
-    ///       explains why the "CRC not ok" outcome exists as both, a result and
-    ///       an error. The scheduling API will allow to pass in flags that
-    ///       allow the driver to distinguish between those cases.
+    ///       on the scheduled transition: If an independent tx frame is
+    ///       scheduled after an rx task ending in a CRC error, then the tx
+    ///       frame must be scheduled nevertheless. The same is not true for an
+    ///       acknowledgment frame, which is only authorized by a valid FCS
+    ///       (see [`ConditionalRadioTransition`]). This explains why the "CRC
+    ///       not ok" outcome exists as both, a result and an error.
     type Result;
 
     /// A transition MAY fail if it the source state's task or the transition to
@@ -162,10 +161,6 @@ pub enum RxResult {
         RadioFrame<RadioFrameUnsized>,
     ),
     /// A frame was received but the CRC didn't match.
-    ///
-    /// Note: This result is returned if the driver was programmed to switch to
-    ///       the next radio task on CRC error, e.g. when scheduling a regular
-    ///       off, rx or tx task back-to-back to an rx task.
     CrcError(
         /// recovered radio frame
         RadioFrame<RadioFrameUnsized>,
@@ -176,11 +171,6 @@ pub enum RxResult {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RxError {
     /// A frame was received but the CRC didn't match.
-    ///
-    /// Note: This error is returned if the driver was programmed to remain in
-    ///       the rx state on CRC error, e.g. to ensure that an ACK frame
-    ///       scheduled back-to-back to an rx frame is not being sent when the
-    ///       checksum doesn't match.
     CrcError,
 }
 impl RadioTask for TaskRx {
@@ -500,9 +490,11 @@ pub trait RadioState<RadioDriverImpl: DriverConfig, Task: RadioTask>:
     ///
     /// Produces the task result or fails with a scheduling error.
     ///
-    /// If the `alt_outcome_is_error` flag is true, then the alternate outcome
-    /// (e.g. CRC not ok) should be treated as a task error rather than a task
-    /// result thereby triggering a transition rollback.
+    /// If the `alt_outcome_is_error` flag is true (see
+    /// [`RadioTransition::ALT_OUTCOME_IS_ERROR`]), then the alternate outcome
+    /// (e.g. CRC not ok) SHALL be treated as a task error rather than a task
+    /// result thereby triggering a transition rollback into a re-established
+    /// source state.
     ///
     /// Note: Implementations SHALL NOT assume anything about the status of the
     ///       state's task - it MAY be running or already complete when this
@@ -769,35 +761,12 @@ pub trait ListeningRxState<RadioDriverImpl: DriverConfig>:
 }
 
 /// Receiving state
-///
-/// This is a generic characterization of the rx state after the start of an
-/// incoming frame has been observed. The radio will receive the incoming frame
-/// while in this state.
-///
-/// This state is different from the [`ListeningRxState`] in that the behavior
-/// of external devices no longer imposes restrictions on the ability to decide
-/// upon and schedule subsequent tasks.
-///
-/// Scheduling of subsequent tasks SHALL be done concurrently with frame
-/// reception to ensure standard-conforming timing.
-///
-/// When transitioning away from the rx state, the target state depends on the
-/// outcome of the rx task in combination with the `rollback_on_crcerror` flag:
-///
-/// - If the `rollback_on_crcerror` flag is true, the transition will be rolled
-///   back in case of a CRC error. This is useful when acknowledgment is
-///   required for a frame received by this rx task: In case of a CRC error an
-///   already scheduled acknowledgement will not to be sent.
-///
-/// - If the `rollback_on_crcerror` flag is false then the transition takes
-///   place independently of a CRC match. This is the correct behavior in case
-///   of an independent rx or tx task being scheduled back-to-back to an
-///   incoming frame that does not require acknowledgment. In this case we
-///   expect the scheduled task to be executed independently of the preceding rx
-///   result.
 pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
     RadioState<RadioDriverImpl, TaskRx>
 {
+    /// Utility method to calculate the PHY specific time that a PPDU with the
+    /// given PSDU (=MPDU) size occupies the physical channel.
+    fn ppdu_rx_duration(&self, psdu_size: u16) -> NsDuration;
     /// If a frame has started within the reception window then returns the
     /// preliminary frame information, otherwise returns [`None`].
     ///
@@ -818,8 +787,8 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
     /// Schedules reception of a frame back-to-back to the frame currently being
     /// received with well-defined radio downtime.
     ///
-    /// See the trait documentation for an explanation of the
-    /// `rollback_on_crcerror` flag.`
+    /// The scheduled task is independent of the in-flight frame's CRC outcome,
+    /// see the trait documentation.
     ///
     /// If an IFS is given, then the driver SHALL deduce sufficient guard time,
     /// so that - given the local radio's IFS timer accuracy - a sent frame will
@@ -860,7 +829,6 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
         self,
         rx_task: TaskRx,
         ifs: Option<Ifs<PhyOf<RadioDriverImpl>>>,
-        rollback_on_crcerror: bool,
     ) -> impl SelfRadioTransition<RadioDriverImpl, TaskRx>;
 
     /// Ends the rx task and schedules a transition to the tx state with a
@@ -891,15 +859,23 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
     /// Note: It is the scheduler's task to cater for possible clock drift (i.e.
     ///       to widen the rx window) as appropriate.
     ///
-    /// See the trait documentation for an explanation of the
-    /// `rollback_on_crcerror` flag.`
+    /// The scheduled task is independent of the in-flight frame's CRC outcome,
+    /// see the trait documentation. Use
+    /// [`ReceivingRxState::schedule_ack_tx`] to acknowledge the in-flight
+    /// frame.
     fn schedule_tx(
         self,
         tx_task: TaskTx,
         at: OptionalNsInstant,
         ifs: Option<Ifs<PhyOf<RadioDriverImpl>>>,
-        rollback_on_crcerror: bool,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskRx, TaskTx>;
+
+    /// Schedules acknowledgment of the frame currently being received.
+    fn schedule_ack_tx(
+        self,
+        ack_task: TaskTx,
+        ack_at: NsInstant,
+    ) -> impl ConditionalRadioTransition<RadioDriverImpl, TaskRx, TaskTx>;
 
     /// Ends the rx task and schedules a transition to the "Radio Off" state.
     ///
@@ -915,12 +891,11 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
     /// SHOULD be disabled as soon as the frame ends to optimize for energy
     /// efficiency.
     ///
-    /// See the trait documentation for an explanation of the
-    /// `rollback_on_crcerror` flag.`
+    /// The scheduled task is independent of the in-flight frame's CRC outcome,
+    /// see the trait documentation.
     fn schedule_off(
         self,
         at: OptionalNsInstant,
-        rollback_on_crcerror: bool,
     ) -> impl ExternalRadioTransition<RadioDriverImpl, TaskRx, TaskOff>;
 }
 
@@ -1051,11 +1026,13 @@ pub trait RadioTransition<RadioDriverImpl: DriverConfig, ThisTask: RadioTask, Ne
     /// Tasks MAY produce distinct outcomes depending on external contingencies
     /// that are known only after the task has already been scheduled. Currently
     /// this is true for "CRC ok" (main outcome) vs. "CRC not ok" (alternate
-    /// outcome). This flag determines wether the alternate outcome is treated
-    /// as a [`RadioTask::Result`] or as a [`RadioTask::Error`].
+    /// outcome). This constant determines whether the alternate outcome is
+    /// treated as a [`RadioTask::Result`] or as a [`RadioTask::Error`].
     ///
-    /// Note: Currently only the rx task's "CRC not ok" outcome uses this flag.
-    fn alt_outcome_is_error(&self) -> bool;
+    /// This is a static property of the transition type: only conditional
+    /// transitions (see [`ConditionalRadioTransition`]) treat the alternate
+    /// outcome as an error.
+    const ALT_OUTCOME_IS_ERROR: bool = false;
 
     /// Consumes the transition to produce the corresponding source state and
     /// event (=next task) of the transition.
@@ -1119,7 +1096,7 @@ pub trait ExternalRadioTransition<
                 }
             };
 
-            let alt_outcome_is_error = self.alt_outcome_is_error();
+            let alt_outcome_is_error = Self::ALT_OUTCOME_IS_ERROR;
             let prev_task_result = match self.driver().completion(alt_outcome_is_error).await {
                 Err(task_error) => {
                     #[cfg(feature = "rtos-trace")]
@@ -1226,6 +1203,16 @@ where
 {
 }
 
+/// An external radio transition that only takes place if the source task's
+/// main outcome materializes.
+pub trait ConditionalRadioTransition<
+    RadioDriverImpl: DriverConfig,
+    ThisTask: RadioTask,
+    NextTask: RadioTask,
+>: ExternalRadioTransition<RadioDriverImpl, ThisTask, NextTask>
+{
+}
+
 /// Represents an active radio state self-transition while it is being
 /// traversed.
 ///
@@ -1275,7 +1262,7 @@ pub trait SelfRadioTransition<RadioDriverImpl: DriverConfig, Task: RadioTask>:
                 }
             };
 
-            let alt_outcome_is_error = self.alt_outcome_is_error();
+            let alt_outcome_is_error = Self::ALT_OUTCOME_IS_ERROR;
             let prev_task_result = match self.driver().completion(alt_outcome_is_error).await {
                 Err(scheduling_error) => {
                     let _ = Self::cleanup();

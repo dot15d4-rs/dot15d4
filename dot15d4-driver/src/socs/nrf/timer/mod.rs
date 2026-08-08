@@ -315,10 +315,17 @@ struct State {
     ppi_channel2: AtomicUsize,
 
     /// PPI channel group used for signal triggering (disable unless
-    /// framestart).
+    /// framestart, txen if crcok).
     ///
     /// May be accessed from scheduling and interrupt context.
     ppi_channel_group: AtomicUsize,
+
+    /// PPI channel used to gate a timed signal on a hardware event
+    /// (event -> enable channel group).
+    ///
+    /// Will only be accessed from scheduling context but is atomic to satisfy
+    /// the type system.
+    ppi_gate_channel: AtomicUsize,
 
     /// The PPI channel mask containing all PPI channels used by this driver.
     ///
@@ -375,6 +382,7 @@ impl State {
             ppi_channel1: AtomicUsize::new(0),
             ppi_channel2: AtomicUsize::new(0),
             ppi_channel_group: AtomicUsize::new(0),
+            ppi_gate_channel: AtomicUsize::new(0),
             ppi_channel_mask: AtomicU32::new(0),
         }
     }
@@ -442,13 +450,19 @@ impl State {
         super::start_lf_clock(&config.clock, config.sleep_timer_clk_src);
 
         let [ppi_channel1, ppi_channel2] = config.ppi_channels;
+        let ppi_gate_channel = config.ppi_gate_channel;
         debug_assert!(ppi_channel1 <= 19);
         debug_assert!(ppi_channel2 <= 19);
+        debug_assert!(ppi_gate_channel <= 19);
         debug_assert_ne!(ppi_channel1, ppi_channel2);
+        debug_assert_ne!(ppi_gate_channel, ppi_channel1);
+        debug_assert_ne!(ppi_gate_channel, ppi_channel2);
         self.ppi_channel1.store(ppi_channel1, Ordering::Relaxed);
         self.ppi_channel2.store(ppi_channel2, Ordering::Relaxed);
+        self.ppi_gate_channel
+            .store(ppi_gate_channel, Ordering::Relaxed);
         self.ppi_channel_mask.store(
-            1 << ppi_channel1 | 1 << ppi_channel2 | Self::PPI_CHANNEL_MASK,
+            1 << ppi_channel1 | 1 << ppi_channel2 | 1 << ppi_gate_channel | Self::PPI_CHANNEL_MASK,
             Ordering::Relaxed,
         );
 
@@ -1338,9 +1352,43 @@ impl State {
         let ppi_channel2 = || self.ppi_channel2.load(Ordering::Relaxed);
         match event {
             HardwareEvent::RadioRxEnabled | HardwareEvent::RadioDisabled => ppi_channel1(),
-            HardwareEvent::RadioFrameStarted => ppi_channel2(),
+            HardwareEvent::RadioFrameStarted | HardwareEvent::RadioCrcOk => ppi_channel2(),
             #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => ppi_channel2(),
+        }
+    }
+
+    /// Returns the event's register address (for PPI EEP programming) and
+    /// whether the event is currently latched.
+    fn hardware_event_state(&self, event: HardwareEvent) -> (u32, bool) {
+        let radio = Self::radio();
+        match event {
+            HardwareEvent::RadioRxEnabled => (
+                radio.events_rxready.as_ptr() as u32,
+                radio.events_rxready.read().events_rxready().bit_is_set(),
+            ),
+            HardwareEvent::RadioFrameStarted => (
+                radio.events_framestart.as_ptr() as u32,
+                radio
+                    .events_framestart
+                    .read()
+                    .events_framestart()
+                    .bit_is_set(),
+            ),
+            HardwareEvent::RadioDisabled => (
+                radio.events_disabled.as_ptr() as u32,
+                radio.events_disabled.read().events_disabled().bit_is_set(),
+            ),
+            HardwareEvent::RadioCrcOk => (
+                radio.events_crcok.as_ptr() as u32,
+                radio.events_crcok.read().events_crcok().bit_is_set(),
+            ),
+            #[cfg(feature = "timer-trace")]
+            HardwareEvent::GpioToggled => {
+                let gpiote_channel = self.gpiote_in_channel.load(Ordering::Relaxed);
+                let event = &Self::gpiote().events_in[gpiote_channel];
+                (event.as_ptr() as u32, event.read().events_in().bit_is_set())
+            }
         }
     }
 
@@ -1396,16 +1444,7 @@ impl State {
             ObservesEvent(Self::timer_event_channel(event))
         };
 
-        #[cfg(feature = "timer-trace")]
-        let gpiote_channel = self.gpiote_in_channel.load(Ordering::Relaxed);
-        let radio = Self::radio();
-        let event_ptr = match event {
-            HardwareEvent::RadioRxEnabled => radio.events_rxready.as_ptr(),
-            HardwareEvent::RadioFrameStarted => radio.events_framestart.as_ptr(),
-            HardwareEvent::RadioDisabled => radio.events_disabled.as_ptr(),
-            #[cfg(feature = "timer-trace")]
-            HardwareEvent::GpioToggled => Self::gpiote().events_in[gpiote_channel].as_ptr(),
-        };
+        let (event_ptr, _) = self.hardware_event_state(event);
 
         let event_ppi_channel = self.ppi_event_channel(event);
         let event_ppi_channel_mask = 1 << event_ppi_channel;
@@ -1417,7 +1456,7 @@ impl State {
             // If the channel is already enabled it must observe the correct
             // event.
             let current_event = event_ch.eep.read().eep().bits();
-            if current_event != event_ptr as u32 {
+            if current_event != event_ptr {
                 return Err(RadioTimerError::Busy);
             }
 
@@ -1437,7 +1476,7 @@ impl State {
                 }
             }
         } else {
-            event_ch.eep.write(|w| w.eep().variant(event_ptr as u32));
+            event_ch.eep.write(|w| w.eep().variant(event_ptr));
             if matches!(use_case, EventDisablesSignal(..)) {
                 event_ch.tep.reset();
             } else {
@@ -1489,24 +1528,7 @@ impl State {
         // Now that the fork is in place and the channel enabled we can check
         // whether the event may have been observed before we programmed the
         // fork and then disable the signal manually.
-        let event_has_been_observed = match event {
-            HardwareEvent::RadioRxEnabled => {
-                radio.events_rxready.read().events_rxready().bit_is_set()
-            }
-            HardwareEvent::RadioFrameStarted => radio
-                .events_framestart
-                .read()
-                .events_framestart()
-                .bit_is_set(),
-            HardwareEvent::RadioDisabled => {
-                radio.events_disabled.read().events_disabled().bit_is_set()
-            }
-            #[cfg(feature = "timer-trace")]
-            HardwareEvent::GpioToggled => Self::gpiote().events_in[gpiote_channel]
-                .read()
-                .events_in()
-                .bit_is_set(),
-        };
+        let (_, event_has_been_observed) = self.hardware_event_state(event);
 
         if event_has_been_observed {
             match use_case {
@@ -1668,7 +1690,7 @@ impl State {
         // assignments.
         match event {
             HardwareEvent::RadioRxEnabled | HardwareEvent::RadioDisabled => 0,
-            HardwareEvent::RadioFrameStarted => 1,
+            HardwareEvent::RadioFrameStarted | HardwareEvent::RadioCrcOk => 1,
             #[cfg(feature = "timer-trace")]
             HardwareEvent::GpioToggled => 1,
         }
@@ -1758,6 +1780,80 @@ impl State {
             timer_channel,
             signal_ppi_channel_mask,
         )
+    }
+
+    fn timer_try_schedule_signal_if(
+        &self,
+        instant: NsInstant,
+        timer_ticks: NonZeroU32,
+        signal: HardwareSignal,
+        event: HardwareEvent,
+    ) -> Result<(), RadioTimerError> {
+        let ppi = Self::ppi();
+        let timer = Self::timer();
+
+        let (signal_ppi_channel, timer_channel) = self.timer_signal_channels(signal);
+        let signal_ppi_channel_mask: u32 = 1 << signal_ppi_channel;
+
+        if timer.events_compare[timer_channel]
+            .read()
+            .events_compare()
+            .bit_is_set()
+        {
+            timer.events_compare[timer_channel].write(|w| w.events_compare().clear_bit());
+        } else if timer.cc[timer_channel].read().cc().bits() != 0 {
+            return Err(RadioTimerError::Busy);
+        }
+
+        let group = self.ppi_channel_group.load(Ordering::Relaxed);
+        if ppi.chg[group].read().bits() != 0 {
+            return Err(RadioTimerError::Busy);
+        }
+        let gate = self.ppi_gate_channel.load(Ordering::Relaxed);
+        debug_assert_eq!(ppi.chen.read().bits() & (1 << gate), 0);
+
+        ppi.chenclr
+            .write(|w| unsafe { w.bits(signal_ppi_channel_mask) });
+
+        // (1) Safety: The group has been asserted to be in range and free.
+        //     The signal channel is disabled and its compare cannot fire.
+        ppi.chg[group].write(|w| unsafe { w.bits(signal_ppi_channel_mask) });
+
+        let (event_ptr, _) = self.hardware_event_state(event);
+        let gate_ch = &ppi.ch[gate];
+        gate_ch.eep.write(|w| w.eep().variant(event_ptr));
+        let group_enable_task = ppi.tasks_chg[group].en.as_ptr();
+        gate_ch
+            .tep
+            .write(|w| w.tep().variant(group_enable_task as u32));
+        ppi.fork[gate].tep.reset();
+
+        ppi.chenset.write(|w| unsafe { w.bits(1 << gate) });
+
+        timer.cc[timer_channel].write(|w| w.cc().variant(timer_ticks.get()));
+
+        timer.tasks_capture[Self::TIMER_TEST_CHANNEL].write(|w| w.tasks_capture().set_bit());
+        let timer_now = timer.cc[Self::TIMER_TEST_CHANNEL].read().bits();
+        let compare_armed = timer_now < timer_ticks.get()
+            || timer.events_compare[timer_channel]
+                .read()
+                .events_compare()
+                .bit_is_set();
+        if !compare_armed {
+            ppi.chenclr
+                .write(|w| unsafe { w.bits(1 << gate | signal_ppi_channel_mask) });
+            ppi.tasks_chg[group].dis.write(|w| w.dis().set_bit());
+            ppi.chg[group].reset();
+            timer.cc[timer_channel].reset();
+            return Err(RadioTimerError::Overdue(instant));
+        }
+
+        let (_, event_has_been_observed) = self.hardware_event_state(event);
+        if event_has_been_observed && ppi.chen.read().bits() & signal_ppi_channel_mask == 0 {
+            return Err(RadioTimerError::Already);
+        }
+
+        Ok(())
     }
 
     // Called exclusively from scheduling context.
@@ -2258,6 +2354,9 @@ pub struct NrfRadioTimerConfig {
     pub sleep_timer_clk_src: super::LfClockSource,
     pub ppi_channels: [usize; 2],
     pub ppi_channel_group: usize,
+    /// PPI channel used to gate a timed signal on a hardware event
+    /// ("timed signal if event", e.g. Enh-ACK txen on CRCOK).
+    pub ppi_gate_channel: usize,
     #[cfg(feature = "timer-trace")]
     pub tracing_config: NrfRadioTimerTracingConfig,
 }
@@ -2391,6 +2490,7 @@ impl NrfRadioHighPrecisionTimer {
 /// rx    | stop_listening | disable\framestarted | framestarted, disabled
 /// rx    | sched_rx       |                      | rx_enabled*, framestarted
 /// rx    | sched_tx       | disable, txen        | framestarted
+/// rx    | sched_ack_tx   | txen if crcok        | framestarted
 /// rx    | sched_off      | disable**            | disabled**
 /// tx    | sched_rx       |                      | rx_enabled, framestarted
 /// tx    | sched_tx       |                      | framestarted
@@ -2410,6 +2510,8 @@ impl NrfRadioHighPrecisionTimer {
 /// - rxen/txen: pre-configured PPI-Chs 20/21 + CC0
 /// - disable: pre-configured PPI-Ch 22 + CC1
 /// - disable unless...: like "disable" + PPI-ChGroup
+/// - txen if crcok: like "txen" + PPI-ChGroup + gate PPI-Ch
+///   (crcok -> chg.en; the txen channel starts disabled inside the group)
 ///
 /// events:
 /// - rx_enabled/disabled: PPI-Ch1.tep + CC0
@@ -2551,6 +2653,30 @@ impl HighPrecisionTimer for NrfRadioHighPrecisionTimer {
         STATE
             .timer_try_schedule_signal_unless(instant, timer_ticks, signal, event)
             .map(|_| self)
+    }
+
+    fn schedule_timed_signal_if(
+        &self,
+        timed_signal: TimedSignal,
+        event: HardwareEvent,
+    ) -> Result<&Self, RadioTimerError> {
+        let TimedSignal { instant, signal } = timed_signal;
+        let timer_ticks = Self::timer_ticks(instant);
+
+        #[cfg(feature = "rtos-trace")]
+        crate::timer::trace::record_schedule_timed_signal(instant, timer_ticks, signal);
+
+        let timer_ticks = NonZero::new(timer_ticks).ok_or(RadioTimerError::Overdue(instant))?;
+        STATE
+            .timer_try_schedule_signal_if(instant, timer_ticks, signal, event)
+            .map(|_| self)
+    }
+
+    fn commit_timed_signal(&self) {
+        let ppi = State::ppi();
+        let group = STATE.ppi_channel_group.load(Ordering::Relaxed);
+        debug_assert_ne!(ppi.chg[group].read().bits(), 0);
+        ppi.tasks_chg[group].en.write(|w| w.en().set_bit());
     }
 
     async unsafe fn wait_for(&mut self, signal: HardwareSignal) {

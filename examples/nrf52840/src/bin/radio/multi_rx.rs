@@ -98,7 +98,7 @@ where
     };
 
     match receiving_rx_radio
-        .schedule_off(None.into(), false)
+        .schedule_off(None.into())
         .complete_and_transition()
         .await
     {

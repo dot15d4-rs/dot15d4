@@ -131,6 +131,18 @@ impl HighPrecisionTimer for FakeRadioTimer<Running> {
         todo!()
     }
 
+    fn schedule_timed_signal_if(
+        &self,
+        _timed_signal: TimedSignal,
+        _event: HardwareEvent,
+    ) -> Result<&Self, RadioTimerError> {
+        todo!()
+    }
+
+    fn commit_timed_signal(&self) {
+        todo!()
+    }
+
     async unsafe fn wait_for(&mut self, _signal: HardwareSignal) {
         todo!()
     }

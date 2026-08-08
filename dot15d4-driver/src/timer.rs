@@ -194,6 +194,9 @@ pub enum HardwareEvent {
     /// implementation specific.
     RadioDisabled,
 
+    /// An event indicating that a received frame passed the FCS (CRC) check.
+    RadioCrcOk,
+
     /// A toggle event on the inbound alarm pin.
     #[cfg(feature = "timer-trace")]
     GpioToggled,
@@ -291,6 +294,19 @@ pub trait HighPrecisionTimer {
         timed_signal: TimedSignal,
         event: HardwareEvent,
     ) -> Result<&Self, RadioTimerError>;
+
+    /// Programs a hardware signal to be sent over the event bus at a precise
+    /// instant, but only if the given event occurred before that instant.
+    fn schedule_timed_signal_if(
+        &self,
+        timed_signal: TimedSignal,
+        event: HardwareEvent,
+    ) -> Result<&Self, RadioTimerError>;
+
+    /// Manually enables a signal that
+    /// [`HighPrecisionTimer::schedule_timed_signal_if`] left disarmed with
+    /// [`RadioTimerError::Already`].
+    fn commit_timed_signal(&self);
 
     /// Waits until a scheduled signal has been executed.
     ///

@@ -736,7 +736,6 @@ where
                         },
                         at.into(),
                         Some(next_ifs),
-                        false,
                     )
                     .complete_and_transition()
                     .await
@@ -790,9 +789,9 @@ where
 
                         DriverState::Idle(off_driver)
                     }
-                    // Safety: The transition was programmed to not roll
-                    //         back on CRC error.
-                    // TODO: support rollback
+                    // Safety: Independent tasks proceed on CRC error; only a
+                    //         scheduling failure rolls back.
+                    // TODO: support scheduling-failure rollback
                     CompletedRadioTransition::Rollback(..) => unreachable!(),
                 }
             }
@@ -813,7 +812,7 @@ where
                 debug_assert!(channel.is_none());
 
                 match receiving_rx_driver
-                    .schedule_rx(RadioTaskRx { radio_frame }, Some(next_ifs), false)
+                    .schedule_rx(RadioTaskRx { radio_frame }, Some(next_ifs))
                     .complete_and_transition()
                     .await
                 {
@@ -832,16 +831,16 @@ where
 
                         DriverState::WaitingForFrame(listening_rx_driver)
                     }
-                    // Safety: The transition task was programmed to not
-                    //         roll back on CRC error.
-                    // TODO: support rollback
+                    // Safety: Independent tasks proceed on CRC error; only a
+                    //         scheduling failure rolls back.
+                    // TODO: support scheduling-failure rollback
                     CompletedRadioTransition::Rollback(..) => unreachable!(),
                     // Safety: Scheduling rx cannot fall back.
                     CompletedRadioTransition::Fallback(..) => unreachable!(),
                 }
             }
             DrvSvcRequest::CompleteThenGoIdle => match receiving_rx_driver
-                .schedule_off(None.into(), false)
+                .schedule_off(None.into())
                 .complete_and_transition()
                 .await
             {
@@ -862,8 +861,8 @@ where
 
                     DriverState::Idle(off_driver)
                 }
-                // Safety: The transition task was programmed to not
-                //         roll back on CRC error.
+                // Safety: Independent tasks proceed on CRC error; only a
+                //         scheduling failure rolls back.
                 CompletedRadioTransition::Rollback(..) => unreachable!(),
                 // Safety: Switching the radio off is infallible.
                 CompletedRadioTransition::Fallback(..) => unreachable!(),
@@ -890,7 +889,8 @@ where
         frame_version: FrameVersion,
         #[cfg(feature = "tsch")] dst_le_bytes: [u8; 8],
         ifs: Ifs<PhyOf<RadioDriverImpl>>,
-        #[cfg(feature = "tsch")] rx_instant: NsInstant,
+        rx_instant: NsInstant,
+        mpdu_length: u16,
     ) -> DriverState<RadioDriverImpl> {
         // Safety: We use the tx ACK frame sequentially and exclusively from
         //         this method.
@@ -937,8 +937,17 @@ where
             cca: false,
         };
 
+        let ack_delay = match frame_version {
+            FrameVersion::Ieee802154 => {
+                <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_TS_TX_ACK_DELAY
+            }
+            _ => <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
+        };
+        let ack_at =
+            rx_instant + receiving_rx_driver.ppdu_rx_duration(mpdu_length) + ack_delay;
+
         match receiving_rx_driver
-            .schedule_tx(outbound_ack_task, None.into(), Some(Ifs::ack()), true)
+            .schedule_ack_tx(outbound_ack_task, ack_at)
             .complete_and_transition()
             .await
         {
@@ -953,18 +962,12 @@ where
                     .complete_transmission(tx_driver, TransmissionType::Ack(rx_task_result), ifs)
                     .await;
             }
-            // CRC mismatch: Cancel ACK, recover the pre-allocated ACK frame and
-            //               leave the driver in the rx state.
             CompletedRadioTransition::Rollback(
-                listening_rx_driver,
+                rx_driver,
                 rx_task_error,
                 rx_task_result,
                 recovered_outbound_ack_task,
             ) => {
-                debug_assert!(matches!(
-                    rx_task_error,
-                    RadioTaskError::Task(RxError::CrcError)
-                ));
                 debug_assert!(rx_task_result.is_none());
 
                 self.outbound_ack_frame
@@ -974,7 +977,14 @@ where
                     .send(DrvSvcEvent::ReceptionAborted)
                     .await;
 
-                DriverState::WaitingForFrame(listening_rx_driver)
+                match rx_task_error {
+                    RadioTaskError::Task(RxError::CrcError) => {
+                        DriverState::WaitingForFrame(rx_driver)
+                    }
+                    RadioTaskError::Scheduling(rx_task, _) => {
+                        DriverState::WaitingForFrame(rx_driver.enter_next_task(rx_task))
+                    }
+                }
             }
             // Safety: Scheduling ACK cannot fall back as it does no CCA.
             CompletedRadioTransition::Fallback(..) => unreachable!(),
@@ -1014,7 +1024,6 @@ where
                             .validate_and_receive_frame(
                                 receiving_rx_driver,
                                 &hardware_address,
-                                #[cfg(feature = "tsch")]
                                 rx_instant,
                             )
                             .await;
@@ -1060,7 +1069,6 @@ where
                         .validate_and_receive_frame(
                             receiving_rx_driver,
                             &hardware_address,
-                            #[cfg(feature = "tsch")]
                             rx_instant,
                         )
                         .await;
@@ -1110,7 +1118,6 @@ where
                                         .validate_and_receive_frame(
                                             receiving_rx_driver,
                                             &hardware_address,
-                                            #[cfg(feature = "tsch")]
                                             rx_instant,
                                         )
                                         .await;
@@ -1145,7 +1152,6 @@ where
                                             .validate_and_receive_frame(
                                                 receiving_rx_driver,
                                                 &hardware_address,
-                                                #[cfg(feature = "tsch")]
                                                 rx_instant,
                                             )
                                             .await;
@@ -1184,11 +1190,11 @@ where
         &self,
         mut receiving_rx_driver: impl ReceivingRxState<RadioDriverImpl>,
         hardware_address: &[u8; 8],
-        #[cfg(feature = "tsch")] rx_instant: NsInstant,
+        rx_instant: NsInstant,
     ) -> DriverState<RadioDriverImpl> {
         let preliminary_frame_info = receiving_rx_driver.preliminary_frame_info().await.unwrap();
-        let next_ifs =
-            Ifs::<PhyOf<RadioDriverImpl>>::from_mpdu_length(preliminary_frame_info.mpdu_length);
+        let mpdu_length = preliminary_frame_info.mpdu_length;
+        let next_ifs = Ifs::<PhyOf<RadioDriverImpl>>::from_mpdu_length(mpdu_length);
         let frame_is_valid = is_frame_valid_and_for_us(hardware_address, &preliminary_frame_info);
 
         // If the frame is valid and ACK is requested, then
@@ -1227,8 +1233,8 @@ where
                         #[cfg(feature = "tsch")]
                         src_le_bytes.unwrap_or([0u8; 8]),
                         next_ifs,
-                        #[cfg(feature = "tsch")]
                         rx_instant,
+                        mpdu_length,
                     )
                     .await
                 }
@@ -1312,7 +1318,7 @@ where
             self.rx_window_end.set(None);
             self.expected_rx_framestart.set(None);
             return match receiving_rx_driver
-                .schedule_off(None.into(), false)
+                .schedule_off(None.into())
                 .complete_and_transition()
                 .await
             {
@@ -1320,8 +1326,8 @@ where
                     self.end_rx_window(radio_transition_result, ReceptionType::Frame)
                         .await
                 }
-                // Safety: The transition task was programmed to not roll back
-                //         on CRC error.
+                // Safety: Independent tasks proceed on CRC error; only a
+                //         scheduling failure rolls back.
                 CompletedRadioTransition::Rollback(..) => unreachable!(),
                 // Safety: Switching the radio off is infallible.
                 CompletedRadioTransition::Fallback(..) => unreachable!(),
@@ -1335,7 +1341,7 @@ where
             radio_frame: temporary_rx_frame,
         };
         match receiving_rx_driver
-            .schedule_rx(rx_task, None, false)
+            .schedule_rx(rx_task, None)
             .complete_and_transition()
             .await
         {
@@ -1359,8 +1365,8 @@ where
 
                 DriverState::WaitingForFrame(listening_rx_driver)
             }
-            // Safety: The transition task was programmed to not roll back on
-            //         CRC error.
+            // Safety: Independent tasks proceed on CRC error; only a
+            //         scheduling failure rolls back.
             CompletedRadioTransition::Rollback(..) => unreachable!(),
             // Safety: Scheduling rx tasks does not fall back.
             CompletedRadioTransition::Fallback(..) => unreachable!(),

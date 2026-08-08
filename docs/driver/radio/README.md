@@ -520,6 +520,27 @@ offloading (auto-ACK):
 - Wait for ACK flag of the tx task: asks the driver to wait (with timeout) for
   an Imm-Ack or Enh-Ack after a tx tasks finishes.
 
+### Arming invariant for conditional transitions
+
+Some transitions are conditional on an outcome that is only known after
+scheduling, e.g. an acknowledgment that is only authorized by a valid FCS of
+the frame it acknowledges. For those transitions the following invariant SHALL
+hold:
+
+- The `on_scheduled` callback SHALL only arm _reversible_ machinery: an
+  irreversible action (in particular any RF emission) SHALL only ever be
+  triggered by a hardware-level proof of the authorizing outcome (e.g. a PPI
+  gate on the CRCOK event) or by a software commit that verified both the
+  outcome _and_ its own deadline before committing.
+- Rolling back SHALL therefore amount to disarming machinery that has provably
+  not fired and re-establishing the source state (see `reenter_listening` in
+  the nRF driver). The safe failure mode of an acknowledgment is silence:
+  when in doubt, the driver SHALL NOT transmit.
+
+This inverts the failure polarity: software latency can delay or suppress an
+acknowledgment (the peer retransmits), but can never cause an unauthorized
+one.
+
 ### Behavioral modeling of task transitions
 
 The model treats transitions between tasks as driver primitives, i.e.
