@@ -9,13 +9,13 @@ use dot15d4_driver::{
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
-use dot15d4_util::allocator::IntoBuffer;
+use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 
 use crate::{
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, Timestamp},
     scheduler::{
-        command::scan::ScanCommandResult, ReceptionType, SchedulerCommandResult,
-        SchedulerReceptionResult, SchedulerResponse,
+        command::scan::ScanCommandResult, ReceptionType, SchedulerCommand, SchedulerCommandResult,
+        SchedulerReceptionResult, SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult,
     },
 };
 
@@ -169,11 +169,45 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     self.advance_to_next_channel(context, Err(context.allocate_frame()))
                 }
             },
+            SchedulerTaskEvent::SchedulerRequest { token, request } => {
+                self.state = ScanTaskState::ScanningChannel(channel);
+                self.on_scheduler_request(token, request, context)
+            }
             _ => {
                 dot15d4_util::warn!("scan: unexpected event while scanning a channel; advancing channel.");
                 self.advance_to_next_channel(context, Err(context.allocate_frame()))
             }
         }
+    }
+
+    fn on_scheduler_request(
+        &mut self,
+        token: ResponseToken,
+        request: SchedulerRequest,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        let response = match request {
+            SchedulerRequest::Command(SchedulerCommand::PibCommand(cmd)) => {
+                context.process_pib_command(cmd)
+            }
+            SchedulerRequest::Transmission(mpdu) => SchedulerResponse::Transmission(
+                SchedulerTransmissionResult::ChannelAccessFailure(
+                    mpdu.into_radio_frame::<RadioDriverImpl>(),
+                ),
+            ),
+            _ => {
+                dot15d4_util::warn!("scan: unsupported request while scanning; ignoring.");
+                return SchedulerTaskTransition::Execute(
+                    SchedulerAction::SelectDriverEventOrRequest,
+                    None,
+                );
+            }
+        };
+
+        SchedulerTaskTransition::Execute(
+            SchedulerAction::SelectDriverEventOrRequest,
+            Some((token, response)),
+        )
     }
 
     fn execute_receiving_frame(
