@@ -556,6 +556,16 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     self.touch_keep_alive(rx_instant, context);
                 }
 
+                #[cfg(feature = "sync-error-log")]
+                if src_id.is_some() && src_id != context.pib.tsch.time_source {
+                    let peer = src_id
+                        .and_then(|id| context.pib.neighbors.get(id))
+                        .map(|neighbor| *neighbor.ext_addr());
+                    if let Some(peer) = peer {
+                        context.pib.tsch.log_peer_sync_error(rx_instant, &peer);
+                    }
+                }
+
                 // Slot complete: queue the next RX exactly once.
                 let current_asn = context.pib.tsch.asn;
                 self.queue_next_rx(current_asn, context);

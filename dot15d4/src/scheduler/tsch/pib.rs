@@ -567,6 +567,24 @@ impl TschPib {
         let _ = (asn, timeslot_start);
     }
 
+    /// Log the synchronization error observed on a frame from a neighbor that
+    /// is *not* the time source, applying nothing.
+    #[cfg(feature = "sync-error-log")]
+    pub fn log_peer_sync_error(&self, instant: NsInstant, peer: &[u8; 8]) {
+        let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
+        let timeslot_start = instant - NsDuration::micros(tx_offset_us);
+        let predicted = self.expected_slot_start(self.asn, self.timeslot_length_us());
+        let err_ns = signed_delta_ns(predicted, timeslot_start);
+        // The peer goes out big-endian so the 16 hex digits read exactly like
+        // the address the node prints at boot.
+        dot15d4_util::info!(
+            "tsch sync asn={=u64} src=peer err_ns={=i64} peer={=u64:016x}",
+            self.asn,
+            err_ns,
+            u64::from_be_bytes(*peer)
+        );
+    }
+
     pub fn reset_time_base(&mut self, asn: TschAsn, instant: NsInstant) {
         let tx_offset_us = self.timeslot_timings.tx_offset() as u64;
         self.asn = asn;
