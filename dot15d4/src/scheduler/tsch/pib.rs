@@ -646,6 +646,19 @@ impl TschPib {
         }
         #[cfg(not(feature = "no-tsch-ack-sync"))]
         {
+            // The Time Correction IE is quantized to whole microseconds, so the
+            // smallest correction it can express, +-1 us, stands for any true
+            // error in +-[0.5, 1.5) us. We decide to ignore 0us quantized error 
+            // to limit the noise it will inject in our drift estimator since 
+            // frame-based correction quantization is much finer.
+            if timesync_us == 0 {
+                tsch_trace!(
+                    "tsch resync src=ack asn={} correction_us=0 ignored=deadband",
+                    self.asn
+                );
+                return;
+            }
+
             let asn = self.asn;
             if timesync_us < 0 {
                 self.last_base_time -= NsDuration::micros(timesync_us.unsigned_abs() as u64);
