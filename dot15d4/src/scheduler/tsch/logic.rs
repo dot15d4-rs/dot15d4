@@ -301,11 +301,13 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                         SchedulerTaskTransition::Execute(self.go_idle(context), None)
                     }
                     TxOrigin::Beacon => {
-                        // Record the beacon transmission time (used for the next
-                        // period calculation), then put the frame back and
-                        // schedule the next advertisement.
+                        // Advance the beacon grid past the ASN this one used
+                        // (the slot the advertisement executed in, which
+                        // `update_timing` made current), then put the frame
+                        // back and schedule the next advertisement.
                         tsch_info!("tsch beacon sent asn={}", context.pib.tsch.asn);
-                        self.on_beacon_sent(instant);
+                        let timeslot_length_us = context.pib.tsch.timeslot_length_us();
+                        self.on_beacon_sent(context.pib.tsch.asn, timeslot_length_us);
                         self.recover_beacon(tx_frame, context);
                         SchedulerTaskTransition::Execute(self.go_idle(context), None)
                     }

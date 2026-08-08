@@ -190,20 +190,27 @@ impl TschSlotframe {
         (asn % self.size as u64) as u16
     }
 
-    /// Calculate the next ASN when this link will be active.
-    pub fn next_asn_for_link(
-        &self,
-        link: &TschLink,
-        current_asn: TschAsn,
-    ) -> TschAsn {
-        let current_timeslot = self.timeslot(current_asn);
-        if current_timeslot < link.timeslot {
-            // Link is later in this slotframe cycle
-            current_asn + (link.timeslot - current_timeslot) as u64
+    /// First ASN at or after `from_asn` at which this link is active.
+    ///
+    /// Inclusive in `from_asn`: when `from_asn` already falls on the link's
+    /// timeslot it is returned unchanged. This is the primitive a
+    /// deadline-driven caller needs ("the first opportunity from this ASN
+    /// on"); callers that want the occurrence strictly after a slot - the one
+    /// they are currently executing, typically - ask for `from_asn + 1`.
+    pub fn link_asn_at_or_after(&self, link: &TschLink, from_asn: TschAsn) -> TschAsn {
+        // In u64 throughout: `size + timeslot` overflows u16 for large
+        // slotframes.
+        let size = self.size as u64;
+        let current = self.timeslot(from_asn) as u64;
+        let target = link.timeslot as u64;
+        let ahead = if current <= target {
+            // Later in this slotframe cycle, or right here.
+            target - current
         } else {
-            // Link is at current timeslot or earlier - go to next slotframe cycle
-            current_asn + (self.size - current_timeslot + link.timeslot) as u64
-        }
+            // Already past it: next slotframe cycle.
+            size - current + target
+        };
+        from_asn + ahead
     }
 
     /// Get the slotframe size.
@@ -362,9 +369,13 @@ impl TschPib {
         }
     }
 
-    /// Select the next valid link across all slotframes that matches the given
-    /// criteria, returning the link with the smallest next ASN strictly after
-    /// `current_asn`.
+    /// Select the matching link across all slotframes with the smallest ASN
+    /// **at or after** `from_asn`.
+    ///
+    /// Inclusive in `from_asn`, so a caller holding a deadline ("the beacon is
+    /// due at this ASN") gets the cell falling exactly on it rather than the
+    /// following occurrence a whole slotframe later. Callers that mean "after
+    /// the slot I am executing" use [`Self::select_next_link`].
     ///
     /// When multiple links resolve to the same ASN (from different slotframes),
     /// the IEEE 802.15.4-2024 priority rules apply:
@@ -372,52 +383,50 @@ impl TschPib {
     ///
     /// TX vs RX precedence is handled at the task level since this method
     /// operates on a single filter (TX-only or RX-only).
-    pub fn select_next_link(
+    pub fn select_link_from(
         &self,
-        current_asn: TschAsn,
+        from_asn: TschAsn,
         filter: impl Fn(&TschLink) -> bool,
     ) -> Option<(&TschLink, TschAsn)> {
-        let mut best: Option<(&TschLink, u64)> = None;
+        let mut best: Option<(&TschLink, TschAsn)> = None;
 
         for link in self.links.iter() {
             if !filter(link) {
                 continue;
             }
 
-            let slotframe = match self.get_slotframe(link.slotframe_handle) {
-                Some(sf) => sf,
-                None => continue,
+            let Some(slotframe) = self.get_slotframe(link.slotframe_handle) else {
+                continue;
             };
 
-            let next_asn = slotframe.next_asn_for_link(link, current_asn);
+            let asn = slotframe.link_asn_at_or_after(link, from_asn);
 
-            // Skip if the computed ASN is not strictly in the future.
-            if next_asn <= current_asn {
-                continue;
-            }
-
+            // Earliest ASN wins; on a tie the lower macSlotframeHandle does
+            // (IEEE 802.15.4-2024).
             let is_better = match best {
                 None => true,
                 Some((best_link, best_asn)) => {
-                    if next_asn < best_asn {
-                        true
-                    } else if next_asn == best_asn {
-                        // Tie-break per IEEE 802.15.4-2024:
-                        // lower slotframe handle takes precedence.
-                        let best_handle = best_link.slotframe_handle;
-                        link.slotframe_handle < best_handle
-                    } else {
-                        false
-                    }
+                    (asn, link.slotframe_handle) < (best_asn, best_link.slotframe_handle)
                 }
             };
 
             if is_better {
-                best = Some((link, next_asn));
+                best = Some((link, asn));
             }
         }
 
         best
+    }
+
+    /// Select the matching link with the smallest ASN **strictly after**
+    /// `current_asn`, i.e. the next opportunity once the slot at `current_asn`
+    /// is spoken for.
+    pub fn select_next_link(
+        &self,
+        current_asn: TschAsn,
+        filter: impl Fn(&TschLink) -> bool,
+    ) -> Option<(&TschLink, TschAsn)> {
+        self.select_link_from(current_asn.saturating_add(1), filter)
     }
 
     /// Select the Nth valid link (skipping `skip` occurrences) across all

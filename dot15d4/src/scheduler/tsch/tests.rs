@@ -117,6 +117,14 @@ impl<'a> TestRunner<'a, TschTask<FakeDriverConfig>> {
         })
     }
 
+    /// Return the ASN of the pending advertisement operation, if any.
+    pub fn pending_advertisement_asn(&self) -> Option<TschAsn> {
+        self.task.pending_operations.iter().find_map(|op| match op {
+            TschOperation::AdvertisementSlot { asn, .. } => Some(*asn),
+            _ => None,
+        })
+    }
+
     pub fn last_asn(&self) -> TschAsn {
         self.context.pib.tsch.asn
     }
@@ -781,9 +789,20 @@ mod beacon_config_tests {
     }
 
     #[test]
-    fn test_beacon_period_ns_conversion() {
+    fn test_beacon_period_slots_conversion() {
         let config = BeaconConfig::new(3);
-        assert_eq!(config.period_ns(), 3_000_000_000);
+        // 3 s of 10 ms timeslots.
+        assert_eq!(config.period_slots(10_000), 300);
+        // A period shorter than a timeslot still advances by one slot.
+        assert_eq!(BeaconConfig::new(0).period_slots(10_000), 1);
+    }
+
+    #[test]
+    fn test_beacon_jitter_slots_conversion() {
+        let config = BeaconConfig::new(10).with_jitter_ms(500);
+        // +/- 500 ms of 10 ms timeslots.
+        assert_eq!(config.jitter_slots(10_000), 50);
+        assert_eq!(BeaconConfig::new(10).jitter_slots(10_000), 0);
     }
 }
 
@@ -1210,20 +1229,111 @@ mod advertisement_tests {
     }
 
     #[test]
-    fn test_beacon_sent_updates_last_beacon_time() {
+    fn test_beacon_sent_arms_next_beacon_asn() {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
+        // `enter_as_coordinator` beacons every 9 s: 900 timeslots of 10 ms.
         runner.enter_as_coordinator();
-        assert!(runner.task.last_beacon_time.is_none());
+        assert!(runner.task.next_beacon_asn.is_none());
 
         runner.step_timer_expired();
         runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
 
-        let sent_instant = NsInstant::from_ticks(1_002_120_000);
         let frame = create_data_radio_frame(&runner.context.buffer_allocator, 50);
-        runner.step_driver_event(DrvSvcEvent::Sent(frame, sent_instant, None));
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_002_120_000),
+            None,
+        ));
 
-        assert_eq!(runner.task.last_beacon_time, Some(sent_instant));
+        // The beacon went out in the advertising cell at ASN 100; the next one
+        // is due at the first point of the 900-timeslot grid past it. The ASN
+        // the beacon occupied is what the cadence is built on, never the
+        // instant it was transmitted at.
+        assert_eq!(runner.task.next_beacon_asn, Some(900));
+        runner.terminate();
+    }
+
+    /// Drive four beacons, standing in for the advertisement slot executing
+    /// and the beacon going out in it, and return the ASN each one used.
+    /// Neither pending operation owns a buffer, so clearing the queue between
+    /// cycles leaks nothing.
+    fn beacon_asns(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) -> [TschAsn; 4] {
+        let mut asns = [0; 4];
+        for beacon_asn in asns.iter_mut() {
+            *beacon_asn = runner
+                .pending_advertisement_asn()
+                .expect("an advertisement is queued");
+            runner.context.pib.tsch.update_timing(*beacon_asn);
+            runner.task.pending_operations.clear();
+            runner.task.on_beacon_sent(*beacon_asn, TIMESLOT_LENGTH_US);
+            assert!(runner.task.queue_next_beacon(&mut runner.context));
+        }
+        asns
+    }
+
+    #[test]
+    fn test_beacon_lands_on_the_absolute_asn_grid() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.role = TschRoleConfig::time_root(10);
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.context.pib.tsch.sort_links();
+        runner.step_entry();
+
+        // The first beacon goes out at the advertising cell right after entry
+        // rather than waiting for the grid, then every later one is a
+        // multiple of the period.
+        assert_eq!(beacon_asns(&mut runner), [100, 1000, 2000, 3000]);
+        runner.terminate();
+    }
+
+    /// Same, with the advertising cell away from timeslot 0: the grid point
+    /// itself is not an advertising cell, so each beacon takes the first cell
+    /// at or after it and the spacing is still exactly one period.
+    #[test]
+    fn test_beacon_cadence_is_exactly_one_period() {
+        let mut runner = setup();
+        // Advertising cell at timeslot 10, RX at timeslot 20, so the two
+        // never contend for the same ASN.
+        setup_two_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.role = TschRoleConfig::time_root(10);
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.context.pib.tsch.sort_links();
+        runner.step_entry();
+
+        assert_eq!(beacon_asns(&mut runner), [10, 1010, 2010, 3010]);
+        runner.terminate();
+    }
+
+    /// A beacon that cannot go out at its due ASN does not drag the cadence
+    /// with it: the grid is absolute, so the next beacon is placed from the
+    /// period alone.
+    #[test]
+    fn test_late_beacon_does_not_shift_the_grid() {
+        let mut runner = setup();
+        setup_two_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.role = TschRoleConfig::time_root(10);
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.context.pib.tsch.sort_links();
+        runner.step_entry();
+
+        // A first beacon at ASN 10, before the grid has started, still arms
+        // the grid point.
+        runner.task.on_beacon_sent(10, TIMESLOT_LENGTH_US);
+        assert_eq!(runner.task.next_beacon_asn, Some(1000));
+
+        // One that slipped three slotframes past its grid point does not
+        // carry the following one with it.
+        runner.task.on_beacon_sent(1310, TIMESLOT_LENGTH_US);
+        assert_eq!(runner.task.next_beacon_asn, Some(2000));
+
+        // Several silent periods are caught up in one step.
+        runner.task.on_beacon_sent(5000, TIMESLOT_LENGTH_US);
+        assert_eq!(runner.task.next_beacon_asn, Some(6000));
         runner.terminate();
     }
 

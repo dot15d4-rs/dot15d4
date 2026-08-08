@@ -267,9 +267,16 @@ impl BeaconConfig {
         }
     }
 
-    /// Convert period to nanoseconds.
-    pub fn period_ns(&self) -> u64 {
-        self.period_secs as u64 * 1_000_000_000
+    /// The period in timeslots, which is the unit the schedule is expressed
+    /// in. Never zero, so a period shorter than one timeslot still advances
+    /// instead of targeting the same ASN forever.
+    pub fn period_slots(&self, timeslot_length_us: u64) -> u64 {
+        (self.period_secs as u64 * 1_000_000 / timeslot_length_us.max(1)).max(1)
+    }
+
+    /// The `+/-` jitter half-width in timeslots.
+    pub fn jitter_slots(&self, timeslot_length_us: u64) -> u64 {
+        self.jitter_ms as u64 * 1_000 / timeslot_length_us.max(1)
     }
 }
 
@@ -324,8 +331,12 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub beacon_builder: EnhancedBeaconBuilder<'static, RadioDriverImpl>,
     /// Beacon configuration (period and enabled state).
     pub beacon_config: BeaconConfig,
-    /// Timestamp of last beacon transmission.
-    pub last_beacon_time: Option<NsInstant>,
+    /// ASN the next Enhanced Beacon is due at: a point of the absolute beacon
+    /// grid (multiples of the period from ASN 0). `None` until the first
+    /// beacon of the session, which goes out at the first advertising cell
+    /// that comes up rather than waiting for the grid, so that a node
+    /// starting a PAN does not stay silent for a whole period.
+    pub next_beacon_asn: Option<TschAsn>,
     /// Instant at which the next keep-alive toward the time source is due.
     pub next_keep_alive: NsInstant,
     /// Marker for radio driver implementation
@@ -346,7 +357,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             beacon_mpdu: Cell::new(None),
             beacon_builder: EnhancedBeaconBuilder::new(),
             beacon_config: BeaconConfig::disabled(),
-            last_beacon_time: None,
+            next_beacon_asn: None,
             next_keep_alive: NsInstant::from_ticks(0),
             _marker: PhantomData,
         }
@@ -366,7 +377,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             }
             None => BeaconConfig::disabled(),
         };
-        self.last_beacon_time = None;
+        self.next_beacon_asn = None;
         self.state = TschState::Idle;
 
         if self.beacon_config.enabled {
@@ -648,12 +659,18 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
+    /// The first advertising cell usable at or after `from_asn`.
+    ///
+    /// The search is inclusive: `from_asn` is the ASN a beacon is due at, not
+    /// a slot already spoken for, so a cell landing exactly on it is the right
+    /// one. The caller ([`Self::queue_next_beacon`]) is what keeps `from_asn`
+    /// out of the past.
     pub fn next_advertising_operation(
         &self,
-        current_asn: TschAsn,
+        from_asn: TschAsn,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> Option<TschOperation> {
-        match context.pib.tsch.select_next_link(current_asn, |l| {
+        match context.pib.tsch.select_link_from(from_asn, |l| {
             matches!(l.link_type, TschLinkType::Advertising)
                 && l.link_options.contains(TschLinkOption::Shared)
         }) {
@@ -898,31 +915,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     pub fn set_beacon_enabled(&mut self, enabled: bool) {
         self.beacon_config.enabled = enabled;
     }
-    /// Check if beacon should be scheduled based on time elapsed since last beacon.
-    pub fn should_schedule_beacon(&self, current_time: NsInstant) -> bool {
-        if !self.beacon_config.enabled {
-            return false;
-        }
-
-        // Check if there's already a pending advertisement
-        if self
-            .pending_operations
-            .iter()
-            .any(|op| op.is_advertisement())
-        {
-            return false;
-        }
-
-        match self.last_beacon_time {
-            Some(last_time) => {
-                let elapsed = current_time - last_time;
-                elapsed.to_nanos() >= self.beacon_config.period_ns()
-            }
-            None => true, // No beacon sent yet, schedule one
-        }
-    }
-
-    /// Schedule the next beacon advertisement.
+    /// Schedule the next Enhanced Beacon.
+    ///
+    /// The whole cadence lives in the ASN domain. [`Self::next_beacon_asn`] is
+    /// the ASN the beacon is *due* at, and the advertising cell is looked up
+    /// at or afte it.
     pub fn queue_next_beacon(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) -> bool {
         use dot15d4_driver::timer::RadioTimerApi;
 
@@ -930,33 +927,28 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             return false;
         }
 
-        let current_time = context.timer.now();
+        let timeslot_length_us = context.pib.tsch.timeslot_length_us();
+        let current_asn = context.pib.tsch.asn_at(context.timer.now());
+        // No due ASN yet means the first beacon of the session: send at the
+        // first advertising cell that comes up.
+        let earliest_asn = current_asn.saturating_add(1);
+        let due_asn = self
+            .next_beacon_asn
+            .unwrap_or(earliest_asn)
+            .max(earliest_asn);
 
-        // Calculate the minimum ASN for the next beacon
-        let min_beacon_time = match self.last_beacon_time {
-            Some(last_time) => {
-                let mut next =
-                    last_time + NsDuration::from_ticks(self.beacon_config.period_ns());
-                // Random +/- jitter around the period, so nodes with the same
-                // period do not collide repeatedly in shared advertising
-                // cells.
-                let jitter_ns = self.beacon_config.jitter_ms as u64 * 1_000_000;
-                if jitter_ns > 0 && self.beacon_config.period_ns() > jitter_ns {
-                    let span_ms = 2 * self.beacon_config.jitter_ms as u64 + 1;
-                    let offset_ms = context.rng.next_u32() as u64 % span_ms;
-                    next = next - NsDuration::from_ticks(jitter_ns)
-                        + NsDuration::from_ticks(offset_ms * 1_000_000);
-                }
-                next
-            }
-            None => current_time, // First beacon can be sent immediately
+        // Random +/- jitter around the due ASN, so nodes sharing an
+        // advertising cell do not collide period after period.
+        let jitter = self.beacon_config.jitter_slots(timeslot_length_us);
+        let search_from_asn = if jitter > 0 {
+            let offset = context.rng.next_u32() as u64 % (2 * jitter + 1);
+            due_asn
+                .saturating_add(offset)
+                .saturating_sub(jitter)
+                .max(earliest_asn)
+        } else {
+            due_asn
         };
-
-        // Convert min_beacon_time to ASN
-        let min_asn = context.pib.tsch.asn_at(min_beacon_time);
-        let current_asn = context.pib.tsch.asn_at(current_time);
-
-        let search_from_asn = core::cmp::max(current_asn, min_asn);
 
         match self.next_advertising_operation(search_from_asn, context) {
             Some(op) => {
@@ -976,9 +968,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         }
     }
 
-    /// Mark beacon as sent and record the time.
-    pub fn on_beacon_sent(&mut self, instant: NsInstant) {
-        self.last_beacon_time = Some(instant);
+    /// Record that a beacon went out at `asn` and set the ASN the next one is
+    /// due at: the first point of the beacon grid past it.
+    pub fn on_beacon_sent(&mut self, asn: TschAsn, timeslot_length_us: u64) {
+        let period = self.beacon_config.period_slots(timeslot_length_us);
+        self.next_beacon_asn = Some((asn / period + 1) * period);
     }
 }
 
