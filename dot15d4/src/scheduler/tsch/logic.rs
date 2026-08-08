@@ -10,7 +10,8 @@ use core::mem;
 use dot15d4_driver::{
     radio::{
         frame::{FrameType, RadioFrame, RadioFrameSized},
-        DriverConfig,
+        phy::PhyConfig,
+        DriverConfig, PhyOf,
     },
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
@@ -824,10 +825,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
                 self.state = TschState::Listening;
 
-                // Calculate RX start time: timeslot start + macTsRxOffset
-                let rx_offset_us = context.pib.tsch.timeslot_timings.rx_offset() as u64;
+                let turnaround_us =
+                    <PhyOf<RadioDriverImpl> as PhyConfig>::A_TURNAROUND_TIME.to_micros();
+                let (rx_offset_us, rx_wait_us) = context.pib.tsch.rx_window_us(turnaround_us);
                 let tx_offset_us = context.pib.tsch.timeslot_timings.tx_offset() as u64;
-                let rx_wait_us = context.pib.tsch.timeslot_timings.rx_wait() as u64;
                 let rx_instant = context.pib.tsch.last_base_time + NsDuration::micros(rx_offset_us);
                 let max_rx_start = rx_instant + NsDuration::micros(rx_wait_us);
                 let expected_rx_framestart =

@@ -34,6 +34,11 @@ mod customizable {
     pub const MAC_TSCH_DRIFT_BUFFER_LEN: usize = 8;
     pub const MAC_TSCH_MAX_DRIFT_PPM: u32 = 200;
     pub const MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS: u32 = 100;
+
+    pub const MAC_TSCH_GUARD_FLOOR_US: u16 = 100;
+    pub const MAC_TSCH_GUARD_SAFE_US: u16 = 2200;
+    pub const MAC_TSCH_GUARD_COMMIT_SYNCS: u8 = 8;
+    pub const MAC_TSCH_GUARD_COMMIT_MARGIN: u8 = 4;
 }
 
 #[cfg(not(test))]

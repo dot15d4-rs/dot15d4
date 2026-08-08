@@ -11,7 +11,8 @@ use heapless::Vec;
 
 use crate::constants::{
     MAC_DISCONNECT_TIME, MAC_JOIN_METRIC, MAC_TSCH_DRIFT_BUFFER_LEN,
-    MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS, MAC_TSCH_KEEP_ALIVE_PERIOD, MAC_TSCH_MAX_BE,
+    MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS, MAC_TSCH_GUARD_COMMIT_MARGIN, MAC_TSCH_GUARD_COMMIT_SYNCS,
+    MAC_TSCH_GUARD_FLOOR_US, MAC_TSCH_GUARD_SAFE_US, MAC_TSCH_KEEP_ALIVE_PERIOD, MAC_TSCH_MAX_BE,
     MAC_TSCH_MAX_DRIFT_PPM, MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
@@ -58,6 +59,11 @@ impl<const N: usize> DriftEstimator<N> {
         let dev_ns = dev_ns.clamp(-max, max);
         self.buf[self.head] = Some(DriftSample { dev_ns, delta_asn });
         self.head = (self.head + 1) % N;
+    }
+
+    /// Whether the window holds `N` samples, i.e. the estimate has converged.
+    fn is_full(&self) -> bool {
+        self.buf.iter().all(Option::is_some)
     }
 
     /// Returns `(sum(dev_ns), sum(delta_asn))` over the filled part of the window.
@@ -283,6 +289,16 @@ pub struct TschPib {
     /// bias between resyncs. Reset whenever the anchor is replaced by an
     /// actual measurement.
     comp_rem_q32: u64,
+    /// Whether the advertised guard time has been adopted. Until then, an
+    /// advertised guard below [`MAC_TSCH_GUARD_FLOOR_US`] is replaced by
+    /// [`MAC_TSCH_GUARD_SAFE_US`] when listening. One-way latch, cleared only
+    /// by [`Self::reset_time_base`].
+    guard_committed: bool,
+    /// Resyncs observed with a converged drift estimate since the last
+    /// time-base reset.
+    guard_syncs: u8,
+    /// Largest absolute synchronization error observed over those resyncs.
+    guard_max_err_ns: u32,
 }
 
 impl TschPib {
@@ -480,6 +496,42 @@ impl TschPib {
         self.asn = asn;
     }
 
+    pub fn rx_window_us(&self, min_rx_offset_us: u64) -> (u64, u64) {
+        let advertised = self.timeslot_timings.rx_wait() as u64;
+        if self.guard_committed || advertised >= MAC_TSCH_GUARD_FLOOR_US as u64 {
+            return (self.timeslot_timings.rx_offset() as u64, advertised);
+        }
+        let tx_offset = self.timeslot_timings.tx_offset() as u64;
+        let guard = (MAC_TSCH_GUARD_SAFE_US as u64)
+            .min(2 * tx_offset.saturating_sub(min_rx_offset_us))
+            .max(advertised);
+        (tx_offset.saturating_sub(guard / 2), guard)
+    }
+
+    fn observe_sync_error(&mut self, err_ns: i64) {
+        if self.guard_committed || !self.drift.is_full() {
+            return;
+        }
+        self.guard_syncs = self.guard_syncs.saturating_add(1);
+        self.guard_max_err_ns = self
+            .guard_max_err_ns
+            .max(err_ns.unsigned_abs().min(u32::MAX as u64) as u32);
+
+        tsch_trace!("tsch observe sync error");
+
+        let half_guard_ns = (self.timeslot_timings.rx_wait() as u64) * 1000 / 2;
+        if self.guard_syncs >= MAC_TSCH_GUARD_COMMIT_SYNCS
+            && (self.guard_max_err_ns as u64) * MAC_TSCH_GUARD_COMMIT_MARGIN as u64 <= half_guard_ns
+        {
+            self.guard_committed = true;
+            tsch_trace!(
+                "tsch guard commit rx_wait_us={} max_err_ns={}",
+                self.timeslot_timings.rx_wait(),
+                self.guard_max_err_ns
+            );
+        }
+    }
+
     /// Current per-slot drift estimate in nanoseconds (mean of the window). A
     /// positive value means the local clock runs a bit slow against the time
     /// source.
@@ -557,6 +609,11 @@ impl TschPib {
 
         #[cfg(not(feature = "no-tsch-frame-sync"))]
         {
+            if self.last_rx.is_some() {
+                let predicted = self.expected_slot_start(asn, self.timeslot_length_us());
+                self.observe_sync_error(signed_delta_ns(predicted, timeslot_start));
+            }
+
             self.asn = asn;
             self.last_base_time = timeslot_start;
             // The anchor is now a fresh measurement; any sub-ns compensation
@@ -600,6 +657,9 @@ impl TschPib {
         self.last_base_time = instant - NsDuration::micros(tx_offset_us);
         self.comp_rem_q32 = 0;
         self.last_rx = None;
+        self.guard_committed = false;
+        self.guard_syncs = 0;
+        self.guard_max_err_ns = 0;
         #[cfg(feature = "sync-error-log")]
         {
             self.had_sync_obs = false;
@@ -646,6 +706,8 @@ impl TschPib {
         }
         #[cfg(not(feature = "no-tsch-ack-sync"))]
         {
+            self.observe_sync_error((timesync_us as i64) * 1000);
+
             // The Time Correction IE is quantized to whole microseconds, so the
             // smallest correction it can express, +-1 us, stands for any true
             // error in +-[0.5, 1.5) us. We decide to ignore 0us quantized error 
@@ -723,6 +785,9 @@ impl Default for TschPib {
             last_rx: None,
             #[cfg(feature = "sync-error-log")]
             had_sync_obs: false,
+            guard_committed: false,
+            guard_syncs: 0,
+            guard_max_err_ns: 0,
             drift: DriftEstimator::new(),
             comp_rem_q32: 0,
         }

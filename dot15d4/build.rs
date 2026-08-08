@@ -31,6 +31,10 @@ fn const_config(out_dir: &Path) {
         ("MAC_TSCH_DRIFT_BUFFER_LEN", ("usize", "8")),
         ("MAC_TSCH_MAX_DRIFT_PPM", ("u32", "200")),
         ("MAC_TSCH_DRIFT_MIN_INTERVAL_SLOTS", ("u32", "100")),
+        ("MAC_TSCH_GUARD_FLOOR_US", ("u16", "100")),
+        ("MAC_TSCH_GUARD_SAFE_US", ("u16", "2200")),
+        ("MAC_TSCH_GUARD_COMMIT_SYNCS", ("u8", "8")),
+        ("MAC_TSCH_GUARD_COMMIT_MARGIN", ("u8", "1")),
         ("MAC_TSCH_KEEP_ALIVE_PERIOD", ("u16", "1500")),
     ]);
 
