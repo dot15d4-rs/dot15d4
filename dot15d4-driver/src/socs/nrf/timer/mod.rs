@@ -2072,13 +2072,24 @@ impl TickConversion {
         //
         // A value of N:=35 and timestamp_ns_max ~ 33 seconds is the best
         // compromise that can be achieved under such restrictions.
+        //
+        // The conversion rounds to *nearest*, not down. Truncation used to bias
+        // every timed signal early by half a tick on average (-31.25 ns) and,
+        // worse, by a full tick for exact tick multiples 
+        // 
+        // Rounding to nearest requires the multiplier to be rounded *up*: with
+        // a floored multiplier the product for an exact tick multiple lands
+        // infinitesimally below the integer, so adding half an ulp would still
+        // not reach it. Rounding M up bounds its own error at +0.12 ticks over
+        // the full 33 s range and at well below a nanosecond over a slotframe.
 
         const N: u32 = 35;
-        const MULTIPLIER: u128 = 2_u128.pow(1 + N) / 5_u128.pow(3);
+        const MULTIPLIER: u128 = (2_u128.pow(1 + N) + 5_u128.pow(3) - 1) / 5_u128.pow(3);
+        const HALF_ULP: u128 = 1 << (N - 1);
 
         // Safety: The max timer duration was chosen so that multiplying it with
         //         the MULTIPLIER does not overflow.
-        let integer_fraction = duration.ticks() as u128 * MULTIPLIER;
+        let integer_fraction = duration.ticks() as u128 * MULTIPLIER + HALF_ULP;
 
         // Safety: We can represent less nanoseconds in 64 bits than ticks, so
         //         casting down the end result is always safe.
@@ -2087,9 +2098,8 @@ impl TickConversion {
 
     #[inline(always)]
     const fn instant_to_timer_ticks_with_epoch(timer_epoch: NsInstant, instant: NsInstant) -> u32 {
-        debug_assert!(instant.ticks() > timer_epoch.ticks());
         Self::duration_to_timer_ticks(NsDuration::from_ticks(
-            instant.ticks() - timer_epoch.ticks(),
+            instant.ticks().saturating_sub(timer_epoch.ticks()),
         ))
     }
 
@@ -2165,16 +2175,19 @@ const _: () = {
     assert!(rtc_tick_ns == u64::MAX - EXPECTED_REMAINDER_RTC_NS);
 
     const EXPECTED_REMAINDER_TIMER_TICKS: u32 = ((NrfRadioHighPrecisionTimer::FREQUENCY.to_Hz()
-        * EXPECTED_REMAINDER_RTC_NS)
+        * EXPECTED_REMAINDER_RTC_NS
+        + TickConversion::NS_PER_S as u64 / 2)
         / TickConversion::NS_PER_S as u64) as u32;
     let timer_ticks =
         TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(EXPECTED_REMAINDER_RTC_NS));
     assert!(timer_ticks == EXPECTED_REMAINDER_TIMER_TICKS);
 
-    // One TIMER tick is 62.5 ns, the remaining rounding error must be less.
-    const EXPECTED_REMAINDER_TIMER_NS: u64 = 49;
+    const EXPECTED_REMAINDER_TIMER_NS: i64 = -13;
     let timer_ticks_ns = TickConversion::timer_ticks_to_duration(timer_ticks).ticks();
-    assert!(u64::MAX - rtc_tick_ns - timer_ticks_ns == EXPECTED_REMAINDER_TIMER_NS);
+    assert!(
+        (u64::MAX - rtc_tick_ns) as i64 - timer_ticks_ns as i64 == EXPECTED_REMAINDER_TIMER_NS
+    );
+    assert!(EXPECTED_REMAINDER_TIMER_NS > -32 && EXPECTED_REMAINDER_TIMER_NS < 32);
 
     const EXPECTED_MAX_TIMER_TICKS: u32 = ((TickConversion::MAX_TIMER_DURATION.ticks()
         * NrfRadioHighPrecisionTimer::FREQUENCY.to_Hz())
@@ -2182,10 +2195,26 @@ const _: () = {
     let max_timer_ticks = TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(
         TickConversion::MAX_TIMER_DURATION.ticks(),
     ));
-    // We accept a rounding error of one tick.
-    assert!(max_timer_ticks == EXPECTED_MAX_TIMER_TICKS - 1);
+    assert!(max_timer_ticks == EXPECTED_MAX_TIMER_TICKS);
 
-    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(875)) == 13);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(875)) == 14);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(1_000)) == 16);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(2_120_000)) == 33_920);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(1_020_000)) == 16_320);
+
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(0)) == 0);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(31)) == 0);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(32)) == 1);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(93)) == 1);
+    assert!(TickConversion::duration_to_timer_ticks(NsDuration::from_ticks(94)) == 2);
+
+    let epoch = NsInstant::from_ticks(1_000_000);
+    assert!(TickConversion::instant_to_timer_ticks_with_epoch(epoch, NsInstant::from_ticks(999)) == 0);
+    assert!(TickConversion::instant_to_timer_ticks_with_epoch(epoch, epoch) == 0);
+    assert!(
+        TickConversion::instant_to_timer_ticks_with_epoch(epoch, NsInstant::from_ticks(1_000_094))
+            == 2
+    );
 
     assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(0)) == 0);
     assert!(TickConversion::instant_to_rtc_tick_ceil(NsInstant::from_ticks(1)) == 1);
@@ -2344,10 +2373,7 @@ impl NrfRadioHighPrecisionTimer {
 
         let timer_ticks = TickConversion::instant_to_timer_ticks_with_epoch(timer_epoch, instant);
 
-        // Account for PPI delay, see nRF52840 PS, section 6.16: The timer is
-        // synchronized to the 16 MHz clock and runs at 16 MHz, therefore PPI
-        // will delay the compare event by one timer tick.
-        timer_ticks - 1
+        timer_ticks.saturating_sub(1)
     }
 }
 

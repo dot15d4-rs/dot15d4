@@ -93,7 +93,7 @@ const T_MEASURED_TX_FRAMESTART_ERROR: NsDuration =
     NsDuration::from_ticks(195 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 
 const T_RX_FRAMESTART_TO_RMARKER: NsDuration = OQpsk250KBit::T_PHR;
-const T_MEASURED_RX_FRAMESTART_ERROR: NsDuration = NsDuration::nanos(23_275);
+const T_MEASURED_RX_FRAMESTART_ERROR: NsDuration = NsDuration::nanos(23_314);
 
 /// Convert a captured RX FRAMESTART event timestamp to the RMARKER instant.
 #[inline]
