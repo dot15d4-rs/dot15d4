@@ -235,7 +235,7 @@ where
         disabled_at: OptionalNsInstant,
     ) -> StopListeningResult<RadioDriverImpl, RxState> {
         let rx_result = RxResult::RxWindowEnded(self.take_task().radio_frame);
-        let (off_state, measured_entry) = RadioDriver::new_internal().wait_until_off().await;
+        let (off_state, measured_entry) = self.enter_next_task(TaskOff).wait_until_off().await;
         StopListeningResult::RxWindowEnded(RadioTransitionResult::new(
             rx_result,
             off_state,
@@ -356,6 +356,16 @@ impl<RadioDriverImpl: DriverConfig> RadioDriverState<RadioDriverImpl> {
         debug_assert!(self.rx_frame_started.is_none());
 
         self.rx_frame_started = rx_frame_started.into();
+    }
+
+    /// Resets the "rx frame started" marker when re-establishing a listening
+    /// state after a rolled-back transition.
+    pub(crate) fn reset_rx_frame_started(&mut self) {
+        self.rx_frame_started = None.into();
+    }
+
+    pub(crate) fn has_timer(&self) -> bool {
+        self.high_precision_timer.is_some()
     }
 
     pub(crate) fn rx_frame_started(&self) -> OptionalNsInstant {
