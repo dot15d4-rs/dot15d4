@@ -1553,7 +1553,7 @@ where
     any(not(feature = "tsch"), feature = "no-enh-ack-addressing"),
     allow(unused_variables)
 )]
-fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
+pub(crate) fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
     rx_ack_frame: RadioFrame<RadioFrameSized>,
     expected_seq_nb: u8,
     own_extended_address: &[u8; 8],

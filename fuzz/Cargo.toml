@@ -10,11 +10,20 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+heapless = "0.8"
 
-[dependencies.dot15d4-frame]
-path = "../dot15d4-frame/"
-features = ["std", "fuzz"] 
+# Targets T1 and T2 parse and build frames directly, through the frame and
+# driver crates.
+dot15d4-frame = { path = "../dot15d4-frame/", features = ["ies", "security", "fuzz"] }
+dot15d4-driver = { path = "../dot15d4-driver/" }
+dot15d4-util = { path = "../dot15d4-util/" }
 
+# Targets T3 and T4 reach crate internals through the fuzz_api module, which the
+# `_fuzz-harness` feature builds.
+dot15d4 = { path = "../dot15d4/", features = ["_fuzz-harness"] }
+
+# Target T1: parse arbitrary bytes as an incoming MPDU.
 [[bin]]
 name = "frame"
 path = "fuzz_targets/frame.rs"
@@ -22,9 +31,26 @@ test = false
 doc = false
 bench = false
 
+# Target T2: build a frame, then parse it back and compare.
 [[bin]]
 name = "repr"
 path = "fuzz_targets/repr.rs"
+test = false
+doc = false
+bench = false
+
+# Target T3: validate an arbitrary acknowledgment.
+[[bin]]
+name = "ack"
+path = "fuzz_targets/ack.rs"
+test = false
+doc = false
+bench = false
+
+# Target T4: drive the TSCH state machine under adversarial events.
+[[bin]]
+name = "tsch"
+path = "fuzz_targets/tsch.rs"
 test = false
 doc = false
 bench = false

@@ -23,6 +23,10 @@ strict = []                             # enable to deny warnings
 security = []
 ies = []
 
+# Expose support types for fuzzing the parser and builder (see src/fuzz.rs).
+# Off by default and never enabled on device builds.
+fuzz = []
+
 # Build Enhanced ACKs without a destination address, i.e. matched by sequence
 # number alone. Reproduces pre-fix behaviour; see the dot15d4 crate's feature
 # of the same name.

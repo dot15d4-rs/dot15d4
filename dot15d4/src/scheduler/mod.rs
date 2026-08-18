@@ -11,7 +11,7 @@ mod runner;
 #[cfg(feature = "tsch")]
 pub mod scan;
 pub mod task;
-#[cfg(test)]
+#[cfg(any(test, feature = "_fuzz-harness"))]
 pub mod tests;
 #[cfg(feature = "tsch")]
 pub mod tsch;

@@ -5,8 +5,8 @@ mod log;
 pub mod logic;
 pub mod pib;
 pub mod task;
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "_fuzz-harness"))]
+pub mod tests;
 
 pub use self::pib::{ScheduleError, TschAsn, TschLink, TschLinkType, TschPib, TschSlotframe};
 pub use self::task::{

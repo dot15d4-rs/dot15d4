@@ -1,5 +1,18 @@
 //! Integration tests for the TSCH scheduler task.
 
+#![cfg_attr(
+    all(feature = "_fuzz-harness", not(test)),
+    allow(
+        dead_code,
+        unused_imports,
+        unused_variables,
+        unused_mut,
+        unused_attributes,
+        non_snake_case,
+        clippy::all
+    )
+)]
+
 use core::cell::Cell;
 use core::num::NonZero;
 
@@ -4257,4 +4270,96 @@ mod keep_alive_tests {
         assert!(runner.task.keep_alive_deadline(&runner.context).is_some());
         runner.terminate();
     }
+}
+
+// ============================================================================
+// Fuzz harness: TSCH state machine under adversarial events (target T4)
+// ============================================================================
+
+#[cfg(feature = "_fuzz-harness")]
+pub(crate) fn fuzz_step(data: &[u8]) {
+    const ADDR_A: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    const ADDR_B: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+    let mut u = arbitrary::Unstructured::new(data);
+
+    let mut runner = setup();
+    setup_one_link_schedule(&mut runner.context.pib.tsch);
+    runner.enter_as_coordinator();
+
+    // Send the first scheduled beacon, so the machine settles into its slot
+    // cycle. This mirrors the beacon-skip helper used by the tests.
+    runner.step_timer_expired();
+    runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+    let beacon = create_addressed_data_frame(&runner.context.buffer_allocator, &ADDR_A, &ADDR_B)
+        .into_radio_frame::<FakeDriverConfig>();
+    runner.step_driver_event(DrvSvcEvent::Sent(
+        beacon,
+        NsInstant::from_ticks(1_001_000_000),
+        None,
+    ));
+
+    let leaked_before = dot15d4_util::tokens::leaked_tokens();
+
+    let rounds = u.arbitrary::<u8>().unwrap_or(0) % 32;
+    let mut tick: u64 = 2_000_000_000;
+    for _ in 0..rounds {
+        runner.step_timer_expired();
+
+        // Only a listening slot accepts receive events. Other slots (for
+        // example a beacon transmission) are left to run on their own.
+        if matches!(runner.state(), TschState::Listening) {
+            match u.arbitrary::<u8>().unwrap_or(0) % 4 {
+                0 => {
+                    // A frame is received. Source and destination are arbitrary,
+                    // which exercises neighbor handling and address filtering.
+                    runner.step_driver_event(DrvSvcEvent::FrameStarted);
+                    let mut src = [0u8; 8];
+                    let mut dst = [0u8; 8];
+                    let _ = u.fill_buffer(&mut src);
+                    let _ = u.fill_buffer(&mut dst);
+                    let frame = create_addressed_data_frame(
+                        &runner.context.buffer_allocator,
+                        &src,
+                        &dst,
+                    )
+                    .into_radio_frame::<FakeDriverConfig>();
+                    runner.step_driver_event(DrvSvcEvent::Received(
+                        frame,
+                        NsInstant::from_ticks(tick + 120_000),
+                    ));
+                }
+                1 => {
+                    // The radio reports a CRC error and returns the buffer.
+                    runner.step_driver_event(DrvSvcEvent::FrameStarted);
+                    let rx_frame = create_unsized_radio_frame(&runner.context.buffer_allocator);
+                    runner.step_driver_event(DrvSvcEvent::CrcError(
+                        rx_frame,
+                        NsInstant::from_ticks(tick),
+                    ));
+                }
+                2 => {
+                    // The receive window ends with no frame.
+                    let rx_frame = create_unsized_radio_frame(&runner.context.buffer_allocator);
+                    runner.step_driver_event(DrvSvcEvent::RxWindowEnded(rx_frame));
+                }
+                _ => {
+                    // Reception starts, then aborts.
+                    runner.step_driver_event(DrvSvcEvent::FrameStarted);
+                    runner.step_driver_event(DrvSvcEvent::ReceptionAborted);
+                }
+            }
+        }
+
+        tick += 1_000_000;
+    }
+
+    // Clean teardown returns every outstanding buffer to the pool.
+    runner.terminate();
+
+    let leaked_after = dot15d4_util::tokens::leaked_tokens();
+    assert_eq!(
+        leaked_after, leaked_before,
+        "a frame buffer was dropped instead of returned"
+    );
 }

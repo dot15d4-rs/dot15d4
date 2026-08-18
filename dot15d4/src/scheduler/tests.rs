@@ -1,7 +1,21 @@
 //! Test infrastructure and helpers for scheduler testing.
 //!
 //! This module provides common test utilities used by both CSMA and TSCH
-//! scheduler tests.
+//! scheduler tests. It is also compiled as library code by the `_fuzz-harness`
+//! feature, which reuses this infrastructure to drive the fuzz targets.
+
+#![cfg_attr(
+    all(feature = "_fuzz-harness", not(test)),
+    allow(
+        dead_code,
+        unused_imports,
+        unused_variables,
+        unused_mut,
+        unused_attributes,
+        non_snake_case,
+        clippy::all
+    )
+)]
 
 use core::{
     cell::Cell,
@@ -900,4 +914,50 @@ pub fn create_unsized_radio_frame(allocator: &MacBufferAllocator) -> RadioFrame<
         .try_allocate_buffer(TEST_BUFFER_SIZE)
         .expect("allocation failed");
     RadioFrame::<RadioFrameUnsized>::new::<FakeDriverConfig>(buffer)
+}
+
+// ============================================================================
+// Fuzz harness: acknowledgment validation (target T3)
+// ============================================================================
+
+#[cfg(feature = "_fuzz-harness")]
+pub(crate) fn fuzz_validate_ack(data: &[u8]) {
+    if data.len() < 10 {
+        return;
+    }
+
+    let mut own_address = [0u8; 8];
+    own_address.copy_from_slice(&data[0..8]);
+    let expected_seq_nb = data[8];
+    let frame_bytes = &data[9..];
+
+    let headroom = <FakeDriverConfig as DriverConfig>::HEADROOM as usize;
+    let max_len = <FakeDriverConfig as DriverConfig>::MAX_SDU_LENGTH as usize
+        - core::mem::size_of::<FcsTwoBytes>();
+    let n = frame_bytes.len().min(max_len);
+
+    let allocator = create_test_allocator();
+    let mut buffer = allocator
+        .try_allocate_buffer(TEST_BUFFER_SIZE)
+        .expect("allocation failed");
+    buffer[headroom..headroom + n].copy_from_slice(&frame_bytes[..n]);
+
+    let rx_ack_frame = RadioFrame::<RadioFrameUnsized>::new::<FakeDriverConfig>(buffer)
+        .with_size(NonZero::new(n as u16).unwrap());
+
+    let recovered =
+        match crate::driver::validate_ack_frame::<FakeDriverConfig>(
+            rx_ack_frame,
+            expected_seq_nb,
+            &own_address,
+        ) {
+            Ok((frame, _time_sync)) => frame,
+            Err(frame) => frame,
+        };
+
+    // Return the buffer to the pool.
+    // Safety: the buffer was allocated from this allocator.
+    unsafe {
+        allocator.deallocate_buffer(recovered.into_buffer());
+    }
 }

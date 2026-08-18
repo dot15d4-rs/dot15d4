@@ -6,6 +6,17 @@ pub mod pib;
 pub mod scheduler;
 mod utils;
 
+#[cfg(feature = "_fuzz-harness")]
+pub mod fuzz_api {
+    pub fn fuzz_validate_ack(data: &[u8]) {
+        crate::scheduler::tests::fuzz_validate_ack(data)
+    }
+
+    pub fn fuzz_tsch_step(data: &[u8]) {
+        crate::scheduler::tsch::tests::fuzz_step(data)
+    }
+}
+
 use dot15d4_driver::radio::tasks::RadioDriverApi;
 pub use dot15d4_util as util;
 pub use rand_core::{Error as RngError, RngCore};

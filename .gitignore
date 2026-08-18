@@ -3,3 +3,5 @@ target/
 dot15d4-fuzz/out
 .idea/
 .vscode/
+fuzz/corpus/
+fuzz/artifacts/

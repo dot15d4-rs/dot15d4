@@ -6,6 +6,9 @@ pub mod fields;
 pub mod mpdu;
 pub mod repr;
 
+#[cfg(feature = "fuzz")]
+pub mod fuzz;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct MpduNoFields;
 
