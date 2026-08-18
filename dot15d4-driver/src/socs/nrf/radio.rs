@@ -739,6 +739,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 })();
 
                 if result.is_err() {
+                    self.driver.state().stop_timer();
                     self.driver.release_radio_hfclk();
                 }
 
@@ -854,6 +855,7 @@ impl OffState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskOff> {
                 })();
 
                 if result.is_err() {
+                    self.driver.state().stop_timer();
                     self.driver.release_radio_hfclk();
                 }
 
