@@ -297,6 +297,7 @@ where
             enh_ack_frame::<RadioDriverImpl>(
                 0,
                 &[0u8; 8],
+                &[0u8; 2],
                 buffer_allocator
                     .try_allocate_buffer(outbound_ack_buffer_size)
                     .expect("no capacity"),
@@ -888,6 +889,7 @@ where
         seq_nb: u8,
         frame_version: FrameVersion,
         #[cfg(feature = "tsch")] dst_le_bytes: [u8; 8],
+        #[cfg(feature = "tsch")] dst_pan_id_le_bytes: [u8; 2],
         ifs: Ifs<PhyOf<RadioDriverImpl>>,
         rx_instant: NsInstant,
         mpdu_length: u16,
@@ -904,8 +906,12 @@ where
             }
             #[cfg(feature = "tsch")]
             FrameVersion::Ieee802154 => {
-                let mut writer =
-                    enh_ack_frame::<RadioDriverImpl>(seq_nb, &dst_le_bytes, outbound_ack_buffer);
+                let mut writer = enh_ack_frame::<RadioDriverImpl>(
+                    seq_nb,
+                    &dst_le_bytes,
+                    &dst_pan_id_le_bytes,
+                    outbound_ack_buffer,
+                );
 
                 // For TSCH mode, update the Time Correction IE in the enhanced ACK
                 if let Some(mut tc) = writer.ies_fields_mut().time_correction_mut() {
@@ -1218,6 +1224,14 @@ where
                     _ => None,
                 });
 
+            #[cfg(feature = "tsch")]
+            let dst_pan_id_le_bytes: [u8; 2] = preliminary_frame_info
+                .addressing_fields
+                .as_ref()
+                .and_then(|addressing| addressing.try_dst_pan_id())
+                .and_then(|pan_id| <[u8; 2]>::try_from(pan_id.as_ref()).ok())
+                .unwrap_or(crate::constants::MAC_PAN_ID.to_le_bytes());
+
             #[cfg(all(feature = "tsch", not(feature = "no-enh-ack-addressing")))]
             let can_ack =
                 !matches!(frame_version, FrameVersion::Ieee802154) || src_le_bytes.is_some();
@@ -1232,6 +1246,8 @@ where
                         frame_version,
                         #[cfg(feature = "tsch")]
                         src_le_bytes.unwrap_or([0u8; 8]),
+                        #[cfg(feature = "tsch")]
+                        dst_pan_id_le_bytes,
                         next_ifs,
                         rx_instant,
                         mpdu_length,

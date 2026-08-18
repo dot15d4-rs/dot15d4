@@ -6,7 +6,7 @@ use dot15d4_driver::radio::frame::IesFields;
 use dot15d4_driver::radio::{
     frame::{
         AddressingFields, AddressingMode, AddressingRepr, FrameControl, FrameType, FrameVersion,
-        RadioFrame, RadioFrameRepr, RadioFrameSized,
+        PanId, RadioFrame, RadioFrameRepr, RadioFrameSized,
     },
     DriverConfig,
 };
@@ -87,6 +87,29 @@ impl MpduFrame {
     fn set_sequence_number_unchecked(&mut self, seq_nr: u8) {
         let mpdu_field_ranges = MpduFieldRanges::new(self.offset, SeqNrRepr::Yes);
         self.buffer[mpdu_field_ranges.offset_seq_nr().get() as usize] = seq_nr;
+    }
+
+    /// Tries to write to the Destination PAN ID field.
+    ///
+    /// Returns an error if the frame carries no Destination PAN ID, i.e. if the
+    /// combination of addressing modes and PAN ID Compression elides that field
+    /// (IEEE 802.15.4-2024, Table 7-2), or if the addressing fields cannot be
+    /// parsed.
+    ///
+    /// This is the counterpart of [`Self::try_set_sequence_number()`] for the
+    /// PAN ID: both are MAC-owned fields that the stack stamps on a frame the
+    /// upper layer built, rather than fields the upper layer fills in itself.
+    pub fn try_set_dst_pan_id<Bytes: AsRef<[u8]>>(
+        &mut self,
+        pan_id: &PanId<Bytes>,
+    ) -> SimplifiedResult<()> {
+        self.writer()
+            .parse_addressing_mut()?
+            .try_addressing_fields_mut()?
+            .try_dst_pan_id_mut()
+            .ok_or(Error)?
+            .set(pan_id);
+        Ok(())
     }
 
     /// Initializes a partially parsed MPDU with read-only access to the frame

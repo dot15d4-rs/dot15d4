@@ -657,6 +657,11 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         let mut mpdu = mpdu;
         let _ = mpdu.try_set_sequence_number(context.pib.next_dsn());
 
+        // macPanId is MAC state, not something the upper layer passes down, so
+        // it is stamped here as well. The call is a no-op for frames whose
+        // addressing configuration elides the Destination PAN ID.
+        let _ = mpdu.try_set_dst_pan_id(&context.pib.pan_id);
+
         self.base_time = context.timer.now();
         self.backoff.reset(context.pib.min_be);
         self.tx_token = Some(token);

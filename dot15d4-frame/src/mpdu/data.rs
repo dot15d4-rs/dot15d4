@@ -20,7 +20,8 @@ use crate::{
 /// Re-usable part of the structural representation of a data MPDU.
 ///
 /// Uses extended addressing for both source and destination, with
-/// PAN ID compression enabled (IEEE 802.15.4-2015+).
+/// PAN ID compression disabled (IEEE 802.15.4-2015+), i.e. the frame carries a
+/// Destination PAN ID.
 ///
 /// Note: IEs have not yet been configured as they may be individual to each
 ///       data frame.
@@ -30,7 +31,7 @@ pub const DATA_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
         AddressingMode::Extended,
         AddressingMode::Extended,
         false,
-        PanIdCompressionRepr::Yes,
+        PanIdCompressionRepr::No,
     ))
     .without_security();
 

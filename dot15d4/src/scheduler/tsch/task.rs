@@ -771,6 +771,11 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         let mut mpdu = mpdu;
         let _ = mpdu.try_set_sequence_number(context.pib.next_dsn());
 
+        // macPanId is MAC state, not something the upper layer passes down, so
+        // it is stamped here as well. The call is a no-op for frames whose
+        // addressing configuration elides the Destination PAN ID.
+        let _ = mpdu.try_set_dst_pan_id(&context.pib.pan_id);
+
         let backoff = TschCsmaBackoff::new(context.pib.tsch.tsch_min_be);
         self.queue_tx_with_backoff(TxOrigin::Mac(token), mpdu, from_asn, backoff, context)
     }
@@ -1088,6 +1093,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             .src_address_mut()
             .set(&context.pib.extended_address);
         addressing.dst_address_mut().set(&dst_addr);
+        // Keep-alives are built here rather than queued through `queue_tx()`,
+        // so the Destination PAN ID carried by `DATA_FRAME_REPR` is written on
+        // this path directly.
+        addressing.dst_pan_id_mut().set(&context.pib.pan_id);
 
         Some((writer.into_mpdu_frame(), seq_nr))
     }

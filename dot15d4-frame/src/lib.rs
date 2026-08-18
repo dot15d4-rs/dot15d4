@@ -351,8 +351,12 @@ mod test {
     #[test]
     #[cfg(not(feature = "no-enh-ack-addressing"))]
     fn test_enh_ack_frame() {
-        const ENH_ACK_LEN: u8 = 15;
+        // FC(2) + SeqNr(1) + DstPanId(2) + DstExtAddr(8) + Time Correction
+        // Header(2) + Time Correction Content(2), see ENH_ACK_MPDU_SIZE_WO_FCS.
+        const ENH_ACK_LEN: u8 = 17;
         const TEST_DST: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        // Little-endian (on-air) byte order, i.e. PAN 0xBEEF.
+        const TEST_DST_PAN_ID: [u8; 2] = [0xEF, 0xBE];
 
         const ENH_ACK_FRAME_REPR: RadioFrameRepr<FakeDriverConfig, RadioFrameSized> =
             RadioFrameRepr::<_, RadioFrameUnsized>::new()
@@ -364,7 +368,8 @@ mod test {
         let buffer = BufferToken::new(unsafe { &mut BUFFER });
 
         const TEST_SEQ_NUM: u8 = 55;
-        let mut frame = enh_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, &TEST_DST, buffer);
+        let mut frame =
+            enh_ack_frame::<FakeDriverConfig>(TEST_SEQ_NUM, &TEST_DST, &TEST_DST_PAN_ID, buffer);
         let mut ies = frame.ies_fields_mut();
         let mut time_correction_ie = ies.time_correction_mut().unwrap();
         time_correction_ie.set_time_sync(42);
@@ -377,10 +382,14 @@ mod test {
 
         let expected_buffer = [
             0,
-            FrameType::Ack as u8 | (1 << 6), // PAN ID Compression
+            // PAN ID Compression cleared: the Destination PAN ID is carried.
+            FrameType::Ack as u8,
             // IE Present + Enhanced + dst addressing mode extended
             2 | (FrameVersion::Ieee802154 as u8) << 4 | 0b11 << 2,
             TEST_SEQ_NUM,
+            // Destination PAN ID, little endian (on-air order).
+            TEST_DST_PAN_ID[0],
+            TEST_DST_PAN_ID[1],
             // Destination extended address, little endian (on-air order).
             TEST_DST[0],
             TEST_DST[1],
@@ -415,6 +424,11 @@ mod test {
             .parse_security()
             .parse_ies::<FakeDriverConfig>()
             .unwrap();
+
+        let addressing = reader.try_addressing_fields().unwrap();
+        assert_eq!(addressing.try_dst_pan_id().unwrap().as_ref(), &TEST_DST_PAN_ID);
+        assert!(addressing.try_src_pan_id().is_none());
+        assert_eq!(addressing.try_dst_address().unwrap().as_le_bytes(), &TEST_DST);
 
         let ies = reader.ies_fields();
         let time_correction_ie = ies.time_correction().unwrap();
