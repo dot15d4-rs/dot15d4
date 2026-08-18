@@ -512,27 +512,35 @@ impl<Bytes: AsRef<[u8]>> ChannelHoppingIe<Bytes> {
         }
     }
 
-    /// Current hop index (full format only).
-    #[inline]
-    pub fn current_hop(&self) -> Option<u16> {
-        let b = self.bytes.as_ref();
-        if b.len() >= 12 {
-            Some(u16::from_le_bytes([b[10], b[11]]))
-        } else {
-            None
-        }
-    }
-
     /// Hopping sequence list (full format only).
     ///
     /// Returns the raw channel number bytes. Each entry is a single-byte
     /// channel index for 2.4 GHz O-QPSK (channels 11–26).
+    ///
+    /// The list directly follows the Hopping Sequence Length field, i.e. it
+    /// starts at content offset 10, and Current Hop follows it (IEEE
+    /// 802.15.4-2015, figure 7-59).
     #[inline]
     pub fn hopping_sequence_list(&self) -> Option<&[u8]> {
         let b = self.bytes.as_ref();
         let len = self.hopping_sequence_length()? as usize;
         if b.len() >= 12 + len {
-            Some(&b[12..12 + len])
+            Some(&b[10..10 + len])
+        } else {
+            None
+        }
+    }
+
+    /// Current hop index (full format only).
+    ///
+    /// Last field of the IE, following the variable-length Hopping Sequence
+    /// List (IEEE 802.15.4-2015, figure 7-59).
+    #[inline]
+    pub fn current_hop(&self) -> Option<u16> {
+        let b = self.bytes.as_ref();
+        let len = self.hopping_sequence_length()? as usize;
+        if b.len() >= 12 + len {
+            Some(u16::from_le_bytes([b[10 + len], b[11 + len]]))
         } else {
             None
         }
@@ -578,26 +586,26 @@ impl<Bytes: AsRef<[u8]> + AsMut<[u8]>> ChannelHoppingIe<Bytes> {
         }
     }
 
+    /// Set hopping sequence list entries (full format only).
+    #[inline]
+    pub fn set_hopping_sequence_list(&mut self, channels: &[u8]) {
+        let b = self.bytes.as_mut();
+        let end = 10 + channels.len();
+        if b.len() >= end + 2 {
+            b[10..end].copy_from_slice(channels);
+        }
+    }
+
     /// Set current hop index (full format only).
     #[inline]
     pub fn set_current_hop(&mut self, hop: u16) {
         let b = self.bytes.as_mut();
-        if b.len() >= 12 {
-            b[10..12].copy_from_slice(&hop.to_le_bytes());
+        if b.len() < 10 {
+            return;
         }
-    }
-
-    /// Set hopping sequence list entries (full format only).
-    ///
-    /// Writes channel numbers starting at byte 12. The caller must ensure
-    /// the buffer was allocated with enough room (see
-    /// [`IeRepr::FullChannelHoppingNestedIe`]).
-    #[inline]
-    pub fn set_hopping_sequence_list(&mut self, channels: &[u8]) {
-        let b = self.bytes.as_mut();
-        let end = 12 + channels.len();
-        if b.len() >= end {
-            b[12..end].copy_from_slice(channels);
+        let len = u16::from_le_bytes([b[8], b[9]]) as usize;
+        if b.len() >= 12 + len {
+            b[10 + len..12 + len].copy_from_slice(&hop.to_le_bytes());
         }
     }
 }
