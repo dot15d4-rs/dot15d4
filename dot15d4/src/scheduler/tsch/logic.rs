@@ -20,9 +20,12 @@ use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::TschCommand::UseTsch;
 use crate::{
+    constants::MAC_TSCH_MAX_KEEP_ALIVE_MISSES,
     driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     mac::neighbors::NeighborId,
-    scheduler::{SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
+    scheduler::{
+        SchedulerTask, SchedulerTaskCompletion, SchedulerTaskEvent, SchedulerTaskTransition,
+    },
 };
 use crate::{
     scheduler::{
@@ -118,6 +121,15 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     Some(deadline) if deadline <= now
                 );
                 self.maybe_queue_keep_alive(context);
+                // `maybe_queue_keep_alive` is the only place the miss counter
+                // moves, so this is the one point that has to test it. A
+                // threshold of zero disables the mechanism, as elsewhere in
+                // the TSCH configuration.
+                if MAC_TSCH_MAX_KEEP_ALIVE_MISSES > 0
+                    && self.missed_keep_alives >= MAC_TSCH_MAX_KEEP_ALIVE_MISSES
+                {
+                    return self.disconnect(context);
+                }
                 if keep_alive_was_due && self.op_deadline(context) > now {
                     return SchedulerTaskTransition::Execute(self.go_idle(context), None);
                 }
@@ -255,8 +267,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                         {
                             // The exchange reached the time source: a keep-alive
                             // is not needed for another period, whether or not
-                            // the ack-sync correction is compiled in.
-                            self.touch_keep_alive(instant, context);
+                            // the ack-sync correction is compiled in, and the
+                            // node is demonstrably still synchronized.
+                            self.note_sync(instant, context);
                             if let Some(timesync_us) = _timesync_us {
                                 context.pib.tsch.sync_ack(timesync_us);
                             }
@@ -286,7 +299,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             && dst_id.is_some()
                             && dst_id == context.pib.tsch.time_source
                         {
-                            self.touch_keep_alive(instant, context);
+                            self.note_sync(instant, context);
                             if let Some(timesync_us) = _timesync_us {
                                 context.pib.tsch.sync_ack(timesync_us);
                             }
@@ -554,8 +567,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     context.pib.tsch.sync_asn(asn, rx_instant);
                     // Heard from the time source: a keep-alive is not needed
                     // for another period, whether or not the frame-sync
-                    // correction is compiled in.
-                    self.touch_keep_alive(rx_instant, context);
+                    // correction is compiled in, and the node is demonstrably
+                    // still synchronized.
+                    self.note_sync(rx_instant, context);
                 }
 
                 #[cfg(feature = "sync-error-log")]
@@ -673,9 +687,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             #[cfg(feature = "tsch")]
             SchedulerCommand::TschCommand(tsch_cmd) => match tsch_cmd {
                 UseTsch { enabled, cca, .. } => {
-                    use crate::scheduler::{
-                        command::tsch::TschCommandResult::UseTsch, SchedulerTaskCompletion,
-                    };
+                    use crate::scheduler::command::tsch::TschCommandResult::UseTsch;
 
                     // Keep macTschCca in sync (the CSMA-side handler is the one
                     // that takes effect on entry, but mirror it here too).
@@ -979,5 +991,33 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.state = TschState::Idle;
 
         SchedulerAction::WaitForTimeoutOrSchedulerRequest { deadline }
+    }
+
+    fn disconnect(
+        &mut self,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        tsch_info!(
+            "tsch disconnect asn={} missed-ka={} pending={}",
+            context.pib.tsch.asn,
+            self.missed_keep_alives,
+            self.pending_operation_count()
+        );
+
+        // `step` took the state out to dispatch this event; leave a valid one
+        // behind. The root scheduler drops this task on `SwitchToCsma`, but a
+        // task left holding `Placeholder` would panic in `step` if anything
+        // ever did reach it again.
+        self.state = TschState::Idle;
+
+        // The former time source no longer needs its neighbor table entry
+        // protected from eviction.
+        let former_time_source = context.pib.tsch.time_source.take();
+        if let Some(id) = former_time_source {
+            context.pib.neighbors.unpin(id);
+        }
+        self.terminate(context);
+
+        SchedulerTaskTransition::Completed(SchedulerTaskCompletion::SwitchToCsma, None)
     }
 }

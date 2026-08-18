@@ -3802,6 +3802,7 @@ mod neighbor_stats_tests {
 #[cfg(test)]
 mod keep_alive_tests {
     use super::*;
+    use crate::constants::MAC_TSCH_MAX_KEEP_ALIVE_MISSES;
     use crate::mac::mlme::set::SetRequestAttribute;
 
     /// This node's own address (matches the address `setup()` writes to the
@@ -4037,6 +4038,203 @@ mod keep_alive_tests {
         // goes out a full period later.
         assert_eq!(runner.pending_operation_count(), 0);
         assert_eq!(runner.task.next_keep_alive, armed_at);
+        runner.terminate();
+    }
+
+    // ========================================================================
+    // Desynchronization: missed keep-alive counting
+    // ========================================================================
+
+    /// Wake the runner at the current keep-alive deadline, so that
+    /// `maybe_queue_keep_alive` sees the period as elapsed, and step the
+    /// state machine on it.
+    fn wake_at_keep_alive_deadline(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) {
+        let deadline = runner.task.next_keep_alive;
+        runner.set_timer_time(deadline);
+        runner.step_timer_expired();
+    }
+
+    /// Let one keep-alive period elapse and run the bookkeeping alone, without
+    /// stepping the state machine into the slot that follows.
+    fn elapse_keep_alive_period(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) {
+        let deadline = runner.task.next_keep_alive;
+        runner.set_timer_time(deadline);
+        runner.task.maybe_queue_keep_alive(&mut runner.context);
+    }
+
+    #[test]
+    fn test_missed_keep_alives_counts_silent_periods() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        assert_eq!(runner.task.missed_keep_alives, 0);
+
+        // An elapsed period with no exchange counts once, when the keep-alive
+        // it triggers is queued.
+        elapse_keep_alive_period(&mut runner);
+        assert_eq!(runner.task.missed_keep_alives, 1);
+        assert_pending_keep_alive_frame(&runner);
+
+        // A keep-alive still pending is the same outstanding probe, not a new
+        // silent period: the count does not move.
+        elapse_keep_alive_period(&mut runner);
+        assert_eq!(runner.task.missed_keep_alives, 1);
+
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_time_source_rx_clears_missed_keep_alives() {
+        const LONG_PERIOD_SLOTS: u16 = 150;
+        let mut runner = setup_keep_alive_runner(LONG_PERIOD_SLOTS, setup_one_link_schedule);
+        runner.task.missed_keep_alives = 2;
+
+        runner.step_timer_expired(); // dispatch RX at ASN 100
+        runner.step_driver_event(DrvSvcEvent::FrameStarted);
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &COORD_ADDRESS, &SRC)
+                .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Received(
+            frame,
+            NsInstant::from_ticks(1_002_120_000),
+        ));
+
+        // A frame heard from the time source proves the node is synchronized.
+        assert_eq!(runner.task.missed_keep_alives, 0);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_acked_data_frame_to_time_source_clears_missed_keep_alives() {
+        // The other loss source the mechanism has to see: an ordinary data
+        // frame that the time source acknowledged is as good as a keep-alive.
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        runner.task.missed_keep_alives = 2;
+
+        let mpdu =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS);
+        runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        runner.step_timer_expired(); // dispatch the TX
+        runner.step_driver_event(DrvSvcEvent::TxStarted(NsInstant::from_ticks(1_000_000_000)));
+
+        let frame =
+            create_addressed_data_frame(&runner.context.buffer_allocator, &SRC, &COORD_ADDRESS)
+                .into_radio_frame::<FakeDriverConfig>();
+        runner.step_driver_event(DrvSvcEvent::Sent(
+            frame,
+            NsInstant::from_ticks(1_002_120_000),
+            None,
+        ));
+
+        assert_eq!(runner.task.missed_keep_alives, 0);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_missed_keep_alives_frozen_without_time_source() {
+        // Time root: the keep-alive is disarmed, so no silence is ever
+        // counted and the node can never disconnect itself.
+        let mut runner = setup();
+        setup_shared_tx_only_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.keep_alive_period = PERIOD_SLOTS;
+        runner.enter_as_coordinator();
+
+        assert!(runner.task.keep_alive_deadline(&runner.context).is_none());
+        for _ in 0..(MAC_TSCH_MAX_KEEP_ALIVE_MISSES as usize + 2) {
+            runner.advance_timer(period(PERIOD_SLOTS));
+            runner.task.maybe_queue_keep_alive(&mut runner.context);
+            assert_eq!(runner.task.missed_keep_alives, 0);
+        }
+        runner.terminate();
+    }
+
+    // ========================================================================
+    // Desynchronization: disconnect
+    // ========================================================================
+
+    #[test]
+    fn test_disconnect_after_max_missed_keep_alives() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+
+        // One short of the threshold: still in TSCH.
+        runner.task.missed_keep_alives = MAC_TSCH_MAX_KEEP_ALIVE_MISSES - 1;
+        wake_at_keep_alive_deadline(&mut runner);
+        assert_eq!(runner.task.missed_keep_alives, MAC_TSCH_MAX_KEEP_ALIVE_MISSES);
+        assert_eq!(runner.last_action().unwrap(), ActionType::Completed);
+
+        assert_eq!(runner.pending_operation_count(), 0);
+        assert!(runner.context.pib.tsch.time_source.is_none());
+
+        // The former time source is evictable again, so a node that joins a
+        // different parent later does not accumulate un-evictable entries.
+        let former = runner
+            .context
+            .pib
+            .neighbors
+            .find_ext(&COORD_ADDRESS[..])
+            .unwrap();
+        assert!(!runner
+            .context
+            .pib
+            .neighbors
+            .get(former)
+            .unwrap()
+            .is_pinned());
+    }
+
+    // ========================================================================
+    // Guard time: relaxation and recovery
+    // ========================================================================
+
+    /// Guard time short enough that `rx_window_us` widens it while
+    /// uncommitted: below `MAC_TSCH_GUARD_FLOOR_US`.
+    const SHORT_GUARD_US: u16 = 80;
+
+    #[test]
+    fn test_missed_period_relaxes_committed_guard() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        runner.context.pib.tsch.timeslot_timings = TschTimeslotTimings::new(1, SHORT_GUARD_US);
+        runner.context.pib.tsch.force_guard_committed();
+
+        // Committed: the node listens with the advertised (short) window.
+        let (_, rx_wait_us) = runner.context.pib.tsch.rx_window_us(0);
+        assert_eq!(rx_wait_us, SHORT_GUARD_US as u64);
+
+        wake_at_keep_alive_deadline(&mut runner);
+
+        // One silent period is enough to widen the window again, well before
+        // the node gives up on the network.
+        assert!(!runner.context.pib.tsch.is_guard_committed());
+        let (_, rx_wait_us) = runner.context.pib.tsch.rx_window_us(0);
+        assert!(rx_wait_us > SHORT_GUARD_US as u64);
+        assert!(runner.task.missed_keep_alives < MAC_TSCH_MAX_KEEP_ALIVE_MISSES);
+
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_guard_relaxation_keeps_the_drift_estimate() {
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        runner.context.pib.tsch.timeslot_timings = TschTimeslotTimings::new(1, SHORT_GUARD_US);
+        runner.context.pib.tsch.set_drift_ns(7);
+        runner.context.pib.tsch.force_guard_committed();
+
+        wake_at_keep_alive_deadline(&mut runner);
+
+        assert!(!runner.context.pib.tsch.is_guard_committed());
+        assert_eq!(runner.drift_ns(), 7);
+        runner.terminate();
+    }
+
+    #[test]
+    fn test_long_guard_is_unaffected_by_relaxation() {
+        // A network advertising the default 2200 us guard never widens, so
+        // relaxing is a no-op on the receive window.
+        let mut runner = setup_keep_alive_runner(PERIOD_SLOTS, setup_shared_tx_only_schedule);
+        let before = runner.context.pib.tsch.rx_window_us(0);
+
+        wake_at_keep_alive_deadline(&mut runner);
+
+        assert_eq!(runner.context.pib.tsch.rx_window_us(0), before);
+        assert_eq!(before.1, RX_WAIT_US);
         runner.terminate();
     }
 

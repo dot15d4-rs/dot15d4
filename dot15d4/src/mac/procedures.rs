@@ -54,6 +54,23 @@ pub async fn get_coordinator_extended_address(
 }
 
 #[cfg(feature = "tsch")]
+pub async fn is_synchronized(request_sender: &MacRequestSender<'static>) -> bool {
+    use super::mlme::get::GetConfirm;
+    use super::primitives::MacConfirm;
+
+    let request_token = request_sender.allocate_request_token().await;
+    let mac_request = MacRequest::MlmeGet(GetRequest::new(GetRequestAttribute::MacTimeSourceStats));
+    let confirm = request_sender
+        .send_request_awaiting_response(request_token, mac_request)
+        .await;
+
+    matches!(
+        confirm,
+        MacConfirm::MlmeGet(GetConfirm::MacNeighborStats(Some(_)))
+    )
+}
+
+#[cfg(feature = "tsch")]
 pub async fn tsch_start_pan<RadioTimerImpl: RadioTimerApi>(
     request_sender: &MacRequestSender<'static>,
     timer: RadioTimerImpl,

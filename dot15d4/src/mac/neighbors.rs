@@ -325,6 +325,19 @@ impl<const N: usize> NeighborTable<N> {
         }
     }
 
+    /// Make an entry evictable again, once nothing references it any more (the
+    /// node stopped using it as its time source, a TSCH link was removed).
+    ///
+    /// Without this, a device that joins several different parents over its
+    /// lifetime accumulates one un-evictable entry per former parent, and
+    /// [`Self::intern`] eventually refuses new neighbors on a table that is
+    /// full of them.
+    pub fn unpin(&mut self, id: NeighborId) {
+        if let Some(n) = self.get_mut(id) {
+            n.flags &= !flags::PINNED;
+        }
+    }
+
     /// Record a valid frame heard from the neighbor.
     pub fn note_rx(&mut self, id: NeighborId, now: NsInstant) {
         if let Some(n) = self.get_mut(id) {

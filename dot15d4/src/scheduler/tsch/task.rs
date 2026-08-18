@@ -22,7 +22,7 @@ use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
 use heapless::Vec;
 
 use crate::{
-    constants::MAC_TSCH_MAX_PENDING_OPERATIONS,
+    constants::{MAC_TSCH_GUARD_RELAX_MISSES, MAC_TSCH_MAX_PENDING_OPERATIONS},
     mac::neighbors::NeighborId,
     scheduler::{
         tsch::TschLinkType, SchedulerContext, SchedulerResponse, SchedulerTransmissionResult,
@@ -339,6 +339,9 @@ pub struct TschTask<RadioDriverImpl: DriverConfig> {
     pub next_beacon_asn: Option<TschAsn>,
     /// Instant at which the next keep-alive toward the time source is due.
     pub next_keep_alive: NsInstant,
+    /// Keep-alive periods that have elapsed without any synchronizing exchange
+    /// with the time source.
+    pub missed_keep_alives: u8,
     /// Marker for radio driver implementation
     _marker: PhantomData<RadioDriverImpl>,
 }
@@ -359,6 +362,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
             beacon_config: BeaconConfig::disabled(),
             next_beacon_asn: None,
             next_keep_alive: NsInstant::from_ticks(0),
+            missed_keep_alives: 0,
             _marker: PhantomData,
         }
     }
@@ -389,7 +393,9 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
 
         // Arm the keep-alive one period from entry: the node either just
         // synchronized to a beacon (join) or is the time root (in which case
-        // the deadline is never consulted).
+        // the deadline is never consulted). Either way the session starts
+        // synchronized, so the miss counter starts at zero.
+        self.missed_keep_alives = 0;
         self.touch_keep_alive(current_time, context);
 
         let current_asn = context.pib.tsch.asn_at(current_time);
@@ -1014,6 +1020,14 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         self.next_keep_alive = now + NsDuration::micros(period_us);
     }
 
+    /// Record a synchronizing exchange with the time source at `instant`: an
+    /// acknowledgment it sent for one of our frames (data or keep-alive), or a
+    /// frame heard from it.
+    pub fn note_sync(&mut self, instant: NsInstant, context: &SchedulerContext<RadioDriverImpl>) {
+        self.missed_keep_alives = 0;
+        self.touch_keep_alive(instant, context);
+    }
+
     /// Queue a keep-alive transmission toward the time source when it is
     /// due. Called from the idle handler on every timer wake-up.
     pub fn maybe_queue_keep_alive(&mut self, context: &mut SchedulerContext<RadioDriverImpl>) {
@@ -1029,6 +1043,12 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
         // Pace the next keep-alive from now on, whatever becomes of this
         // one; a synchronizing exchange in the meantime pushes it further.
         self.touch_keep_alive(now, context);
+
+        self.missed_keep_alives = self.missed_keep_alives.saturating_add(1);
+
+        if self.missed_keep_alives >= MAC_TSCH_GUARD_RELAX_MISSES {
+            context.pib.tsch.relax_guard();
+        }
 
         let Some((mpdu, seq_nr)) = self.build_keep_alive_frame(context) else {
             // No buffer or no (evicted) time source entry: skip this round

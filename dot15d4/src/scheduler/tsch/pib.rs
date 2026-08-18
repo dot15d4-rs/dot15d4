@@ -547,6 +547,33 @@ impl TschPib {
         }
     }
 
+    pub fn relax_guard(&mut self) {
+        if self.guard_committed {
+            tsch_trace!(
+                "tsch guard relax rx_wait_us={} max_err_ns={}",
+                self.timeslot_timings.rx_wait(),
+                self.guard_max_err_ns
+            );
+        }
+        self.guard_committed = false;
+        self.guard_syncs = 0;
+        self.guard_max_err_ns = 0;
+    }
+
+    /// Whether the advertised guard time is currently adopted.
+    #[cfg(test)]
+    pub(crate) fn is_guard_committed(&self) -> bool {
+        self.guard_committed
+    }
+
+    /// Adopt the advertised guard time directly, without going through the
+    /// resync evidence [`Self::observe_sync_error`] normally requires. Test
+    /// setup for the relaxation path.
+    #[cfg(test)]
+    pub(crate) fn force_guard_committed(&mut self) {
+        self.guard_committed = true;
+    }
+
     /// Current per-slot drift estimate in nanoseconds (mean of the window). A
     /// positive value means the local clock runs a bit slow against the time
     /// source.
@@ -672,9 +699,7 @@ impl TschPib {
         self.last_base_time = instant - NsDuration::micros(tx_offset_us);
         self.comp_rem_q32 = 0;
         self.last_rx = None;
-        self.guard_committed = false;
-        self.guard_syncs = 0;
-        self.guard_max_err_ns = 0;
+        self.relax_guard();
         #[cfg(feature = "sync-error-log")]
         {
             self.had_sync_obs = false;

@@ -36,6 +36,8 @@ fn const_config(out_dir: &Path) {
         ("MAC_TSCH_GUARD_COMMIT_SYNCS", ("u8", "8")),
         ("MAC_TSCH_GUARD_COMMIT_MARGIN", ("u8", "1")),
         ("MAC_TSCH_KEEP_ALIVE_PERIOD", ("u16", "1500")),
+        ("MAC_TSCH_MAX_KEEP_ALIVE_MISSES", ("u8", "4")),
+        ("MAC_TSCH_GUARD_RELAX_MISSES", ("u8", "1")),
     ]);
 
     // Make sure we get rerun if needed
@@ -72,6 +74,7 @@ fn const_config(out_dir: &Path) {
         "const _: () = assert!(MAC_MAX_FRAME_RETRIES <= 7, \"MAC_MAX_FRAME_RETRIES must be in 0..=7\");\n",
         "const _: () = assert!(MAC_TSCH_MIN_BE <= MAC_TSCH_MAX_BE, \"MAC_TSCH_MIN_BE must be <= MAC_TSCH_MAX_BE\");\n",
         "const _: () = assert!(MAC_TSCH_MAX_BE >= 3 && MAC_TSCH_MAX_BE <= 8, \"MAC_TSCH_MAX_BE must be in 3..=8\");\n",
+        "const _: () = assert!(MAC_TSCH_MAX_KEEP_ALIVE_MISSES == 0 || MAC_TSCH_GUARD_RELAX_MISSES <= MAC_TSCH_MAX_KEEP_ALIVE_MISSES, \"MAC_TSCH_GUARD_RELAX_MISSES must be <= MAC_TSCH_MAX_KEEP_ALIVE_MISSES\");\n",
     ));
 
     // Now that we have the code of the configuration, actually write it to a file

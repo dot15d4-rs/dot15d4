@@ -28,6 +28,12 @@ mod customizable {
     // keep-alive. 1500 slots = 15 s with the default 10 ms timeslot.
     pub const MAC_TSCH_KEEP_ALIVE_PERIOD: u16 = 1500;
 
+    // Test-only desynchronization thresholds. Kept small so a test can step
+    // through the whole staircase (relax the guard, then disconnect) in a
+    // handful of wake-ups.
+    pub const MAC_TSCH_MAX_KEEP_ALIVE_MISSES: u8 = 3;
+    pub const MAC_TSCH_GUARD_RELAX_MISSES: u8 = 1;
+
     pub const MAC_TSCH_MAX_LINKS: usize = 5;
     pub const MAC_TSCH_MAX_SLOTFRAMES: usize = 1;
     pub const MAC_TSCH_MAX_PENDING_OPERATIONS: usize = 5;
