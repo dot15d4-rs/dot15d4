@@ -235,8 +235,7 @@ impl<'svc, RadioDriverImpl: DriverConfig> SchedulerContext<'svc, RadioDriverImpl
             >= <PhyOf<RadioDriverImpl> as PhyConfig>::PHY_CCA_DURATION.to_micros()
             && timings.tx_offset() as u64
                 >= <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD.to_micros()
-            && timings.rx_offset() as u64
-                >= <PhyOf<RadioDriverImpl> as PhyConfig>::A_TURNAROUND_TIME.to_micros()
+            && timings.rx_offset() as u64 >= RadioDriverImpl::RX_ARM_LEAD.to_micros()
     }
 
     /// Process a PIB command and return the corresponding scheduler response

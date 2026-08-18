@@ -140,6 +140,7 @@ impl DriverConfig for NrfRadioDriver {
     const MAX_SDU_LENGTH: u16 = (<Self::Phy as PhyConfig>::PHY_MAX_PACKET_SIZE - FCS_LEN as u16); // The FCS is handled by the driver and must not be part of the MAC's MPDU.
     type Fcs = FcsNone; // Assuming automatic FCS handling.
     type Timer = NrfRadioSleepTimer;
+    const RX_ARM_LEAD: NsDuration = T_RXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
 }
 
 type Ifs = PhyIfs<Phy<OQpsk250KBit>>;
@@ -192,7 +193,7 @@ const BCC_FC_BITS: u32 = 2 * 8;
 
 const fn timed_rx_enable(start: NsInstant) -> TimedSignal {
     // RMARKER offset: disabled -> rx -> SHR
-    const OFFSET: NsDuration = T_RXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
+    const OFFSET: NsDuration = NrfRadioDriver::RX_ARM_LEAD;
     TimedSignal::new(
         start.checked_sub_duration(OFFSET).unwrap(),
         HardwareSignal::RadioRxEnable,

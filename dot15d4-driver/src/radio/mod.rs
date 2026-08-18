@@ -4,7 +4,10 @@ use core::{fmt::Debug, marker::PhantomData, mem::MaybeUninit};
 
 use crate::{
     radio::tasks::{AnyTask, RadioDriverApi, RadioTask},
-    timer::{HighPrecisionTimer, NsInstant, OptionalNsInstant, RadioTimerApi, RadioTimerError},
+    timer::{
+        HighPrecisionTimer, NsDuration, NsInstant, OptionalNsInstant, RadioTimerApi,
+        RadioTimerError,
+    },
 };
 
 use self::{
@@ -71,6 +74,10 @@ pub trait DriverConfig {
 
     /// The radio timer implementation.
     type Timer: RadioTimerApi;
+
+    /// Lead time the receiver needs between being armed and the RMARKER of an
+    /// incoming frame, i.e. the physical floor of `macTsRxOffset`.
+    const RX_ARM_LEAD: NsDuration = <Self::Phy as PhyConfig>::A_TURNAROUND_TIME;
 }
 
 pub type HighPrecisionTimerOf<RadioDriverImpl> =
