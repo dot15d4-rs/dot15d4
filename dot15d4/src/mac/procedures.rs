@@ -382,20 +382,12 @@ async fn join_network_from_beacon(
             }
         }
 
-        let request_token = request_sender.allocate_request_token().await;
         let Some(tsch_sync) = ies.tsch_sync() else {
             // No TSCH Synchronization IE in beacon - cannot join
             unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
             return None;
         };
         let asn = tsch_sync.asn();
-        let mac_request = MacRequest::MlmeSet(SetRequest::new(SetRequestAttribute::MacAsn(
-            asn,
-            rx_timestamp,
-        )));
-        request_sender
-            .send_request_awaiting_response(request_token, mac_request)
-            .await;
 
         // Extract timeslot timings from the Enhanced Beacon's Timeslot IE
         // and apply them to our PIB so we use the coordinator's timing template.
@@ -438,6 +430,15 @@ async fn join_network_from_beacon(
                 }
             }
         }
+
+        let request_token = request_sender.allocate_request_token().await;
+        let mac_request = MacRequest::MlmeSet(SetRequest::new(SetRequestAttribute::MacAsn(
+            asn,
+            rx_timestamp,
+        )));
+        request_sender
+            .send_request_awaiting_response(request_token, mac_request)
+            .await;
 
         // Extract channel hopping sequence from the Enhanced Beacon's
         // Channel Hopping IE and apply it to our PIB.
