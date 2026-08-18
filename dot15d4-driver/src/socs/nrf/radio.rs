@@ -66,16 +66,15 @@ const _: () = {
 //
 // Open questions:
 // - Do offsets also differ per device?
-// - Are offsets needed at all when running w/o a probe attached?
 //
-// How could we make further progress?
-// - Check via GPIOs w/o a debug probe attached?
-// - Start tx + rx tests on separate devices with precisely synchronized timers
-//   and correlate the send timestamp and receive timestamp.
-// - Observe the radio channel itself with a trusted high-precision sniffer.
-//
-// TODO: Find a way to identify the "true" offsets (as observable on the
-//       physical radio channel).
+// Resolved 2026-08 (see T_MEASURED_TX_FRAMESTART_ERROR): the "true" offsets are
+// now anchored to the air by forking the PHYEND event (last bit on air) to a
+// pin, which answers the question above -- FRAMESTART fires 9.63 us *after* the
+// RMARKER on tx, while END fires 18.36 us *before* the last bit on air, so the
+// two events do not share a common pipeline delay and each needs its own
+// constant. No trusted sniffer required: PHYEND is the radio's own air marker.
+// Remaining uncertainty is whatever fixed offset PHYEND itself carries, which
+// the product specification puts at zero.
 
 // Ozone/JRun/SystemView: 7
 // debug-embed: 10
@@ -91,10 +90,10 @@ const T_MEASURED_TURNAROUND_ERROR: NsDuration =
     NsDuration::from_ticks(8 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 // all: 195
 const T_MEASURED_TX_FRAMESTART_ERROR: NsDuration =
-    NsDuration::from_ticks(195 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+    NsDuration::from_ticks(154 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 
 const T_RX_FRAMESTART_TO_RMARKER: NsDuration = OQpsk250KBit::T_PHR;
-const T_MEASURED_RX_FRAMESTART_ERROR: NsDuration = NsDuration::nanos(23_314);
+const T_MEASURED_RX_FRAMESTART_ERROR: NsDuration = NsDuration::nanos(20_713);
 
 /// Convert a captured RX FRAMESTART event timestamp to the RMARKER instant.
 #[inline]
@@ -226,31 +225,35 @@ const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
 const T_TX_START_MARGIN: NsDuration = NsDuration::micros(16);
 
 const OFFSET_TX_RAMP: NsDuration = OQpsk250KBit::T_SHR
-    .checked_add(T_TXEN)
-    .unwrap()
-    .checked_add(T_RXDIS)
-    .unwrap()
-    .checked_add(T_TX_START_MARGIN)
-    .unwrap();
+    .checked_add(T_TX_START_TO_AIR).unwrap()
+    .checked_add(T_TXEN).unwrap()
+    .checked_add(T_RXDIS).unwrap()
+    .checked_add(T_TX_START_MARGIN).unwrap();
 
 const _: () = assert!(
     Ifs::short().into_local_clock_duration().ticks()
         >= OFFSET_TX_RAMP.ticks() - OQpsk250KBit::T_SHR.ticks()
 );
 
+/// `TASKS_START` -> first preamble chip on air.
+const T_TX_START_TO_AIR: NsDuration =
+    NsDuration::from_ticks(41 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
+
 /// Timed start of an already ramped-up transmission. `at` is the RMARKER.
 const fn timed_tx_start(at: NsInstant) -> TimedSignal {
     TimedSignal::new(
-        at.checked_sub_duration(OQpsk250KBit::T_SHR).unwrap(),
+        at.checked_sub_duration(OQpsk250KBit::T_SHR)
+            .unwrap()
+            .checked_sub_duration(T_TX_START_TO_AIR)
+            .unwrap(),
         HardwareSignal::RadioTxStart,
     )
 }
 
 const OFFSET_TX_RAMP_FROM_OFF: NsDuration = OQpsk250KBit::T_SHR
-    .checked_add(T_TXEN)
-    .unwrap()
-    .checked_add(T_TX_START_MARGIN)
-    .unwrap();
+    .checked_add(T_TX_START_TO_AIR).unwrap()
+    .checked_add(T_TXEN).unwrap()
+    .checked_add(T_TX_START_MARGIN).unwrap();
 
 /// Timed ramp-up of a transmission that starts from the powered-down radio,
 /// on the secondary compare.
