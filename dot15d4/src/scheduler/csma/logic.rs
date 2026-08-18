@@ -289,35 +289,59 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
         context: &SchedulerContext<RadioDriverImpl>,
         completion: SchedulerTaskCompletion,
     ) -> SchedulerTaskTransition {
-        match event {
-            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
-                use crate::scheduler::command::scan::ScanCommandResult;
+        use crate::scheduler::command::scan::ScanCommandResult;
 
-                unsafe {
-                    context
-                        .buffer_allocator
-                        .deallocate_buffer(radio_frame.into_buffer());
-                }
-                let response = match &completion {
-                    SchedulerTaskCompletion::SwitchToCsma => {
-                        unreachable!()
-                    }
-                    SchedulerTaskCompletion::SwitchToTsch => {
-                        SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
-                            TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
-                        ))
-                    }
-                    SchedulerTaskCompletion::SwitchToScanning(_, _) => SchedulerResponse::Command(
-                        SchedulerCommandResult::ScanCommand(ScanCommandResult::StartedScanning),
-                    ),
-                };
-                SchedulerTaskTransition::Completed(
-                    completion,
-                    Some((self.take_tx_token(), response)),
-                )
+        let recovered_frame = match event {
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::RxWindowEnded(radio_frame)) => {
+                Some(radio_frame)
             }
-            _ => unreachable!(),
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::CrcError(radio_frame, _)) => {
+                Some(radio_frame)
+            }
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::Received(radio_frame, _)) => {
+                Some(radio_frame.forget_size::<RadioDriverImpl>())
+            }
+            // The radio kept the rx buffer, so there is nothing to give back.
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::ReceptionAborted) => None,
+            SchedulerTaskEvent::DriverEvent(DrvSvcEvent::FrameStarted) => {
+                return SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None);
+            }
+            // Anything else leaves the mode switch unresolved. Keep waiting for
+            // the driver to go idle rather than aborting: completing here would
+            // hand the token back before the radio is actually free.
+            _ => {
+                dot15d4_util::warn!(
+                    "CSMA: unexpected event in Terminating; still waiting for the driver to go idle."
+                );
+                return SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None);
+            }
+        };
+
+        if let Some(radio_frame) = recovered_frame {
+            unsafe {
+                context
+                    .buffer_allocator
+                    .deallocate_buffer(radio_frame.into_buffer());
+            }
         }
+
+        let response = match &completion {
+            SchedulerTaskCompletion::SwitchToCsma => {
+                unreachable!()
+            }
+            SchedulerTaskCompletion::SwitchToTsch => {
+                SchedulerResponse::Command(SchedulerCommandResult::TschCommand(
+                    TschCommandResult::UseTsch(UseTschCommandResult::StartedTsch),
+                ))
+            }
+            SchedulerTaskCompletion::SwitchToScanning(_, _) => SchedulerResponse::Command(
+                SchedulerCommandResult::ScanCommand(ScanCommandResult::StartedScanning),
+            ),
+        };
+        SchedulerTaskTransition::Completed(
+            completion,
+            Some((self.take_tx_token(), response)),
+        )
     }
 }
 
