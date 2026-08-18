@@ -17,7 +17,7 @@ use dot15d4_driver::radio::frame::Address;
 use self::{
     radio::{
         frame::{RadioFrame, RadioFrameRepr, RadioFrameSized, RadioFrameUnsized},
-        phy::Ifs,
+        phy::{Ifs, PhyConfig},
         tasks::{
             CompletedRadioTransition, ExternalRadioTransition, ListeningRxState, OffState,
             RadioTaskError, RadioTransitionResult, SelfRadioTransition, TaskOff as RadioTaskOff,
@@ -76,6 +76,12 @@ impl From<Timestamp> for OptionalNsInstant {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct AckWindow {
+    pub delay: NsDuration,
+    pub width: NsDuration,
+}
+
 /// Task: send a single frame
 #[derive(Debug, PartialEq, Eq)]
 pub struct DrvSvcTaskTx {
@@ -93,6 +99,7 @@ pub struct DrvSvcTaskTx {
     pub channel: Option<PhyChannel>,
     /// Whether the driver should fallback if request complete with NACK result
     pub fallback_on_nack: bool,
+    pub ack_window: AckWindow,
 }
 
 /// Task: receive a single frame
@@ -116,6 +123,7 @@ pub struct DrvSvcTaskRx {
     pub rx_window_end: Option<NsInstant>,
     /// Optional Expected RX framestart instant, i.e. RX RMARKER.
     pub expected_rx_framestart: Option<NsInstant>,
+    pub ack_delay: NsDuration,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -200,6 +208,7 @@ enum DriverState<RadioDriverImpl: DriverConfig> {
         u8,
         /// Fallback on NACK result
         bool,
+        AckWindow,
     ),
     /// There is no tx frame pending and we have rx capacity to receive an
     /// incoming frame.
@@ -241,6 +250,8 @@ pub struct DriverService<'svc, RadioDriverImpl: DriverConfig> {
     // Kept unconditional; only the TSCH logic that reads it is gated.
     expected_rx_framestart: Cell<Option<NsInstant>>,
 
+    ack_delay: Cell<NsDuration>,
+
     extended_address: [u8; 8],
 }
 
@@ -270,6 +281,7 @@ where
             pending_request: Cell::new(None),
             rx_window_end: Cell::new(None),
             expected_rx_framestart: Cell::new(None),
+            ack_delay: Cell::new(<PhyOf<RadioDriverImpl> as PhyConfig>::AIFS),
             extended_address,
         }
     }
@@ -344,9 +356,21 @@ where
                     self.complete_transmission(tx_driver, TransmissionType::Frame, ifs)
                         .await
                 }
-                DriverState::SendingFrameWithAck(tx_driver, ifs, seq_nb, fallback_on_nack) => {
-                    self.complete_transmission_with_ack(tx_driver, seq_nb, ifs, fallback_on_nack)
-                        .await
+                DriverState::SendingFrameWithAck(
+                    tx_driver,
+                    ifs,
+                    seq_nb,
+                    fallback_on_nack,
+                    ack_window,
+                ) => {
+                    self.complete_transmission_with_ack(
+                        tx_driver,
+                        seq_nb,
+                        ifs,
+                        fallback_on_nack,
+                        ack_window,
+                    )
+                    .await
                 }
                 DriverState::WaitingForFrame(listening_rx_driver) => {
                     // TODO: safety
@@ -420,6 +444,7 @@ where
                 let next_ifs = Ifs::from_mpdu_length(task_tx.mpdu.pdu_length::<RadioDriverImpl>());
                 let next_ack_seq_nr = task_tx.mpdu.sequence_number();
                 let ack_request = task_tx.mpdu.frame_control().ack_request();
+                let next_ack_window = task_tx.ack_window;
                 match tx_driver
                     .schedule_tx(
                         RadioTaskTx {
@@ -450,6 +475,7 @@ where
                                 next_ifs,
                                 seq_nb,
                                 task_tx.fallback_on_nack,
+                                next_ack_window,
                             ),
                             _ => DriverState::SendingFrame(this_state, next_ifs),
                         }
@@ -489,6 +515,7 @@ where
                 let ifs = Ifs::long();
                 let rx_window_end = task_rx.rx_window_end;
                 let expected_rx_framestart = task_rx.expected_rx_framestart;
+                self.ack_delay.set(task_rx.ack_delay);
                 match tx_driver
                     .schedule_rx(
                         RadioTaskRx {
@@ -546,6 +573,7 @@ where
             }
         }
     }
+
     /// Waits for an incoming ACK frame matching the given sequence number and
     /// responds to the tx task accordingly.
     async fn complete_transmission_with_ack(
@@ -554,6 +582,7 @@ where
         seq_nb: u8,
         ifs: Ifs<PhyOf<RadioDriverImpl>>,
         fallback_on_nack: bool,
+        ack: AckWindow,
     ) -> DriverState<RadioDriverImpl> {
         // Safety: The temporary frame is always recovered before being re-used.
         let inbound_ack_frame = self.temp_inbound_frame.take().unwrap();
@@ -562,7 +591,7 @@ where
         };
         let (listening_rx_driver, tx_radio_frame, tx_timestamp, earliest_ack_start) =
             match tx_driver
-                .schedule_rx(inbound_ack_task, Ifs::ack())
+                .schedule_rx(inbound_ack_task, Ifs::exact(ack.delay))
                 .complete_and_transition()
                 .await
             {
@@ -583,10 +612,7 @@ where
                 CompletedRadioTransition::Fallback(..) => unreachable!(),
             };
 
-        // TODO: Currently we use an arbitrary reception window tolerance.
-        //       This must be tuned based on actual performance measurements.
-        const MAX_ACK_FRAME_START_DELAY: NsDuration = NsDuration::micros(50);
-        let latest_ack_start = earliest_ack_start + MAX_ACK_FRAME_START_DELAY;
+        let latest_ack_start = earliest_ack_start + ack.width;
         let stop_listening_result = match listening_rx_driver
             .stop_listening(latest_ack_start.into())
             .await
@@ -727,6 +753,7 @@ where
                     cca,
                     channel,
                     fallback_on_nack,
+                    ack_window,
                 } = tx_task;
                 debug_assert!(channel.is_none());
                 match receiving_rx_driver
@@ -760,6 +787,7 @@ where
                                 tx_task_ifs,
                                 seq_nb,
                                 fallback_on_nack,
+                                ack_window,
                             ),
                             _ => DriverState::SendingFrame(tx_driver, tx_task_ifs),
                         }
@@ -806,7 +834,9 @@ where
                     channel,
                     rx_window_end,
                     expected_rx_framestart,
+                    ack_delay,
                 } = rx_task;
+                self.ack_delay.set(ack_delay);
 
                 // Frames may only be received back-to-back with best-effort
                 debug_assert!(matches!(start, Timestamp::BestEffort));
@@ -943,14 +973,10 @@ where
             cca: false,
         };
 
-        let ack_delay = match frame_version {
-            FrameVersion::Ieee802154 => {
-                <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_TS_TX_ACK_DELAY
-            }
-            _ => <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
-        };
-        let ack_at =
-            rx_instant + receiving_rx_driver.ppdu_rx_duration(mpdu_length) + ack_delay;
+        let ack_at = rx_instant
+            + receiving_rx_driver.ppdu_rx_duration(mpdu_length)
+            + self.ack_delay.get()
+            - <PhyOf<RadioDriverImpl> as PhyConfig>::RMARKER_OFFSET;
 
         match receiving_rx_driver
             .schedule_ack_tx(outbound_ack_task, ack_at)
@@ -1401,6 +1427,7 @@ where
                 let tx_task_ifs = Ifs::<PhyOf<RadioDriverImpl>>::from_mpdu_length(
                     task_tx.mpdu.pdu_length::<RadioDriverImpl>(),
                 );
+                let tx_task_ack_window = task_tx.ack_window;
                 match off_driver
                     .schedule_tx(
                         RadioTaskTx {
@@ -1427,6 +1454,7 @@ where
                                 tx_task_ifs,
                                 seq_nb,
                                 task_tx.fallback_on_nack,
+                                tx_task_ack_window,
                             ),
                             _ => DriverState::SendingFrame(tx_driver, tx_task_ifs),
                         })
@@ -1477,6 +1505,7 @@ where
                 // }
                 let rx_window_end = task_rx.rx_window_end;
                 let expected_rx_framestart = task_rx.expected_rx_framestart;
+                self.ack_delay.set(task_rx.ack_delay);
                 match off_driver
                     .schedule_rx(
                         RadioTaskRx {

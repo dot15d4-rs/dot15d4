@@ -6,7 +6,8 @@ use dot15d4_driver::{
     radio::{
         config,
         frame::{RadioFrame, RadioFrameSized, RadioFrameUnsized},
-        DriverConfig,
+        phy::PhyConfig,
+        DriverConfig, PhyOf,
     },
     timer::RadioTimerApi,
 };
@@ -24,7 +25,7 @@ use crate::scheduler::{command::tsch::UseTschCommandResult, SchedulerTaskComplet
 #[cfg(feature = "tsch")]
 use crate::scheduler::command::tsch::{TschCommand, TschCommandResult};
 use crate::{
-    driver::{DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
+    driver::{AckWindow, DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx, DrvSvcTaskTx, Timestamp},
     scheduler::{SchedulerAction, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition},
     utils,
 };
@@ -736,6 +737,13 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    const ACK_WINDOW: AckWindow = AckWindow {
+        delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
+        width: <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD
+            .checked_add(<PhyOf<RadioDriverImpl> as PhyConfig>::RMARKER_OFFSET)
+            .unwrap(),
+    };
+
     /// Build a TX request for the driver service.
     #[inline]
     fn build_tx_request(
@@ -751,6 +759,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             cca: true,
             channel,
             fallback_on_nack: fallback,
+            ack_window: Self::ACK_WINDOW,
         })
     }
 
@@ -767,6 +776,7 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
             channel,
             rx_window_end: None,
             expected_rx_framestart: None,
+            ack_delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
         })
     }
 }

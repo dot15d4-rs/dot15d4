@@ -15,6 +15,7 @@ use crate::constants::{
     MAC_TSCH_GUARD_FLOOR_US, MAC_TSCH_GUARD_SAFE_US, MAC_TSCH_KEEP_ALIVE_PERIOD, MAC_TSCH_MAX_BE,
     MAC_TSCH_MAX_DRIFT_PPM, MAC_TSCH_MAX_LINKS, MAC_TSCH_MAX_SLOTFRAMES, MAC_TSCH_MIN_BE,
 };
+use crate::driver::AckWindow;
 use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 use crate::mac::neighbors::NeighborId;
 use crate::scheduler::command::tsch::TschRoleConfig;
@@ -310,6 +311,20 @@ impl TschPib {
     /// Get the timeslot length in microseconds.
     pub fn timeslot_length_us(&self) -> u64 {
         self.timeslot_timings.timeslot_length() as u64
+    }
+
+    /// Acknowledgment window of the current template (`macTsRxAckDelay`,
+    /// `macTsAckWait`).
+    pub fn ack_window(&self) -> AckWindow {
+        AckWindow {
+            delay: NsDuration::micros(self.timeslot_timings.rx_ack_delay() as u64),
+            width: NsDuration::micros(self.timeslot_timings.ack_wait() as u64),
+        }
+    }
+
+    /// Acknowledgment delay of the current template (`macTsTxAckDelay`).
+    pub fn ack_delay(&self) -> NsDuration {
+        NsDuration::micros(self.timeslot_timings.tx_ack_delay() as u64)
     }
 
     /// Create a slotframe and add it to the schedule.

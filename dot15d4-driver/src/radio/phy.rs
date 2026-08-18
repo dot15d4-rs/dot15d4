@@ -87,6 +87,7 @@ pub trait PhyConfig {
     /// phyRxRmarkerOffset PIB attributes must be added, see IEEE 802.15.4-2024,
     /// sections 10.29.1.1 and 12.3.2, table 12-2.
     const RMARKER_OFFSET: NsDuration;
+
 }
 
 /// O-QPSK 250kBit PHY
@@ -133,6 +134,8 @@ pub enum Ifs<PhyImpl: PhyConfig> {
     Aifs(PhantomData<PhyImpl>),
     Sifs(PhantomData<PhyImpl>),
     Lifs(PhantomData<PhyImpl>),
+    /// Spacing the MAC states outright.
+    Exact(NsDuration),
 }
 
 impl<PhyImpl: PhyConfig> Ifs<PhyImpl> {
@@ -146,6 +149,11 @@ impl<PhyImpl: PhyConfig> Ifs<PhyImpl> {
 
     pub const fn long() -> Self {
         Self::Lifs(PhantomData)
+    }
+
+    /// Spacing given as a duration by the MAC.
+    pub const fn exact(spacing: NsDuration) -> Self {
+        Self::Exact(spacing)
     }
 
     pub const fn from_mpdu_length(mpdu_length: u16) -> Self {
@@ -198,6 +206,7 @@ impl Ifs<Phy<OQpsk250KBit>> {
             Ifs::Aifs(_) => <Phy<OQpsk250KBit> as PhyConfig>::AIFS,
             Ifs::Sifs(_) => <Phy<OQpsk250KBit> as PhyConfig>::MAC_SIFS_PERIOD,
             Ifs::Lifs(_) => <Phy<OQpsk250KBit> as PhyConfig>::MAC_LIFS_PERIOD,
+            Ifs::Exact(spacing) => spacing,
         }
     }
 }
@@ -205,5 +214,20 @@ impl Ifs<Phy<OQpsk250KBit>> {
 impl From<Ifs<Phy<OQpsk250KBit>>> for NsDuration {
     fn from(value: Ifs<Phy<OQpsk250KBit>>) -> Self {
         value.into_local_clock_duration()
+    }
+}
+
+#[cfg(test)]
+mod ifs_tests {
+    use super::*;
+
+    #[test]
+    fn exact_spacing_is_passed_through() {
+        let spacing = NsDuration::micros(450);
+        assert_eq!(
+            Ifs::<Phy<OQpsk250KBit>>::exact(spacing).into_local_clock_duration(),
+            spacing
+        );
+        assert_ne!(spacing, <Phy<OQpsk250KBit> as PhyConfig>::AIFS);
     }
 }

@@ -164,6 +164,7 @@ fn set_ifs(ifs: Option<Ifs>, with_guard_time: bool) {
                 Aifs(_) => AIFS_US,
                 Sifs(_) => SIFS_US,
                 Lifs(_) => LIFS_US,
+                Exact(spacing) => spacing.to_micros() as u16,
             };
 
             if with_guard_time {

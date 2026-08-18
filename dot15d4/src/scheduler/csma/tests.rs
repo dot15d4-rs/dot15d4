@@ -1,5 +1,6 @@
 //! Integration tests for the CSMA-CA scheduler task.
 
+use dot15d4_driver::radio::{phy::PhyConfig, PhyOf};
 use dot15d4_driver::timer::NsInstant;
 
 use crate::driver::DrvSvcEvent;
@@ -205,6 +206,7 @@ mod single_tx_tests {
                 channel: None,
                 rx_window_end: None,
                 expected_rx_framestart: None,
+                ack_delay: <PhyOf<FakeDriverConfig> as PhyConfig>::AIFS,
             })),
             None,
         ));
@@ -223,6 +225,7 @@ mod single_tx_tests {
                 channel: None,
                 rx_window_end: None,
                 expected_rx_framestart: None,
+                ack_delay: <PhyOf<FakeDriverConfig> as PhyConfig>::AIFS,
             })),
             None,
         ));

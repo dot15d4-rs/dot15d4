@@ -4,7 +4,8 @@ use dot15d4_driver::{
     radio::{
         config::Channel,
         frame::{self, FrameType, RadioFrame, RadioFrameSized, RadioFrameUnsized},
-        DriverConfig,
+        phy::PhyConfig,
+        DriverConfig, PhyOf,
     },
     timer::{NsDuration, NsInstant, RadioTimerApi},
 };
@@ -307,6 +308,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
             channel: Some(channel),
             rx_window_end: self.channel_window_end,
             expected_rx_framestart: None,
+            ack_delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
         });
 
         let response = if let Some(reception_result) = reception_result {

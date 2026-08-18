@@ -787,6 +787,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     cca,
                     channel: Some(channel),
                     fallback_on_nack: false,
+                    ack_window: context.pib.tsch.ack_window(),
                 });
 
                 SchedulerTaskTransition::Execute(
@@ -840,6 +841,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     channel: Some(channel),
                     rx_window_end: Some(max_rx_start),
                     expected_rx_framestart: Some(expected_rx_framestart),
+                    ack_delay: context.pib.tsch.ack_delay(),
                 });
 
                 SchedulerTaskTransition::Execute(
@@ -901,6 +903,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                     cca: context.pib.tsch.tsch_cca,
                     channel: Some(channel),
                     fallback_on_nack: false,
+                    ack_window: context.pib.tsch.ack_window(),
                 });
 
                 SchedulerTaskTransition::Execute(
