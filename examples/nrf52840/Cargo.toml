@@ -31,10 +31,10 @@ cortex-m = { version = "0.7", features = [
 ], optional = true }
 cortex-m-rt = { version = "0.7.0", optional = true }
 dot15d4 = { version = "0.1.2", path = "../../dot15d4" }
-embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+embassy-executor = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6", features = [
     "executor-thread",
 ] }
-embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+embassy-nrf = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6", features = [
     # The time driver is only required for rtos-trace.
     "time-driver-rtc1",
 ], optional = true, default-features = false }

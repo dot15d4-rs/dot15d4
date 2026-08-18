@@ -13,7 +13,7 @@ dot15d4-util = { version = "0.0.1", path = "../dot15d4-util" }
 dot15d4-driver = { version = "0.0.1", path = "../dot15d4-driver" }
 dot15d4-frame = { version = "0.0.1", path = "../dot15d4-frame", default-features = false }
 
-embassy-sync = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace" }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6"}
 
 log = { version = "0.4.21", optional = true }
 defmt = { version = "1.0", optional = true }

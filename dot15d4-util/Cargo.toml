@@ -24,11 +24,11 @@ systemview-target = { version = "0.3", features = [
 ], optional = true }
 
 [dev-dependencies]
-embassy-executor = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+embassy-executor = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6", features = [
     "executor-thread",
     "arch-std",
 ] }
-embassy-time = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+embassy-time = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6", features = [
     "std",
 ] }
 embedded-hal-async = "1.0"

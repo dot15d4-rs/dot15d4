@@ -10,14 +10,14 @@ categories = ["embedded", "no-std", "asynchronous"]
 [dependencies]
 dot15d4 = { path = "../dot15d4", default-features = false }
 
-embassy-sync = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace" }
-embassy-net-driver = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace" }
+embassy-sync = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6"}
+embassy-net-driver = {git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6"}
 embedded-hal-async = "1.0.0"
 
 defmt = { version = "1.0", optional = true }
 log = { version = "0.4", optional = true }
 
-embassy-nrf = { git = "https://github.com/fg-cfh/embassy.git", branch = "rtos-trace", features = [
+embassy-nrf = { git = "https://github.com/embassy-rs/embassy.git", rev="d81dde36221b30c09d11eed02b8b9776bb361eb6", features = [
     # TODO: The time driver is only required for embassy-net and rtos-trace -
     #       depending on smoltcp directly we can make this dependency contingent
     #       on the rtos-trace feature.
