@@ -1,0 +1,38 @@
+name: Fuzz
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      # Build every target. This checks that the targets and the fuzz harness
+      # compile.
+      - name: Build targets
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
+
+      # Run each target for a short time to catch obvious regressions. This is
+      # a smoke test, not a full campaign; see fuzz/README.md for that.
+      - name: Smoke run
+        working-directory: fuzz
+        run: |
+          for target in frame repr ack tsch; do
+            echo "== $target =="
+            cargo +nightly fuzz run "$target" -- -max_total_time=30 -runs=200000
+          done
