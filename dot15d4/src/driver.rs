@@ -1595,13 +1595,14 @@ pub(crate) fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                         #[cfg(feature = "no-enh-ack-addressing")]
                         let addressed_to_us = true;
 
-                        if !addressed_to_us {
+                        if !addressed_to_us || reader.frame_control().security_enabled() {
                             (false, None)
                         } else {
                             let reader = reader.parse_security().parse_ies::<RadioDriverImpl>();
                             if let Ok(reader) = reader {
-                                let ies = reader.ies_fields();
-                                if let Some(tc) = ies.time_correction() {
+                                let ies = reader.try_ies_fields();
+                                if let Some(tc) = ies.as_ref().and_then(|ies| ies.time_correction())
+                                {
                                     // If NACK bit is set, this is a negative acknowledgement
                                     (!tc.nack(), Some(tc.time_sync()))
                                 } else {
