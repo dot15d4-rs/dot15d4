@@ -911,6 +911,10 @@ mod single_tx_tests {
     fn test_tx_channel_from_hopping_sequence() {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
+        // Not the default single-channel sequence: with one entry every ASN
+        // maps to index 0 and the assertion below would hold regardless.
+        runner.context.pib.hopping_sequence =
+            heapless::Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap();
         runner.enter_as_device();
 
         let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
@@ -1136,6 +1140,10 @@ mod rx_operation_tests {
     fn test_rx_channel_from_hopping_sequence() {
         let mut runner = setup();
         setup_one_link_schedule(&mut runner.context.pib.tsch);
+        // Not the default single-channel sequence: with one entry every ASN
+        // maps to index 0 and the assertion below would hold regardless.
+        runner.context.pib.hopping_sequence =
+            heapless::Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap();
         runner.enter_as_coordinator();
         skip_beacon(&mut runner);
 
@@ -2186,6 +2194,10 @@ mod full_cycle_tests {
     fn test_channel_alternates_with_asn() {
         let mut runner = setup();
         setup_short_schedule(&mut runner.context.pib.tsch);
+        // The default sequence is a single channel, which pins every ASN to the
+        // same one. Alternation is what this test is about, so ask for two.
+        runner.context.pib.hopping_sequence =
+            heapless::Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap();
         runner.enter_as_coordinator();
 
         // ASN 5: (5+0)%2=1 -> _12
@@ -4340,4 +4352,49 @@ pub(crate) fn fuzz_step(data: &[u8]) {
         leaked_after, leaked_before,
         "a frame buffer was dropped instead of returned"
     );
+}
+
+mod beacon_ie_tests {
+    use super::*;
+
+    /// The beacon must carry the full Channel Hopping IE with the PIB sequence.
+    #[test]
+    fn beacon_carries_full_hopping_sequence() {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.hopping_sequence = heapless::Vec::from_slice(&[Channel::_20]).unwrap();
+
+        let frame = create_unsized_radio_frame(&runner.context.buffer_allocator);
+        let beacon = runner
+            .task
+            .beacon_builder
+            .build_enhanced_beacon(&runner.context.pib, frame)
+            .expect("beacon build failed");
+
+        {
+            let parsed = beacon
+                .reader()
+                .parse_addressing()
+                .expect("addressing")
+                .parse_security()
+                .parse_ies::<FakeDriverConfig>()
+                .expect("ies");
+            let ies = parsed.ies_fields();
+            let ch_hop = ies.channel_hopping().expect("no Channel Hopping IE");
+            assert!(!ch_hop.is_reduced(), "hopping IE must be the full form");
+            assert_eq!(ch_hop.hopping_sequence_length(), Some(1));
+            assert_eq!(
+                ch_hop.hopping_sequence_list(),
+                Some(&[u8::from(Channel::_20)][..])
+            );
+        }
+
+        unsafe {
+            runner
+                .context
+                .buffer_allocator
+                .deallocate_buffer(beacon.into_buffer())
+        };
+        runner.terminate();
+    }
 }

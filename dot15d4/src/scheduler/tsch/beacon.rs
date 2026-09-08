@@ -15,42 +15,42 @@ use dot15d4_frame::repr::{MpduRepr, SeqNrRepr};
 use dot15d4_frame::MpduWithIes;
 use dot15d4_util::allocator::IntoBuffer;
 
+use crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH;
 use crate::pib::Pib;
 
 /// Builder for Enhanced Beacon frames.
-///
-/// Pre-configures the MPDU representation with TSCH IEs for efficient
-/// beacon generation. The IE structure is defined at compile time.
 pub struct EnhancedBeaconBuilder<'buffer, RadioDriverImpl: DriverConfig> {
-    /// Pre-configured MPDU representation with IE structure.
-    mpdu_repr: MpduRepr<'buffer, MpduWithIes>,
-    /// Phantom data for radio driver type.
-    _phantom: PhantomData<RadioDriverImpl>,
+    _phantom: PhantomData<(&'buffer (), RadioDriverImpl)>,
 }
 
 impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, RadioDriverImpl> {
     /// Create a new Enhanced Beacon builder.
-    ///
-    /// The builder is configured with the standard TSCH IEs:
-    /// - TSCH Synchronization IE
-    /// - Full TSCH Timeslot IE
-    /// - TSCH Slotframe and Link IE
-    /// - Channel Hopping IE (full format, up to 16 channels)
     pub const fn new() -> Self {
-        static SLOTFRAMES: [u8; 1] = [1];
-        static IES: [IeRepr; 4] = [
+        Self {
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn build_enhanced_beacon(
+        &self,
+        pib: &Pib,
+        radio_frame: RadioFrame<RadioFrameUnsized>,
+    ) -> Option<MpduFrame> {
+        let buffer = radio_frame.into_buffer();
+
+        let hopping_len = pib.hopping_sequence.len().min(MAC_HOPPING_SEQUENCE_MAX_LENGTH);
+
+        let slotframes: [u8; 1] = [1];
+        let ies: [IeRepr; 4] = [
             IeRepr::TschSynchronizationNestedIe,
             IeRepr::FullTschTimeslotNestedIe,
-            IeRepr::TschSlotframeAndLinkNestedIe(&SLOTFRAMES),
-            IeRepr::FullChannelHoppingNestedIe(
-                crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH as u8,
-                false,
-            ),
+            IeRepr::TschSlotframeAndLinkNestedIe(&slotframes),
+            IeRepr::FullChannelHoppingNestedIe(hopping_len as u8, false),
         ];
-        static IE_REPR_LIST: IeReprList<'static, IeRepr> = IeReprList::new(&IES);
-        static IE_LIST: IeListRepr<'static> = IeListRepr::WithoutTerminationIes(IE_REPR_LIST);
+        let ie_repr_list = IeReprList::new(&ies);
+        let ie_list = IeListRepr::WithoutTerminationIes(ie_repr_list);
 
-        const MPDU_REPR: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
+        let mpdu_repr: MpduRepr<'_, MpduWithIes> = MpduRepr::new()
             .with_frame_control(SeqNrRepr::No)
             .with_addressing(AddressingRepr::new(
                 AddressingMode::Short,
@@ -59,30 +59,10 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 PanIdCompressionRepr::Yes,
             ))
             .without_security()
-            .with_ies(IE_LIST);
-
-        Self {
-            mpdu_repr: MPDU_REPR,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Build an Enhanced Beacon frame with schedule information.
-    ///
-    /// Populates the beacon IEs with:
-    /// - Source/destination addressing from PIB
-    /// - Slotframe and link configuration from TSCH PIB
-    /// - Timeslot timing parameters
-    pub fn build_enhanced_beacon(
-        &self,
-        pib: &Pib,
-        radio_frame: RadioFrame<RadioFrameUnsized>,
-    ) -> Option<MpduFrame> {
-        let buffer = radio_frame.into_buffer();
+            .with_ies(ie_list);
 
         // Create the frame writer
-        let mut mpdu_writer = self
-            .mpdu_repr
+        let mut mpdu_writer = mpdu_repr
             .into_writer::<RadioDriverImpl>(FrameVersion::Ieee802154, FrameType::Beacon, 0, buffer)
             .ok()?;
 
@@ -145,22 +125,18 @@ impl<'buffer, RadioDriverImpl: DriverConfig> EnhancedBeaconBuilder<'buffer, Radi
                 timeslot_ie.set_timeslot_length(timings.timeslot_length());
             }
 
-            // Set Channel Hopping IE from PIB hopping sequence
             if let Some(mut ch_hop_ie) = ies.channel_hopping_mut() {
-                let seq = &pib.hopping_sequence;
-                ch_hop_ie.set_hopping_sequence_id(0);
-                ch_hop_ie.set_channel_page(0); // page 0 = 2.4 GHz O-QPSK
-                ch_hop_ie.set_num_channels(16); // 16 channels on page 0 (ch 11-26)
+                ch_hop_ie.set_hopping_sequence_id(1);
+                ch_hop_ie.set_channel_page(0);
+                ch_hop_ie.set_num_channels(16);
                 ch_hop_ie.set_phy_configuration(0);
-                ch_hop_ie.set_hopping_sequence_length(seq.len() as u16);
-                ch_hop_ie.set_current_hop(0);
-
-                // Write channel numbers as single-byte indices
-                let mut ch_bytes = [0u8; crate::constants::MAC_HOPPING_SEQUENCE_MAX_LENGTH];
-                for (i, ch) in seq.iter().enumerate() {
-                    ch_bytes[i] = u8::from(*ch);
+                ch_hop_ie.set_hopping_sequence_length(hopping_len as u16);
+                let mut channels = [0u8; MAC_HOPPING_SEQUENCE_MAX_LENGTH];
+                for (slot, channel) in channels.iter_mut().zip(pib.hopping_sequence.iter()) {
+                    *slot = u8::from(*channel);
                 }
-                ch_hop_ie.set_hopping_sequence_list(&ch_bytes[..seq.len()]);
+                ch_hop_ie.set_hopping_sequence_list(&channels[..hopping_len]);
+                ch_hop_ie.set_current_hop(0);
             }
         }
 
