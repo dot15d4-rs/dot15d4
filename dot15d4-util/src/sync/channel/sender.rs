@@ -206,15 +206,10 @@ where
                     response,
                 })
             } else {
-                if let Some(registered_waker) = maybe_registered_waker {
-                    debug_assert!({ cx.waker().will_wake(registered_waker) });
-                } else {
-                    for msg_slot in msg_slots.iter() {
-                        let slot_state = &mut state.slot_state[*msg_slot as usize];
-                        if let SlotState::RequestPollingResponse(maybe_waker) = slot_state {
-                            // Register wakers into pending slots.
-                            maybe_waker.get_or_insert(cx.waker().clone());
-                        }
+                for msg_slot in msg_slots.iter() {
+                    let slot_state = &mut state.slot_state[*msg_slot as usize];
+                    if let SlotState::RequestPollingResponse(maybe_waker) = slot_state {
+                        maybe_waker.get_or_insert_with(|| cx.waker().clone());
                     }
                 }
 
