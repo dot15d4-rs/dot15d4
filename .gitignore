@@ -5,3 +5,5 @@ dot15d4-fuzz/out
 .vscode/
 fuzz/corpus/
 fuzz/artifacts/
+.DS_Store
+.neoconf.json
