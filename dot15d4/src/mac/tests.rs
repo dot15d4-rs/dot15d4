@@ -12,9 +12,8 @@ use dot15d4_util::allocator::{BufferToken, IntoBuffer};
 use crate::{
     mac::MacBufferAllocator,
     scheduler::{
-        tests::{create_test_allocator, FakeDriverConfig},
-        MacCommandType, ReceptionType, SchedulerCommandResult, SchedulerReceptionResult,
-        SchedulerRequest, SchedulerResponse, SchedulerTransmissionResult,
+        tests::FakeDriverConfig, ReceptionType, SchedulerReceptionResult, SchedulerRequest,
+        SchedulerResponse, SchedulerTransmissionResult,
     },
 };
 
@@ -25,7 +24,7 @@ use super::task::{MacTask, MacTaskEvent, MacTaskTransition};
 // ============================================================================
 
 /// Outcome of a single MAC task step.
-pub(crate) enum MacStepOutcome<TaskResult> {
+pub enum MacStepOutcome<TaskResult> {
     /// Task produced a scheduler request and continues.
     Pending {
         request: SchedulerRequest,

@@ -6,8 +6,7 @@ use dot15d4_driver::timer::NsInstant;
 use crate::driver::DrvSvcEvent;
 use crate::scheduler::csma::task::CsmaState;
 use crate::scheduler::tests::{
-    create_sized_radio_frame, create_test_mpdu_with_ack, ActionType, DeterministicRng,
-    FakeDriverConfig, TestRunner,
+    create_sized_radio_frame, create_test_mpdu_with_ack, FakeDriverConfig, TestRunner,
 };
 use crate::scheduler::tests::{create_test_allocator, FakeRadioTimer};
 use crate::scheduler::SchedulerRequest;
@@ -44,14 +43,13 @@ impl<'a> TestRunner<'a, CsmaTask<FakeDriverConfig>> {
 #[cfg(test)]
 mod single_tx_tests {
 
-    use core::cell::Cell;
-
     use dot15d4_driver::radio::config::Channel;
 
     use crate::driver::{DrvSvcRequest, DrvSvcTaskRx};
     use crate::scheduler::csma::CsmaTask;
     use crate::scheduler::tests::{
-        get_scheduler_channel, FakeDriverConfig, DRIVER_EVENT_CHANNEL, DRIVER_REQUEST_CHANNEL,
+        create_test_rng, driver_event_channel, driver_request_channel, get_scheduler_channel,
+        FakeDriverConfig,
     };
     use crate::scheduler::SchedulerContext;
 
@@ -60,24 +58,14 @@ mod single_tx_tests {
     fn setup() -> TestRunner<'static, CsmaTask<FakeDriverConfig>> {
         let timer = FakeRadioTimer::new();
         let allocator = create_test_allocator();
-
-        static mut RNG: DeterministicRng = DeterministicRng {
-            values: vec![],
-            index: Cell::new(0),
-            call_count: Cell::new(0),
-            default_value: 1,
-        };
-        let rng = unsafe { &mut RNG };
-        rng.values = vec![1];
-        rng.reset_index();
-        rng.reset_count();
+        let rng = create_test_rng();
 
         let address = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
 
         let channel = get_scheduler_channel();
         let request_receiver = channel.receiver();
-        let driver_request_sender = DRIVER_REQUEST_CHANNEL.sender();
-        let driver_event_receiver = DRIVER_EVENT_CHANNEL.receiver();
+        let driver_request_sender = driver_request_channel().sender();
+        let driver_event_receiver = driver_event_channel().receiver();
 
         let mut context = SchedulerContext::new(
             allocator,

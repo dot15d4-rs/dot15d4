@@ -13,48 +13,36 @@
     )
 )]
 
-use core::cell::Cell;
-use core::num::NonZero;
-
 use dot15d4_driver::{
     radio::{
         config::Channel,
-        frame::{
-            Address, AddressingMode, AddressingRepr, ExtendedAddress, FrameType, FrameVersion,
-            RadioFrame, RadioFrameSized, RadioFrameUnsized,
-        },
+        frame::{Address, ExtendedAddress, RadioFrame, RadioFrameSized},
     },
     timer::{NsDuration, NsInstant},
 };
 use dot15d4_frame::{
     fields::{TschLinkOption, TschTimeslotTimings},
     mpdu::MpduFrame,
-    repr::{MpduRepr, SeqNrRepr},
-    MpduWithIes,
 };
 use dot15d4_util::allocator::IntoBuffer;
 
-use crate::driver::{DrvSvcEvent, DrvSvcRequest, Timestamp};
+use crate::driver::DrvSvcEvent;
+use crate::mac::neighbors::NeighborId;
 use crate::mac::MacBufferAllocator;
 use crate::scheduler::command::pib::PibCommand;
-use crate::mac::neighbors::NeighborId;
 use crate::scheduler::command::tsch::{TschCommand, TschRoleConfig};
 use crate::scheduler::command::{CsmaCommandResult, UseCsmaResult};
 use crate::scheduler::tests::{
-    create_sized_radio_frame, create_test_allocator, create_test_mpdu_with_ack,
-    create_unsized_radio_frame, get_scheduler_channel, ActionType, DeterministicRng,
-    DriverRequestInfo, FakeDriverConfig, FakeRadioTimer, ResponseType, Sleeping, TestRunner,
-    DRIVER_EVENT_CHANNEL, DRIVER_REQUEST_CHANNEL,
+    create_test_allocator, create_test_mpdu_with_ack, create_test_rng, create_unsized_radio_frame,
+    driver_event_channel, driver_request_channel, get_scheduler_channel, ActionType,
+    FakeDriverConfig, FakeRadioTimer, TestRunner,
 };
 use crate::scheduler::tsch::{
     TschCsmaBackoff, TschLink, TschLinkType, TschOperation, TschState, TschTask, TxOrigin,
     INFINITE_DEADLINE, TIMESLOT_GUARD_TIME_US,
 };
 use crate::scheduler::SchedulerCommandResult;
-use crate::scheduler::{
-    SchedulerAction, SchedulerCommand, SchedulerContext, SchedulerRequest, SchedulerResponse,
-    SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition,
-};
+use crate::scheduler::{SchedulerCommand, SchedulerContext, SchedulerRequest, SchedulerResponse};
 
 use super::pib::TschAsn;
 use super::TschPib;
@@ -257,24 +245,14 @@ fn create_addressed_data_frame(
 fn setup() -> TestRunner<'static, TschTask<FakeDriverConfig>> {
     let timer = FakeRadioTimer::new();
     let allocator = create_test_allocator();
-
-    static mut RNG: DeterministicRng = DeterministicRng {
-        values: vec![],
-        index: Cell::new(0),
-        call_count: Cell::new(0),
-        default_value: 1,
-    };
-    let rng = unsafe { &mut RNG };
-    rng.values = vec![1];
-    rng.reset_index();
-    rng.reset_count();
+    let rng = create_test_rng();
 
     let address = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
 
     let channel = get_scheduler_channel();
     let request_receiver = channel.receiver();
-    let driver_request_sender = DRIVER_REQUEST_CHANNEL.sender();
-    let driver_event_receiver = DRIVER_EVENT_CHANNEL.receiver();
+    let driver_request_sender = driver_request_channel().sender();
+    let driver_event_receiver = driver_event_channel().receiver();
 
     let mut context = SchedulerContext::new(
         allocator,

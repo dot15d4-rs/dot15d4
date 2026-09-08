@@ -17,14 +17,7 @@
     )
 )]
 
-use core::{
-    cell::Cell,
-    future::Future,
-    marker::PhantomData,
-    num::NonZero,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use core::{cell::Cell, marker::PhantomData, num::NonZero};
 
 use dot15d4_driver::{
     radio::{
@@ -33,7 +26,7 @@ use dot15d4_driver::{
             AddressingMode, AddressingRepr, FrameType, FrameVersion, PanIdCompressionRepr,
             RadioFrame, RadioFrameSized, RadioFrameUnsized,
         },
-        phy::{OQpsk250KBit, Phy, PhyConfig},
+        phy::{OQpsk250KBit, Phy},
         DriverConfig, FcsTwoBytes,
     },
     timer::{
@@ -52,28 +45,19 @@ use dot15d4_util::{
 };
 use embassy_sync::channel::Channel as EmbassyChannel;
 use rand_core::RngCore;
-use static_cell::ConstStaticCell;
 
 use crate::{
-    driver::{
-        DriverEventChannel, DriverRequestChannel, DrvSvcEvent, DrvSvcRequest, DrvSvcTaskRx,
-        DrvSvcTaskTx, Timestamp,
-    },
+    driver::{DriverEventChannel, DriverRequestChannel, DrvSvcEvent, DrvSvcRequest, Timestamp},
     mac::MacBufferAllocator,
     scheduler::{
         MessageType, SchedulerAction, SchedulerCommandResult, SchedulerContext, SchedulerRequest,
-        SchedulerRequestChannel, SchedulerResponse, SchedulerTask, SchedulerTaskEvent,
-        SchedulerTaskTransition, SchedulerTransmissionResult, SCHEDULER_CHANNEL_BACKLOG,
-        SCHEDULER_CHANNEL_CAPACITY,
+        SchedulerResponse, SchedulerTask, SchedulerTaskEvent, SchedulerTaskTransition,
+        SchedulerTransmissionResult, SCHEDULER_CHANNEL_BACKLOG, SCHEDULER_CHANNEL_CAPACITY,
     },
 };
 
 use super::{
     command::{CsmaCommandResult, UseCsmaResult},
-    csma::{
-        task::{Backoff, CsmaState},
-        CsmaTask,
-    },
     SchedulerReceptionResult,
 };
 
@@ -269,52 +253,96 @@ const TEST_BUFFER_COUNT: usize = 16;
 
 type TestAllocatorBackend = BufferAllocatorBackend<TEST_BUFFER_SIZE, TEST_BUFFER_COUNT>;
 
-/// Get or create the test allocator. Uses OnceLock to handle repeated calls.
+static INTENTIONAL_LEAKS: std::sync::Mutex<Vec<LeakedAllocation>> =
+    std::sync::Mutex::new(Vec::new());
+
+struct LeakedAllocation {
+    _keep_alive: *const (),
+}
+
+// Safety: The pointer is never dereferenced; it only keeps the allocation
+// visible to miri's leak checker.
+unsafe impl Send for LeakedAllocation {}
+
+fn leak_for_test<T: 'static>(value: T) -> &'static mut T {
+    let leaked = Box::leak(Box::new(value));
+    INTENTIONAL_LEAKS.lock().unwrap().push(LeakedAllocation {
+        _keep_alive: leaked as *mut T as *const (),
+    });
+    leaked
+}
+
 pub(crate) fn create_test_allocator() -> MacBufferAllocator {
-    use core::pin::Pin;
-    use std::sync::OnceLock;
+    thread_local! {
+        static TEST_ALLOCATOR: MacBufferAllocator = {
+            let backend: &'static mut TestAllocatorBackend =
+                leak_for_test(BufferAllocatorBackend::new());
+            let pinned: &'static core::pin::Pin<&'static TestAllocatorBackend> =
+                leak_for_test(TestAllocatorBackend::pin(backend));
+            BufferAllocator::new(pinned)
+        };
+    }
 
-    static TEST_ALLOCATOR_BACKEND: ConstStaticCell<TestAllocatorBackend> =
-        ConstStaticCell::new(BufferAllocatorBackend::new());
-    static TEST_ALLOCATOR_PIN: OnceLock<Pin<&'static TestAllocatorBackend>> = OnceLock::new();
-
-    let pinned = TEST_ALLOCATOR_PIN.get_or_init(|| TEST_ALLOCATOR_BACKEND.take().pin());
-    BufferAllocator::new(pinned)
+    TEST_ALLOCATOR.with(|allocator| *allocator)
 }
 
 // ============================================================================
-// Static Channels for Testing
+// Per-Thread Channels and RNG for Testing
 // ============================================================================
 
-static mut SCHEDULER_REQUEST_CHANNEL: Option<
-    SyncChannel<
-        MessageType,
-        SchedulerRequest,
-        SchedulerResponse,
-        SCHEDULER_CHANNEL_CAPACITY,
-        SCHEDULER_CHANNEL_BACKLOG,
-        1,
-    >,
-> = None;
-
-pub(crate) fn get_scheduler_channel() -> &'static SyncChannel<
+type TestSchedulerChannel = SyncChannel<
     MessageType,
     SchedulerRequest,
     SchedulerResponse,
     SCHEDULER_CHANNEL_CAPACITY,
     SCHEDULER_CHANNEL_BACKLOG,
     1,
-> {
-    unsafe {
-        if SCHEDULER_REQUEST_CHANNEL.is_none() {
-            SCHEDULER_REQUEST_CHANNEL = Some(SyncChannel::new());
-        }
-        SCHEDULER_REQUEST_CHANNEL.as_ref().unwrap()
+>;
+
+pub(crate) fn get_scheduler_channel() -> &'static TestSchedulerChannel {
+    thread_local! {
+        static SCHEDULER_REQUEST_CHANNEL: &'static TestSchedulerChannel =
+            leak_for_test(SyncChannel::new());
     }
+
+    SCHEDULER_REQUEST_CHANNEL.with(|channel| *channel)
 }
 
-pub(crate) static DRIVER_REQUEST_CHANNEL: DriverRequestChannel = EmbassyChannel::new();
-pub(crate) static DRIVER_EVENT_CHANNEL: DriverEventChannel = EmbassyChannel::new();
+pub(crate) fn driver_request_channel() -> &'static DriverRequestChannel {
+    thread_local! {
+        static DRIVER_REQUEST_CHANNEL: &'static DriverRequestChannel =
+            leak_for_test(EmbassyChannel::new());
+    }
+
+    DRIVER_REQUEST_CHANNEL.with(|channel| *channel)
+}
+
+pub(crate) fn driver_event_channel() -> &'static DriverEventChannel {
+    thread_local! {
+        static DRIVER_EVENT_CHANNEL: &'static DriverEventChannel =
+            leak_for_test(EmbassyChannel::new());
+    }
+
+    DRIVER_EVENT_CHANNEL.with(|channel| *channel)
+}
+
+pub(crate) fn create_test_rng() -> &'static mut DeterministicRng {
+    thread_local! {
+        static TEST_RNG: *mut DeterministicRng =
+            leak_for_test(DeterministicRng::constant(1));
+    }
+
+    let rng = TEST_RNG.with(|rng| *rng);
+    // Safety: The pointer comes from a leaked box owned by this thread alone, so
+    // it stays valid for the lifetime of the thread and no other thread can
+    // reach it. The setup helpers build one runner at a time, so no second
+    // reference to the RNG is alive while this one is in use.
+    let rng = unsafe { &mut *rng };
+    rng.values = vec![1];
+    rng.reset_index();
+    rng.reset_count();
+    rng
+}
 
 // ============================================================================
 // Timing Calculation Helpers
