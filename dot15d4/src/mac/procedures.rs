@@ -543,7 +543,7 @@ pub async fn scan(request_sender: &MacRequestSender<'static>) -> ScanConfirm {
     let mac_request = MacRequest::MlmeScan(ScanRequest {
         scan_type: ScanType::Passive,
         scan_channels: ScanChannels::Single(Channel::_26),
-        scan_duration: 12,
+        scan_duration: 60,
         max_pan_descriptors: 1,
     });
     let response = request_sender

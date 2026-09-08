@@ -12,7 +12,7 @@ use dot15d4::driver::{
     executor::{InterruptExecutor, PB3},
     socs::nrf::{
         executor::{nrf_interrupt_executor, NrfInterruptPriority},
-        export::pac::{CorePeripherals, Peripherals, GPIOTE, NVMC, RADIO, SCB, UICR},
+        export::pac::{CorePeripherals, Peripherals, GPIOTE, NVMC, RADIO, RNG, SCB, UICR},
         LfClockSource, NrfRadioSleepTimer, NrfRadioTimerConfig,
     },
 };
@@ -169,6 +169,7 @@ pub struct AvailableResources {
     #[cfg(feature = "_gpio-trace")]
     pub gpiote: GPIOTE,
     pub radio: RADIO,
+    pub rng: RNG,
     pub timer: NrfRadioSleepTimer,
 }
 
@@ -249,6 +250,7 @@ pub fn config_peripherals(
         #[cfg(feature = "_gpio-trace")]
         gpiote: peripherals.GPIOTE,
         radio: peripherals.RADIO,
+        rng: peripherals.RNG,
         timer,
     }
 }

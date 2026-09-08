@@ -1,15 +1,30 @@
-use dot15d4::{RngCore, RngError};
+use dot15d4::{driver::socs::nrf::export::pac::RNG, RngCore, RngError};
 
-pub struct FicrRng(u64);
+pub struct NodeRng(u64);
 
-impl FicrRng {
-    pub fn new(seed: [u8; 8]) -> Self {
-        // Never all-zero.
-        Self(u64::from_le_bytes(seed) | 1)
+impl NodeRng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    pub fn from_trng(rng: RNG) -> Self {
+        rng.config.write(|w| w.dercen().enabled());
+        rng.tasks_start.write(|w| w.tasks_start().set_bit());
+
+        let mut seed = 0u64;
+        for _ in 0..8 {
+            while rng.events_valrdy.read().events_valrdy().bit_is_clear() {}
+            rng.events_valrdy.reset();
+            seed = (seed << 8) | rng.value.read().value().bits() as u64;
+        }
+
+        rng.tasks_stop.write(|w| w.tasks_stop().set_bit());
+
+        Self::new(seed)
     }
 }
 
-impl RngCore for FicrRng {
+impl RngCore for NodeRng {
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;

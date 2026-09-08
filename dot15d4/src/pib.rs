@@ -94,7 +94,7 @@ impl Pib {
             security_enabled: false,
             short_address: 0xffff,
             enhanced_beacon_order: 0,
-            hopping_sequence: Vec::from_slice(&[Channel::_26, Channel::_12]).unwrap(),
+            hopping_sequence: Vec::from_slice(&[Channel::_26]).unwrap(),
             neighbors: crate::mac::neighbors::MacNeighborTable::new(),
             #[cfg(feature = "tsch")]
             tsch: TschPib::new(),
