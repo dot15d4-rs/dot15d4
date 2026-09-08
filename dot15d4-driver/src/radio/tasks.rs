@@ -904,15 +904,8 @@ pub trait ReceivingRxState<RadioDriverImpl: DriverConfig>:
 /// Drivers will occupy this state while sending a frame or after sending when
 /// the transmitter is idle but the radio is still powered (tx idle).
 pub trait TxState<RadioDriverImpl: DriverConfig>: RadioState<RadioDriverImpl, TaskTx> {
-    /// Schedules a best-effort transition to the rx state.
-    ///
-    /// The driver SHALL deduce sufficient guard time from the IFS, so that -
-    /// given the local radio's IFS timer accuracy - a frame can be received in
-    /// time, even assuming max. clock drift.
-    ///
-    /// Note: If you need to start a timed rx task after a tx task, transition
-    ///       to "Radio Off" state first. Keeping the radio in tx state while
-    ///       waiting for an rx window would not be energy efficient.
+    /// Schedules a transition to the rx state, `ifs` after the end of the
+    /// frame currently being sent.
     fn schedule_rx(
         self,
         task: TaskRx,

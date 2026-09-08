@@ -190,6 +190,10 @@ fn set_ifs(ifs: Option<Ifs>, with_guard_time: bool) {
 /// been received.
 const BCC_FC_BITS: u32 = 2 * 8;
 
+/// On-air duration of `octets` at the PHY's symbol rate.
+fn octets_on_air(octets: u16) -> NsDuration {
+    <PhyOf<NrfRadioDriver> as PhyConfig>::SymbolPeriods::from_ticks(octets as u64 * 2).convert()
+}
 const fn timed_rx_enable(start: NsInstant) -> TimedSignal {
     // RMARKER offset: disabled -> rx -> SHR
     const OFFSET: NsDuration = NrfRadioDriver::RX_ARM_LEAD;
@@ -199,11 +203,16 @@ const fn timed_rx_enable(start: NsInstant) -> TimedSignal {
     )
 }
 
+/// Timed enable of a transmission that reaches the air through a
+/// `txready_start` short. `at` is the RMARKER.
 const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
     if cca {
-        // RMARKER offset with CCA: disabled -> rx -> CCA -> turnaround -> SHR
+        // RMARKER offset with CCA: disabled -> rx -> CCA -> turnaround -> start
+        // -> air -> SHR
         const OFFSET_DIS_TO_TX_W_CCA: NsDuration = T_RXEN
             .checked_add(T_BACKOFF_PERIOD)
+            .unwrap()
+            .checked_add(T_TX_START_TO_AIR)
             .unwrap()
             .checked_add(OQpsk250KBit::T_SHR)
             .unwrap();
@@ -212,9 +221,12 @@ const fn timed_tx_enable(at: NsInstant, cca: bool) -> TimedSignal {
             HardwareSignal::RadioRxEnable,
         )
     } else {
-        // RMARKER offset without CCA: disabled -> tx -> SHR
-        const OFFSET_DIS_TO_TX_NO_CCA: NsDuration =
-            T_TXEN.checked_add(OQpsk250KBit::T_SHR).unwrap();
+        // RMARKER offset without CCA: disabled -> tx -> start -> air -> SHR
+        const OFFSET_DIS_TO_TX_NO_CCA: NsDuration = T_TXEN
+            .checked_add(T_TX_START_TO_AIR)
+            .unwrap()
+            .checked_add(OQpsk250KBit::T_SHR)
+            .unwrap();
         TimedSignal::new(
             at.checked_sub_duration(OFFSET_DIS_TO_TX_NO_CCA).unwrap(),
             HardwareSignal::RadioTxEnable,
@@ -234,6 +246,8 @@ const _: () = assert!(
     Ifs::short().into_local_clock_duration().ticks()
         >= OFFSET_TX_RAMP.ticks() - OQpsk250KBit::T_SHR.ticks()
 );
+
+const _: () = assert!(Ifs::short().into_local_clock_duration().ticks() >= T_RXEN.ticks());
 
 /// `TASKS_START` -> first preamble chip on air.
 const T_TX_START_TO_AIR: NsDuration =
@@ -2156,9 +2170,39 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
             }
 
             fn on_scheduled(&mut self) -> Result<OptionalNsInstant, SchedulingError> {
-                self.driver
-                    .state()
-                    .start_timer(None.into())?
+                let state = self.driver.state();
+
+                debug_assert!(state.measured_entry.is_some());
+                let psdu_octets = state
+                    .ref_task::<TaskTx>()
+                    .radio_frame
+                    .sdu_wo_fcs_length()
+                    .get()
+                    + FCS_LEN as u16;
+                let listen_at = state.measured_entry.unwrap()
+                    + OQpsk250KBit::T_PHR
+                    + octets_on_air(psdu_octets)
+                    + self.ifs.into_local_clock_duration();
+                debug_assert!(self.ifs.into_local_clock_duration() >= T_RXEN);
+                let rx_enable = timed_rx_enable(
+                    listen_at,
+                );
+
+                const ARM_GUARD: NsDuration = NsDuration::micros(100);
+                let timed = state.sleep_timer().now() + ARM_GUARD < rx_enable.instant;
+                if !timed {
+                    warn!("late ack window");
+                }
+
+                let timer = state.start_timer(if timed {
+                    rx_enable.instant.into()
+                } else {
+                    None.into()
+                })?;
+                if timed {
+                    timer.schedule_timed_signal(rx_enable)?;
+                }
+                timer
                     .observe_event(HardwareEvent::RadioRxEnabled)?
                     .observe_event(HardwareEvent::RadioFrameStarted)?;
 
@@ -2166,8 +2210,6 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
 
                 let packetptr = self.rx_task.radio_frame.as_ptr() as u32;
                 r.packetptr.write(|w| w.packetptr().variant(packetptr));
-
-                set_ifs(Some(self.ifs), true);
 
                 // Note: To cater for errata 204 (see rev1 v1.4) a tx-to-rx
                 //       switch must pass through the disabled state, which is
@@ -2177,10 +2219,10 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                 //       avoid race conditions, see the TX_IDLE case below.
                 dma_start_fence();
                 r.shorts.write(|w| {
-                    // Ramp down the receiver, ramp it up again in RX state and
-                    // then start frame reception immediately.
                     w.end_disable().enabled();
-                    w.disabled_rxen().enabled();
+                    if !timed {
+                        w.disabled_rxen().enabled();
+                    }
                     w.rxready_start().enabled()
                 });
 
@@ -2206,8 +2248,8 @@ impl TxState<NrfRadioDriver> for RadioDriver<NrfRadioDriver, TaskTx> {
                     // to RX, we need to transition manually, see conditions 1.
                     // and 2. in the method documentation.
                     //
-                    // TODO: We currently have no way to enforce IFS in this
-                    //       case.
+                    // Only the parking is manual: the armed compare still
+                    // enables the receiver at the scheduled instant.
                     r.tasks_disable.write(|w| w.tasks_disable().set_bit());
                     debug!("late scheduling");
                 };
