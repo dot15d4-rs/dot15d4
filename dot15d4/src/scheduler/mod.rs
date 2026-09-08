@@ -159,8 +159,10 @@ impl HasAddress<MessageType> for SchedulerRequest {
             SchedulerRequest::Reception(reception) => match reception {
                 ReceptionType::Data => matches!(*address, MessageType::Rx(ReceptionType::Data)),
                 ReceptionType::Beacon => matches!(*address, MessageType::Rx(ReceptionType::Beacon)),
-                ReceptionType::MacCommand(_) => {
-                    matches!(*address, MessageType::Rx(ReceptionType::MacCommand(..)))
+                ReceptionType::MacCommand(command) => {
+                    // The command type is part of the address: a response must
+                    // not be delivered to a task waiting for a request.
+                    matches!(*address, MessageType::Rx(ReceptionType::MacCommand(wanted)) if wanted == *command)
                 }
             },
             SchedulerRequest::Command(_) => {

@@ -989,3 +989,22 @@ pub(crate) fn fuzz_validate_ack(data: &[u8]) {
         allocator.deallocate_buffer(recovered.into_buffer());
     }
 }
+
+#[cfg(test)]
+mod reception_address_tests {
+    use crate::scheduler::{MacCommandType, MessageType, ReceptionType, SchedulerRequest};
+    use dot15d4_util::sync::HasAddress;
+
+    #[test]
+    fn mac_command_requests_match_their_own_command_type() {
+        let request = SchedulerRequest::Reception(ReceptionType::MacCommand(
+            MacCommandType::AssociateRequest,
+        ));
+        assert!(request.matches(&MessageType::Rx(ReceptionType::MacCommand(
+            MacCommandType::AssociateRequest
+        ))));
+        assert!(!request.matches(&MessageType::Rx(ReceptionType::MacCommand(
+            MacCommandType::AssociateResponse
+        ))));
+    }
+}

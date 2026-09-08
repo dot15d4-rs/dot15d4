@@ -288,7 +288,8 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateRequestTask<'_, RadioDr
 enum AssociateIndicationState {
     Initial,
     WaitingForRequest,
-    SendingResponse,
+    /// Response in flight; the indication is yielded once it is sent.
+    SendingResponse(AssociateIndication),
 }
 
 pub(crate) struct AssociateIndicationTask<'task, RadioDriverImpl: DriverConfig> {
@@ -322,7 +323,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
     fn generate_associate_response(
         rx_mpdu: MpduFrame,
         buffer_allocator: MacBufferAllocator,
-    ) -> Option<MpduParser<MpduFrame, MpduWithAllFields>> {
+    ) -> Option<(AssociateIndication, MpduParser<MpduFrame, MpduWithAllFields>)> {
         let reader = rx_mpdu.reader();
         let addressing = reader.parse_addressing().ok()?;
         let fields = addressing.try_into_addressing_fields().ok()?;
@@ -357,7 +358,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
 
         // TODO: use in associate response. For now, assume we request
         //       address allocation
-        let _capability_information = if payload.len() > 1 {
+        let capability_information = if payload.len() > 1 {
             CapabilityInformation(payload[1])
         } else {
             CapabilityInformation(0)
@@ -385,7 +386,12 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
             .dst_address_mut()
             .set(&Address::Extended(ExtendedAddress::new(device_address)));
 
-        Some(response_parser)
+        let indication = AssociateIndication {
+            device_address,
+            capability_information,
+            assigned_short_address,
+        };
+        Some((indication, response_parser))
     }
 }
 
@@ -413,9 +419,9 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
 
                     match Self::generate_associate_response(mac_command_mpdu, self.buffer_allocator)
                     {
-                        Some(mpdu_parser) => {
+                        Some((indication, mpdu_parser)) => {
                             // Send the response and yield the indication.
-                            self.state = AssociateIndicationState::SendingResponse;
+                            self.state = AssociateIndicationState::SendingResponse(indication);
                             MacTaskTransition::SchedulerRequest(
                                 self,
                                 SchedulerRequest::Transmission(mpdu_parser.into_mpdu_frame()),
@@ -469,7 +475,7 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
                     )
                 }
             },
-            AssociateIndicationState::SendingResponse => match event {
+            AssociateIndicationState::SendingResponse(indication) => match event {
                 MacTaskEvent::SchedulerResponse(SchedulerResponse::Transmission(result)) => {
                     match result {
                         SchedulerTransmissionResult::Sent(radio_frame, _instant) => {
@@ -484,7 +490,7 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateIndicationTask<'_, Radi
                                 SchedulerRequest::Reception(ReceptionType::MacCommand(
                                     MacCommandType::AssociateRequest,
                                 )),
-                                None,
+                                Some(indication),
                             )
                         }
                         SchedulerTransmissionResult::NoAck(radio_frame, _instant) => {
