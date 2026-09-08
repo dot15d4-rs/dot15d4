@@ -603,8 +603,19 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                         SchedulerTaskTransition::Execute(action, Some((token, response)))
                     }
                     Err(recovered_mpdu) => {
-                        // No receiver, reuse frame
-                        tsch_debug!("tsch rx dropped asn={} cause=no-receiver", current_asn);
+                        let dropped_type = recovered_mpdu.frame_control().frame_type();
+                        if matches!(dropped_type, FrameType::Beacon) {
+                            tsch_trace!(
+                                "tsch rx dropped asn={} type=beacon cause=no-consumer",
+                                current_asn
+                            );
+                        } else {
+                            tsch_debug!(
+                                "tsch rx dropped asn={} type={} cause=no-receiver",
+                                current_asn,
+                                ft(dropped_type)
+                            );
+                        }
                         self.put_rx_frame(
                             recovered_mpdu
                                 .into_radio_frame::<RadioDriverImpl>()

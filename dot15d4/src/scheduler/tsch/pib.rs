@@ -20,7 +20,7 @@ use crate::mac::frame::fields::{TschLinkOption, TschTimeslotTimings};
 use crate::mac::neighbors::NeighborId;
 use crate::scheduler::command::tsch::TschRoleConfig;
 
-use super::log::tsch_trace;
+use super::log::{tsch_info, tsch_trace};
 
 /// Type alias for Absolute Slot Number.
 pub type TschAsn = u64;
@@ -549,7 +549,7 @@ impl TschPib {
             && (self.guard_max_err_ns as u64) * MAC_TSCH_GUARD_COMMIT_MARGIN as u64 <= half_guard_ns
         {
             self.guard_committed = true;
-            tsch_trace!(
+            tsch_info!(
                 "tsch guard commit rx_wait_us={} max_err_ns={}",
                 self.timeslot_timings.rx_wait(),
                 self.guard_max_err_ns
@@ -559,7 +559,7 @@ impl TschPib {
 
     pub fn relax_guard(&mut self) {
         if self.guard_committed {
-            tsch_trace!(
+            tsch_info!(
                 "tsch guard relax rx_wait_us={} max_err_ns={}",
                 self.timeslot_timings.rx_wait(),
                 self.guard_max_err_ns
