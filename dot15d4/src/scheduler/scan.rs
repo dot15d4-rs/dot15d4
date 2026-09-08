@@ -162,8 +162,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
                 }
                 DrvSvcEvent::RxWindowEnded(recovered_rx_frame) => {
-                    // Channel scan window expired, advance to next channel
-                    self.advance_to_next_channel(context, Err(recovered_rx_frame))
+                    self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                 }
                 _ => {
                     dot15d4_util::warn!("scan: unexpected driver event while scanning; advancing channel.");
@@ -235,7 +234,7 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
                     self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                 }
                 DrvSvcEvent::RxWindowEnded(recovered_rx_frame) => {
-                    self.advance_to_next_channel(context, Err(recovered_rx_frame))
+                    self.continue_on_channel(channel, context, Err(recovered_rx_frame))
                 }
                 _ => {
                     dot15d4_util::warn!(
@@ -292,13 +291,38 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
     }
 
     fn rx_request_transition(
-        &self,
+        &mut self,
         reception_result: Result<SchedulerReceptionResult, RadioFrame<RadioFrameUnsized>>,
         channel: Channel,
         context: &mut SchedulerContext<RadioDriverImpl>,
     ) -> SchedulerTaskTransition {
-        let (radio_frame, reception_result) = match reception_result {
-            Ok(reception_result) => (context.allocate_frame(), Some(reception_result)),
+        let (radio_frame, response) = match reception_result {
+            Ok(reception_result) => {
+                match context.try_receive_rx_request(ReceptionType::Beacon) {
+                    Some((response_token, _)) => (
+                        context.allocate_frame(),
+                        Some((
+                            response_token,
+                            SchedulerResponse::Reception(reception_result),
+                        )),
+                    ),
+                    None => {
+                        let recovered_rx_frame = match reception_result {
+                            SchedulerReceptionResult::Beacon(radio_frame, _)
+                            | SchedulerReceptionResult::Data(radio_frame, _)
+                            | SchedulerReceptionResult::Command(radio_frame, _) => {
+                                radio_frame.forget_size::<RadioDriverImpl>()
+                            }
+                        };
+                        self.remaining_pan_descriptors += 1;
+                        dot15d4_util::warn!(
+                            "scan: beacon received before the MAC posted its request; \
+                             not counted."
+                        );
+                        (recovered_rx_frame, None)
+                    }
+                }
+            }
             Err(recovered_rx_frame) => (recovered_rx_frame, None),
         };
 
@@ -310,20 +334,6 @@ impl<RadioDriverImpl: DriverConfig> ScanTask<RadioDriverImpl> {
             expected_rx_framestart: None,
             ack_delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
         });
-
-        let response = if let Some(reception_result) = reception_result {
-            if let Some((response_token, _)) = context.try_receive_rx_request(ReceptionType::Beacon)
-            {
-                Some((
-                    response_token,
-                    SchedulerResponse::Reception(reception_result),
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
 
         SchedulerTaskTransition::Execute(
             SchedulerAction::SendDriverRequestThenSelect(request),
