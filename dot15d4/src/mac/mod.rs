@@ -465,9 +465,9 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
                     DataConfirm::Sent(recovered_radio_frame, instant) => {
                         (recovered_radio_frame, Some(instant))
                     }
-                    DataConfirm::Nack(unsent_radio_frame, instant) => (
+                    DataConfirm::Nack(unsent_radio_frame, _instant) => (
                         unsent_radio_frame.forget_size::<RadioDriverImpl>(),
-                        Some(instant),
+                        None,
                     ),
                     DataConfirm::ChannelAccessFailure(unsent_radio_frame) => {
                         (unsent_radio_frame.forget_size::<RadioDriverImpl>(), None)
@@ -550,11 +550,32 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         }
     }
 
+    #[cfg(feature = "tsch")]
+    fn frame_payload_is_empty(mpdu: &MpduFrame) -> bool {
+        let Ok(reader) = mpdu.reader().parse_addressing() else {
+            return false;
+        };
+        let Ok(reader) = reader.parse_security().parse_ies::<RadioDriverImpl>() else {
+            return false;
+        };
+        reader.try_frame_payload().map_or(true, |p| p.is_empty())
+    }
+
     fn handle_incoming_mpdu(&self, mpdu: MpduFrame, timestamp: NsInstant) {
         // TODO: Implement proper handling of incoming frames.
         match mpdu.frame_control().frame_type() {
             // TODO: distinguish Data/Beacon
             FrameType::Data | FrameType::Beacon => {
+                #[cfg(feature = "tsch")]
+                if mpdu.frame_control().frame_type() == FrameType::Data
+                    && Self::frame_payload_is_empty(&mpdu)
+                {
+                    // Safety: Incoming frames are allocated by the MAC service itself.
+                    unsafe {
+                        self.buffer_allocator.deallocate_buffer(mpdu.into_buffer());
+                    }
+                    return;
+                }
                 if let Some(request_token) = self.indication_sender.try_allocate_request_token() {
                     let indication = MacIndication::McpsData(DataIndication { mpdu, timestamp });
 
