@@ -369,6 +369,16 @@ impl TschPib {
 
         // TODO: Validate channel offset from parent PIB
 
+        // Re-adding a cell updates it in place; appending would fill the table on rejoin.
+        if let Some(index) = self.links.iter().position(|existing| {
+            existing.slotframe_handle == link.slotframe_handle
+                && existing.timeslot == link.timeslot
+                && existing.channel_offset == link.channel_offset
+        }) {
+            self.links[index] = link;
+            return Ok(index as u16);
+        }
+
         // Add link
         if self.links.push(link).is_err() {
             Err(ScheduleError::CapacityExceeded)

@@ -4398,3 +4398,42 @@ mod beacon_ie_tests {
         runner.terminate();
     }
 }
+
+mod schedule_idempotency_tests {
+    use super::*;
+
+    /// Re-adding a link on the same cell must update in place, not append.
+    #[test]
+    fn add_link_updates_existing_cell() {
+        let mut runner = setup();
+        let tsch = &mut runner.context.pib.tsch;
+        assert!(tsch.create_slotframe(0, 11).is_ok());
+
+        let link = TschLink {
+            slotframe_handle: 0,
+            timeslot: 0,
+            channel_offset: 0,
+            link_options: TschLinkOption::Tx | TschLinkOption::Rx | TschLinkOption::Shared,
+            link_type: TschLinkType::Advertising,
+            neighbor: None,
+            link_advertise: true,
+        };
+        assert!(tsch.add_link(link.clone()).is_ok());
+        for _ in 0..10 {
+            assert!(tsch.add_link(link.clone()).is_ok());
+        }
+        assert_eq!(tsch.links().count(), 1);
+
+        let updated = TschLink {
+            link_options: TschLinkOption::Rx,
+            ..link
+        };
+        assert!(tsch.add_link(updated).is_ok());
+        assert_eq!(tsch.links().count(), 1);
+        assert_eq!(
+            tsch.links().next().unwrap().link_options.bits(),
+            TschLinkOption::Rx.bits()
+        );
+        runner.terminate();
+    }
+}
