@@ -983,7 +983,10 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
     /// due at: the first point of the beacon grid past it.
     pub fn on_beacon_sent(&mut self, asn: TschAsn, timeslot_length_us: u64) {
         let period = self.beacon_config.period_slots(timeslot_length_us);
-        self.next_beacon_asn = Some((asn / period + 1) * period);
+        // Jitter can place a beacon before its due ASN, which still belongs to
+        // the grid point being served.
+        let served = self.next_beacon_asn.unwrap_or(asn).max(asn);
+        self.next_beacon_asn = Some((served / period + 1) * period);
     }
 }
 

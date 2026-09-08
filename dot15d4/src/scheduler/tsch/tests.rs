@@ -1336,6 +1336,23 @@ mod advertisement_tests {
         runner.terminate();
     }
 
+    /// A beacon that jitter placed before its due ASN serves that grid point.
+    #[test]
+    fn test_early_beacon_does_not_repeat_the_grid_point() {
+        let mut runner = setup();
+        setup_two_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.tsch.role = TschRoleConfig::time_root(10);
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.context.pib.tsch.sort_links();
+        runner.step_entry();
+
+        runner.task.next_beacon_asn = Some(1000);
+        runner.task.on_beacon_sent(970, TIMESLOT_LENGTH_US);
+        assert_eq!(runner.task.next_beacon_asn, Some(2000));
+        runner.terminate();
+    }
+
     #[test]
     fn test_beacon_sent_reschedules_next_beacon() {
         let mut runner = setup();
