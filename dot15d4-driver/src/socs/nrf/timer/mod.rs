@@ -361,7 +361,7 @@ impl State {
 
     const RTC_HFCLKSTART_PPI_CHANNEL: usize = 18;
 
-    const HFXO_PREWARM_LEAD_TICKS: u64 = 16;
+    const HFXO_PREWARM_LEAD_TICKS: u64 = 14;
 
     const PPI_CHANNEL_MASK: u32 = 1 << Self::TIMER_CC0_RADIO_TXEN_CHANNEL
         | 1 << Self::TIMER_CC0_RADIO_RXEN_CHANNEL
@@ -738,6 +738,10 @@ impl State {
     /// Make sure the HFXO is running by the time the timer starts at
     /// `timer_start_tick` (RTC2 CC0).
     fn arrange_hfclk_prewarm(&self, timer_start_tick: u64) -> bool {
+        if Self::clock().hfclkrun.read().status().is_triggered() {
+            return false;
+        }
+
         let rtc_now_tick = self.rtc_now_tick();
         if !self.sleep_clock_uses_hfclk()
             && timer_start_tick
