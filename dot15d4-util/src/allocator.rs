@@ -58,22 +58,60 @@ pub mod export {
 /// - The message can be consumed and then re-instantiated from the same buffer
 ///   or a pointer derived from it due to the !Copy and "no-move" semantics
 ///   of this buffer.
-#[derive(Debug, PartialEq, Eq)]
 #[must_use = "Buffer tokens are linear and must be returned to the allocator, not dropped."]
 pub struct BufferToken(
     // Note: We keep a slice (fat pointer) rather than a reference to an array
     //       (thin pointer). This costs us extra bytes for a usize but allows us
     //       to allocate variable-sized buffers depending on the required buffer
     //       size w/o polluting generics.
-    // Safety: static references never move, this allows us to safely convert
-    //         this buffer to a pointer and back.
-    &'static mut [u8],
+    //
+    // Note: This is deliberately a raw pointer and *not* a `&'static mut [u8]`.
+    //       A `&mut` inside the token would assert `noalias` for the whole
+    //       lifetime of the token, and would additionally be *protected*
+    //       whenever the token (or anything wrapping it, such as an
+    //       `MpduFrame`) crosses a function boundary by value. Recycling a
+    //       buffer through the allocator while such a protected reference is
+    //       still in scope higher up the call stack is undefined behaviour
+    //       under both Stacked Borrows and Tree Borrows, even though the token
+    //       has already been handed back. Holding a raw pointer and only
+    //       materialising a reference for the duration of a `Deref`/`DerefMut`
+    //       borrow keeps the `&mut` XOR `&` guarantee at the API level without
+    //       making an aliasing claim the allocator cannot honour.
+    //
+    // Safety: The pointer is obtained from a pinned, statically allocated
+    //         backing buffer, so it stays valid and never moves. The token is
+    //         linear and non-cloneable, so it is the unique owner of that
+    //         buffer until it is returned to the allocator.
+    NonNull<[u8]>,
     TokenGuard,
 );
 
+// Safety: The token is the unique, non-cloneable owner of a buffer in
+//         statically allocated memory. It therefore carries exactly the
+//         auto-trait guarantees of the `&'static mut [u8]` it replaces; the
+//         raw pointer is an implementation detail that only exists to avoid
+//         asserting `noalias`.
+unsafe impl Send for BufferToken {}
+// Safety: See `Send`.
+unsafe impl Sync for BufferToken {}
+
 impl BufferToken {
-    /// Creates a new buffer token.
     pub const fn new(buffer: &'static mut [u8]) -> Self {
+        // Safety: A reference is never null. The `&mut` is immediately decayed
+        //         into a raw pointer and never used again, so the token does
+        //         not retain a `noalias` claim on the buffer.
+        Self(unsafe { NonNull::new_unchecked(buffer as *mut [u8]) }, TokenGuard)
+    }
+
+    /// Creates a new buffer token from a raw buffer pointer.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must be valid for reads and writes for its full length, must
+    /// point into memory that outlives the token and never moves, and must not
+    /// be aliased by any other live token or reference for as long as the token
+    /// exists.
+    pub const unsafe fn from_raw(buffer: NonNull<[u8]>) -> Self {
         Self(buffer, TokenGuard)
     }
 
@@ -83,7 +121,7 @@ impl BufferToken {
     ///
     /// Must be called by the same allocator from which the buffer token was
     /// allocated. Calling this from outside the allocator will leak the buffer.
-    pub unsafe fn consume(self) -> &'static mut [u8] {
+    pub unsafe fn consume(self) -> NonNull<[u8]> {
         self.1.consume();
         self.0
     }
@@ -95,18 +133,18 @@ impl BufferToken {
 
     /// Const proxy for [u8]::is_empty() to work around non-const deref limitation.
     pub const fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.len() == 0
     }
 
     /// Const proxy for [u8].as_ptr() to work around non-const deref limitation.
     pub const fn as_ptr(&self) -> *const u8 {
-        self.0.as_ptr()
+        self.0.cast::<u8>().as_ptr()
     }
 
     /// Const proxy for [u8].as_mut_ptr() to work around non-const deref
     /// limitation.
     pub const fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.0.as_mut_ptr()
+        self.0.cast::<u8>().as_ptr()
     }
 }
 
@@ -114,13 +152,31 @@ impl Deref for BufferToken {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        self.0
+        // Safety: The token is the unique owner of a valid, live buffer, and
+        //         the returned reference is bounded by the borrow of `self`.
+        unsafe { self.0.as_ref() }
     }
 }
 
 impl DerefMut for BufferToken {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
+        // Safety: See `Deref`. The exclusive borrow of `self` guarantees that
+        //         no shared reference derived from this token is live.
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl PartialEq for BufferToken {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for BufferToken {}
+
+impl core::fmt::Debug for BufferToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("BufferToken").field(&&**self).finish()
     }
 }
 
@@ -250,8 +306,15 @@ unsafe impl<const BUFFER_SIZE: usize, const CAPACITY: usize> Allocator
 
                 // Safety: The `deallocate()` method will never write to a free
                 //         slot. So all clients share read-only access to the
-                //         current free slot.
-                let next = unsafe { NonNull::new_unchecked(self.next.get()).as_ref() }[current];
+                //         current free slot. `current` is checked against
+                //         `CAPACITY` above.
+                //
+                //         The read goes through a raw pointer to the single
+                //         slot rather than through a reference to the whole
+                //         array. A reference would assert an aliasing claim
+                //         over every slot, including those a concurrent
+                //         `deallocate()` is entitled to write.
+                let next = unsafe { self.next.get().cast::<u8>().add(current).read() };
                 match self.head.compare_exchange_weak(
                     current as u8,
                     next,
@@ -300,7 +363,14 @@ unsafe impl<const BUFFER_SIZE: usize, const CAPACITY: usize> Allocator
             //   this method.
             // - Only `deallocate()` will write to slots owned by non-free
             //   buffers.
-            (*unsafe { NonNull::new_unchecked(self.next.get()).as_mut() })[index] = current;
+            // - `index` is asserted to be in range above.
+            //
+            // The write goes through a raw pointer to the single slot rather
+            // than through `as_mut()` on the whole array. `as_mut()` would
+            // retag every slot as `Unique`, which is a write access that
+            // invalidates the read-only sharing of free slots that
+            // `allocate()` relies on.
+            unsafe { self.next.get().cast::<u8>().add(index).write(current) };
             match self.head.compare_exchange_weak(
                 current,
                 index as u8,
@@ -360,15 +430,25 @@ impl BufferAllocator {
     pub fn try_allocate_buffer(&self, size: usize) -> Result<BufferToken, AllocError> {
         self.allocator
             .allocate(Self::buffer_layout(size))
-            .map(|mut buffer_ptr| {
-                BufferToken::new(
-                    // Safety: Mutability and validity is guaranteed by the
-                    //         allocator. The buffer is guaranteed to be at
-                    //         least as long as requested. We limit it to the
-                    //         requested size so that the buffer length can be
-                    //         used in calculations.
-                    unsafe { &mut buffer_ptr.as_mut()[0..size] },
-                )
+            .map(|buffer_ptr| {
+                // Safety: Mutability and validity is guaranteed by the
+                //         allocator. The buffer is guaranteed to be at least as
+                //         long as requested. We limit it to the requested size
+                //         so that the buffer length can be used in
+                //         calculations.
+                //
+                //         The narrowing is done on the raw pointer rather than
+                //         through `NonNull::as_mut()`. Materialising a `&mut`
+                //         here would retag the buffer as `Unique`, which is a
+                //         write access that invalidates any still-live pointer
+                //         to the same slot -- exactly what happens when a
+                //         caller returns a buffer and immediately allocates
+                //         again, since the free list is LIFO and hands the same
+                //         slot straight back.
+                unsafe { BufferToken::from_raw(NonNull::slice_from_raw_parts(
+                    buffer_ptr.cast::<u8>(),
+                    size,
+                )) }
             })
     }
 
@@ -389,8 +469,10 @@ impl BufferAllocator {
         let buffer = buffer_token.consume();
         self.allocator.deallocate(
             // Safety: We ensure the non-null invariants when creating the
-            //         token.
-            NonNull::new_unchecked(buffer.as_mut_ptr()),
+            //         token. The pointer is passed through without ever
+            //         creating a reference, so returning the slot to the free
+            //         list does not perform an access to the buffer itself.
+            buffer.cast::<u8>(),
             Self::buffer_layout(buffer.len()),
         );
     }
