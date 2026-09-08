@@ -9,7 +9,7 @@ use dot15d4_driver::{
         phy::PhyConfig,
         DriverConfig, PhyOf,
     },
-    timer::RadioTimerApi,
+    timer::{NsDuration, RadioTimerApi},
 };
 use dot15d4_frame::mpdu::MpduFrame;
 use dot15d4_util::{allocator::IntoBuffer, sync::ResponseToken};
@@ -761,10 +761,16 @@ impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
 // ============================================================================
 
 impl<RadioDriverImpl: DriverConfig> CsmaTask<RadioDriverImpl> {
+    const ACK_RX_GUARD: NsDuration = NsDuration::micros(32);
+
     const ACK_WINDOW: AckWindow = AckWindow {
-        delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS,
+        delay: <PhyOf<RadioDriverImpl> as PhyConfig>::AIFS
+            .checked_sub(Self::ACK_RX_GUARD)
+            .unwrap(),
         width: <PhyOf<RadioDriverImpl> as PhyConfig>::MAC_UNIT_BACKOFF_PERIOD
             .checked_add(<PhyOf<RadioDriverImpl> as PhyConfig>::RMARKER_OFFSET)
+            .unwrap()
+            .checked_add(Self::ACK_RX_GUARD)
             .unwrap(),
     };
 
