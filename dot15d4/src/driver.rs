@@ -1,8 +1,3 @@
-//! Access to IEEE 802.15.4 radio drivers.
-//!
-//! This module provides the upper half of the communication pipe towards IEEE
-//! 802.15.4 radio drivers.
-
 use core::cell::Cell;
 
 #[cfg(not(feature = "tsch"))]
@@ -121,7 +116,6 @@ pub struct DrvSvcTaskRx {
     /// If not set, the receiver will listen indefinitely until a frame is
     /// received or a subsequent TX/idle request is sent.
     pub rx_window_end: Option<NsInstant>,
-    /// Optional Expected RX framestart instant, i.e. RX RMARKER.
     pub expected_rx_framestart: Option<NsInstant>,
     pub ack_delay: NsDuration,
 }
@@ -838,7 +832,6 @@ where
                 } = rx_task;
                 self.ack_delay.set(ack_delay);
 
-                // Frames may only be received back-to-back with best-effort
                 debug_assert!(matches!(start, Timestamp::BestEffort));
                 debug_assert!(channel.is_none());
 

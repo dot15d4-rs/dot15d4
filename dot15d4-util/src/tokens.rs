@@ -2,12 +2,6 @@
 
 use core::mem;
 
-/// A utility communicating the intent that tokens _should_ be used as linear
-/// types i.e. they must not be dropped unless explicitly consumed.
-///
-/// A token can still be leaked in several ways which would neutralize the drop
-/// guard. That's ok. This pattern is not meant to be literally foolproof, just
-/// to keep most users from accidentally doing the wrong thing in practice.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "Tokens are linear and must be returned to their originator, not dropped."]
 pub(crate) struct TokenGuard;

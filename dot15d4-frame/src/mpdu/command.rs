@@ -110,10 +110,6 @@ impl From<u8> for AssociationStatus {
     }
 }
 
-/// Representation of an association request command MPDU.
-///
-/// The device sends this frame to the coordinator with:
-/// - Source: Extended address of the device
 pub const ASSOCIATE_REQUEST_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(
@@ -124,11 +120,6 @@ pub const ASSOCIATE_REQUEST_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     ))
     .without_security();
 
-/// Representation of an association response command MPDU.
-///
-/// The coordinator sends this frame back to the device with:
-/// - Source: Extended address of the coordinator
-/// - Destination: Extended address of the device
 pub const ASSOCIATE_RESPONSE_FRAME_REPR: MpduRepr<MpduWithSecurity> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)
     .with_addressing(AddressingRepr::new(

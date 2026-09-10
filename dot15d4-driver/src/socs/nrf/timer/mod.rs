@@ -1179,7 +1179,6 @@ impl State {
     ///
     /// May be called from both, interrupt and scheduling context.
     fn rtc_now_tick(&self) -> u64 {
-        // The `half_period` MUST be read before `counter`, see method docs.
         let half_period = self.half_period.load(Ordering::Relaxed);
         compiler_fence(Ordering::SeqCst);
         let counter = Self::rtc().counter.read().counter().bits();

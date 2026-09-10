@@ -512,7 +512,6 @@ impl TschPib {
         hopping_sequence[channel_index]
     }
 
-    /// Update base time and ASN after executing an operation.
     pub fn update_timing(&mut self, asn: TschAsn) {
         let timeslot_length_us = self.timeslot_length_us();
         let (base, rem) = self.slot_start_and_rem(asn, timeslot_length_us);
@@ -743,7 +742,6 @@ impl TschPib {
         }
     }
 
-    /// Acknowledgment-based synchronization.
     pub fn sync_ack(&mut self, timesync_us: i16) {
         #[cfg(feature = "sync-error-log")]
         {

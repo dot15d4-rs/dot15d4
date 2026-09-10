@@ -56,14 +56,6 @@ pub fn imm_ack_frame<Config: DriverConfig>(
 #[cfg(feature = "ies")]
 pub const ENH_ACK_IE_LIST: &[IeRepr<'static>] = &[IeRepr::TimeCorrectionHeaderIe];
 
-/// Structural representation of an Enhanced ACK MPDU with Time Correction IE.
-///
-/// Enhanced ACK frame structure:
-/// - Frame Control (2 bytes): IEEE 802.15.4-2015 version, ACK type, IE present
-/// - Sequence Number (1 byte)
-/// - Time Correction Header IE (4 bytes total):
-///   - Header (2 bytes): Element ID = 0x1e, Length = 2
-///   - Content (2 bytes): Time Sync Info + NACK bit
 #[cfg(all(feature = "ies", not(feature = "no-enh-ack-addressing")))]
 pub const ENH_ACK_FRAME_REPR: MpduRepr<'static, MpduWithIes> = mpdu_repr()
     .with_frame_control(SeqNrRepr::Yes)

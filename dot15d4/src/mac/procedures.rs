@@ -389,8 +389,6 @@ async fn join_network_from_beacon(
         };
         let asn = tsch_sync.asn();
 
-        // Extract timeslot timings from the Enhanced Beacon's Timeslot IE
-        // and apply them to our PIB so we use the coordinator's timing template.
         if let Some(timeslot_ie) = ies.tsch_timeslot() {
             if !timeslot_ie.is_reduced() {
                 use dot15d4_frame::fields::TschTimeslotTimings;

@@ -21,8 +21,6 @@ impl<T, S> Either<T, S> {
     }
 }
 
-/// Combines 2 futures and returns the result of the first future to terminate.
-/// The other one gets canceled/dropped
 pub fn select<F1: Future, F2: Future>(
     f1: F1,
     f2: F2,

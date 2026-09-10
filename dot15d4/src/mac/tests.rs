@@ -23,7 +23,6 @@ use super::task::{MacTask, MacTaskEvent, MacTaskTransition};
 // Step Outcome
 // ============================================================================
 
-/// Outcome of a single MAC task step.
 pub enum MacStepOutcome<TaskResult> {
     /// Task produced a scheduler request and continues.
     Pending {

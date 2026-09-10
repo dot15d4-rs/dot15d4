@@ -33,7 +33,6 @@ use super::beacon::EnhancedBeaconBuilder;
 use super::log::{ch, tsch_debug, tsch_info, tsch_trace, tsch_warn};
 use super::pib::{TschAsn, TschLink};
 
-/// Guard time before a timeslot starts (microseconds).
 pub const TIMESLOT_GUARD_TIME_US: u64 = 1000;
 
 /// Infinite deadline - used when no pending operations.

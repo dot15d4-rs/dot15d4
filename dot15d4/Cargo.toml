@@ -2,7 +2,7 @@
 name = "dot15d4"
 version = "0.1.2"
 edition = "2021"
-repository = "https://github.com/thvdveld/dot15d4"
+repository = "https://github.com/dot15d4-rs/dot15d4"
 description = "IEEE 802.15.4 implementation in Rust"
 license = "MIT OR Apache-2.0"
 categories = ["embedded", "network-programming", "no-std"]

@@ -1,17 +1,3 @@
-//! Async runner for scheduler service.
-//!
-//! This module provides the async execution environment for scheduler tasks.
-//! It translates synchronous state machine transitions into actual async
-//! operations, maintaining a clean separation between logic and execution.
-//!
-//! # Architecture
-//!
-//! The runner implements a simple loop:
-//! 1. Task returns a transition with an action to execute
-//! 2. Runner executes the async operation
-//! 3. Runner delivers the resulting event back to the task
-//! 4. Repeat
-
 use dot15d4_driver::{radio::DriverConfig, timer::RadioTimerApi};
 use dot15d4_util::sync::{select, ConsumerToken, Either};
 

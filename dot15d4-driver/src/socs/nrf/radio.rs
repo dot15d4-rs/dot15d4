@@ -88,7 +88,6 @@ const T_MEASURED_RAMP_DOWN_ERROR: NsDuration =
 // debug-embed: 8
 const T_MEASURED_TURNAROUND_ERROR: NsDuration =
     NsDuration::from_ticks(8 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
-// all: 195
 const T_MEASURED_TX_FRAMESTART_ERROR: NsDuration =
     NsDuration::from_ticks(154 * NrfRadioHighPrecisionTimer::TICK_PERIOD.ticks());
 
