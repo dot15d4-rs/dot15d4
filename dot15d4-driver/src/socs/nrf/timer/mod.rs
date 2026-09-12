@@ -551,6 +551,7 @@ impl State {
         }
 
         timer.tasks_stop.write(|w| w.tasks_stop().set_bit());
+        timer.tasks_shutdown.write(|w| w.tasks_shutdown().set_bit());
         timer.mode.reset();
         timer.bitmode.write(|w| w.bitmode()._32bit());
 
@@ -2821,6 +2822,7 @@ impl Drop for NrfRadioHighPrecisionTimer {
         // First of all stop the timer to ensure that further signals won't be
         // generated. This is atomic and doesn't have to be synchronized.
         timer.tasks_stop.write(|w| w.tasks_stop().set_bit());
+        timer.tasks_shutdown.write(|w| w.tasks_shutdown().set_bit());
 
         // Atomically cancel ongoing timer synchronization and re-acquire alarm
         // memory to scheduling context in which the drop handler runs.
