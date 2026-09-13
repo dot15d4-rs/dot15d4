@@ -270,8 +270,9 @@ pub async fn join_network_from_scan_with<RadioDriverImpl: DriverConfig>(
             Ok(parser) => parser,
             Err(_) => continue,
         };
-        let ies = parser.ies_fields();
-        let join_metric = ies.tsch_sync().map(|ts| ts.join_metric());
+        let join_metric = parser
+            .try_ies_fields()
+            .and_then(|ies| ies.tsch_sync().map(|ts| ts.join_metric()));
 
         if let Some(join_metric) = join_metric {
             if let Some((best_join_metric, best_mpdu, best_timestamp)) = best_candidate {
@@ -325,7 +326,13 @@ async fn join_network_from_beacon(
     };
     use crate::scheduler::tsch::TschLinkType;
 
-    let ies = mpdu_parser.ies_fields();
+    let Some(ies) = mpdu_parser.try_ies_fields() else {
+        // A beacon without IEs carries no TSCH schedule: it cannot be joined.
+        // Safety: the beacon buffer comes from `buffer_allocator`, as on the
+        // other early returns of this function.
+        unsafe { buffer_allocator.deallocate_buffer(mpdu_parser.into_buffer()) };
+        return None;
+    };
 
     let sf_links_ie = ies.tsch_slotframe_link();
     if let Some(sf_links_ie) = sf_links_ie {

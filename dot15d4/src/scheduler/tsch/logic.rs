@@ -536,7 +536,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                                     .parse_ies::<RadioDriverImpl>()
                                     .ok()
                                     .and_then(|with_ies| {
-                                        with_ies.ies_fields().tsch_sync().map(|ts| {
+                                        with_ies.try_ies_fields()?.tsch_sync().map(|ts| {
                                             beacon_asn = Some(ts.asn());
                                             ts.join_metric()
                                         })

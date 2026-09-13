@@ -4396,7 +4396,7 @@ mod beacon_ie_tests {
                 .parse_security()
                 .parse_ies::<FakeDriverConfig>()
                 .expect("ies");
-            let ies = parsed.ies_fields();
+            let ies = parsed.try_ies_fields().expect("no IEs");
             let ch_hop = ies.channel_hopping().expect("no Channel Hopping IE");
             assert!(!ch_hop.is_reduced(), "hopping IE must be the full form");
             assert_eq!(ch_hop.hopping_sequence_length(), Some(1));
