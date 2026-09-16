@@ -475,14 +475,19 @@ impl<ReadWriteMpdu: AsRef<MpduFrame> + AsMut<MpduFrame>>
 impl<ReadOnlyMpdu: AsRef<MpduFrame>> MpduParser<ReadOnlyMpdu, MpduWithAddressing> {
     /// Parses the frame control field to identify the security configuration of
     /// the MPDU.
-    pub fn parse_security(self) -> MpduParser<ReadOnlyMpdu, MpduWithSecurity> {
-        // TODO: implement
-        debug_assert!(!self.frame_control().security_enabled());
+    ///
+    /// Security processing is not implemented yet, so a frame with the
+    /// Security Enabled bit set is rejected: the caller must handle the error,
+    /// in every build profile.
+    pub fn parse_security(self) -> SimplifiedResult<MpduParser<ReadOnlyMpdu, MpduWithSecurity>> {
+        if self.frame_control().security_enabled() {
+            return Err(Error);
+        }
 
-        MpduParser {
+        Ok(MpduParser {
             mpdu_field_ranges: self.mpdu_field_ranges.without_security(),
             mpdu: self.mpdu,
-        }
+        })
     }
 }
 

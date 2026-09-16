@@ -425,6 +425,7 @@ mod test {
             .parse_addressing()
             .unwrap()
             .parse_security()
+            .unwrap()
             .parse_ies::<FakeDriverConfig>()
             .unwrap();
 
@@ -513,6 +514,7 @@ mod test {
                 .parse_addressing()
                 .unwrap()
                 .parse_security()
+                .unwrap()
                 .parse_ies::<FakeDriverConfig>()
                 .unwrap();
             let fields = reader.try_addressing_fields().unwrap();

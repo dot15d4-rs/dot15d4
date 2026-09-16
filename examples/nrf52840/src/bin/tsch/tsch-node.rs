@@ -470,7 +470,10 @@ fn data_frame_origin(mpdu: &MpduFrame) -> (u32, [u8; 8]) {
     let Ok(parser) = mpdu.reader().parse_addressing() else {
         return (sequence, source);
     };
-    let Ok(parser) = parser.parse_security().parse_ies::<NrfRadioDriver>() else {
+    let Ok(parser) = parser
+        .parse_security()
+        .and_then(|p| p.parse_ies::<NrfRadioDriver>())
+    else {
         return (sequence, source);
     };
     if let Ok(addressing) = parser.try_addressing_fields() {

@@ -152,6 +152,7 @@ fn check_roundtrip(mpdu: &MpduFrame, spec: &Spec, has_ies: bool) {
 
     let reader = reader
         .parse_security()
+        .expect("frames built without security must pass the security stage")
         .parse_ies::<FuzzDriverConfig>()
         .expect("IEs built by the writer must parse");
     let ies = reader

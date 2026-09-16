@@ -298,7 +298,7 @@ pub fn update_tsch_sync_ie<RadioDriverImpl: DriverConfig>(
         .parse_addressing()
         .expect("well-formed MPDU: addressing parse failed")
         .parse_security()
-        .parse_ies::<RadioDriverImpl>()
+        .and_then(|r| r.parse_ies::<RadioDriverImpl>())
         .expect("well-formed MPDU: IE parse failed");
 
     if let Some(mut ies) = parser.try_ies_fields_mut() {

@@ -266,7 +266,18 @@ pub async fn join_network_from_scan_with<RadioDriverImpl: DriverConfig>(
                 continue;
             }
         }
-        let parser = match parser.parse_security().parse_ies::<RadioDriverImpl>() {
+        // Security is not implemented: release a secured beacon to the pool
+        // here, because a failed parse below consumes the parser.
+        if parser.frame_control().security_enabled() {
+            // Safety: like every beacon of this scan, the buffer comes from
+            // `buffer_allocator`.
+            unsafe { buffer_allocator.deallocate_buffer(parser.into_buffer()) };
+            continue;
+        }
+        let parser = match parser
+            .parse_security()
+            .and_then(|p| p.parse_ies::<RadioDriverImpl>())
+        {
             Ok(parser) => parser,
             Err(_) => continue,
         };

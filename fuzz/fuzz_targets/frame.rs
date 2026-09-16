@@ -66,11 +66,11 @@ fn read_all(mpdu: &MpduFrame) {
         let _ = addressing.try_src_address();
     }
 
-    if reader.frame_control().security_enabled() {
-        return;
-    }
-
-    let reader = reader.parse_security();
+    // A secured frame is now rejected by the parser itself, in every build.
+    let reader = match reader.parse_security() {
+        Ok(reader) => reader,
+        Err(_) => return,
+    };
     let reader = match reader.parse_ies::<FuzzDriverConfig>() {
         Ok(reader) => reader,
         Err(_) => return,

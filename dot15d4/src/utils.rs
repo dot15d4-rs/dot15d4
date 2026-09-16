@@ -113,7 +113,8 @@ pub fn process_rx_frame<RadioDriverImpl: DriverConfig>(
             let parsed = reader
                 .parse_addressing()
                 .ok()
-                .and_then(|r| r.parse_security().parse_ies::<RadioDriverImpl>().ok());
+                .and_then(|r| r.parse_security().ok())
+                .and_then(|r| r.parse_ies::<RadioDriverImpl>().ok());
 
             let Some(reader) = parsed else {
                 return Err(mpdu_frame);

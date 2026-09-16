@@ -555,7 +555,10 @@ impl<'svc, RadioDriverImpl: DriverConfig> MacService<'svc, RadioDriverImpl> {
         let Ok(reader) = mpdu.reader().parse_addressing() else {
             return false;
         };
-        let Ok(reader) = reader.parse_security().parse_ies::<RadioDriverImpl>() else {
+        let Ok(reader) = reader
+            .parse_security()
+            .and_then(|r| r.parse_ies::<RadioDriverImpl>())
+        else {
             return false;
         };
         reader.try_frame_payload().map_or(true, |p| p.is_empty())

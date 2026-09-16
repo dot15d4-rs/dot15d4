@@ -224,7 +224,9 @@ impl<RadioDriverImpl: DriverConfig> MacTask for AssociateRequestTask<'_, RadioDr
                                     .parse_addressing()
                                     .ok()
                                     .and_then(|r| {
-                                        r.parse_security().parse_ies::<RadioDriverImpl>().ok()
+                                        r.parse_security()
+                                            .and_then(|r| r.parse_ies::<RadioDriverImpl>())
+                                            .ok()
                                     })
                                     .and_then(|r| {
                                         let payload = r.try_frame_payload()?;
@@ -348,7 +350,7 @@ impl<'task, RadioDriverImpl: DriverConfig> AssociateIndicationTask<'task, RadioD
             .parse_addressing()
             .ok()?
             .parse_security()
-            .parse_ies::<RadioDriverImpl>()
+            .and_then(|r| r.parse_ies::<RadioDriverImpl>())
             .ok()?;
 
         let payload = reader.try_frame_payload()?;

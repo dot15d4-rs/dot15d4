@@ -533,7 +533,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                             if parsed.frame_control().frame_type() == FrameType::Beacon {
                                 parsed
                                     .parse_security()
-                                    .parse_ies::<RadioDriverImpl>()
+                                    .and_then(|r| r.parse_ies::<RadioDriverImpl>())
                                     .ok()
                                     .and_then(|with_ies| {
                                         with_ies.try_ies_fields()?.tsch_sync().map(|ts| {

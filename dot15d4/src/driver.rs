@@ -1591,7 +1591,9 @@ pub(crate) fn validate_ack_frame<RadioDriverImpl: DriverConfig>(
                         if !addressed_to_us || reader.frame_control().security_enabled() {
                             (false, None)
                         } else {
-                            let reader = reader.parse_security().parse_ies::<RadioDriverImpl>();
+                            let reader = reader
+                                .parse_security()
+                                .and_then(|r| r.parse_ies::<RadioDriverImpl>());
                             if let Ok(reader) = reader {
                                 let ies = reader.try_ies_fields();
                                 if let Some(tc) = ies.as_ref().and_then(|ies| ies.time_correction())

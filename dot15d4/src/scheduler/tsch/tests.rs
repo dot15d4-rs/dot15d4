@@ -4394,6 +4394,7 @@ mod beacon_ie_tests {
                 .parse_addressing()
                 .expect("addressing")
                 .parse_security()
+                .expect("security")
                 .parse_ies::<FakeDriverConfig>()
                 .expect("ies");
             let ies = parsed.try_ies_fields().expect("no IEs");
@@ -4452,5 +4453,93 @@ mod schedule_idempotency_tests {
             TschLinkOption::Rx.bits()
         );
         runner.terminate();
+    }
+}
+
+/// Regression tests: forged Enhanced Beacons must be dropped, not panic.
+///
+/// Both frames pass the driver-service filter (broadcast destination) and need
+/// no association and no key. Before the parser type change, the first one made
+/// `ies_fields()` panic and the second one hit the debug assertion of
+/// `parse_security()`; with `panic = "abort"`, either reset the node.
+mod forged_beacon_tests {
+    use super::*;
+    use core::num::NonZero;
+    use dot15d4_driver::radio::{frame::RadioFrameUnsized, DriverConfig};
+
+    fn device_runner() -> TestRunner<'static, TschTask<FakeDriverConfig>> {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.context.pib.coord_extended_address =
+            Address::Extended(ExtendedAddress::new_owned(COORD_ADDRESS));
+        runner.context.pib.tsch.asn = 0;
+        runner.context.pib.tsch.last_base_time = NsInstant::from_ticks(0);
+        runner.task.init(&mut runner.context);
+        runner.task.state = TschState::Idle;
+        runner.set_time_source(&COORD_ADDRESS);
+        runner
+    }
+
+    fn receive_raw(bytes: &[u8]) {
+        let mut runner = device_runner();
+        runner.step_timer_expired();
+        assert!(matches!(runner.state(), TschState::Listening));
+        runner.step_driver_event(DrvSvcEvent::FrameStarted);
+        let headroom = <FakeDriverConfig as DriverConfig>::HEADROOM as usize;
+        let mut buffer = runner
+            .context
+            .buffer_allocator
+            .try_allocate_buffer(130)
+            .expect("allocation failed");
+        buffer[headroom..headroom + bytes.len()].copy_from_slice(bytes);
+        let frame = RadioFrame::<RadioFrameUnsized>::new::<FakeDriverConfig>(buffer)
+            .with_size(NonZero::new(bytes.len() as u16).unwrap());
+        runner.step_driver_event(DrvSvcEvent::Received(
+            frame,
+            NsInstant::from_ticks(1_002_120_000),
+        ));
+        assert!(runner.is_idle());
+        runner.terminate();
+    }
+
+    /// Beacon, PAN ID compression, seq. suppressed, IE present, dst short
+    /// broadcast, version 0b10, src extended; no IE byte at all.
+    #[test]
+    fn beacon_with_ie_present_bit_and_empty_ie_region_is_dropped() {
+        receive_raw(&[0x40, 0xEB, 0xEF, 0xBE, 0xFF, 0xFF, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// The same beacon with the Security Enabled bit set.
+    #[test]
+    fn secured_beacon_is_dropped() {
+        receive_raw(&[0x48, 0xEB, 0xEF, 0xBE, 0xFF, 0xFF, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    /// The two acknowledgment-path defects found by fuzzing: an Enhanced ACK
+    /// with the Security Enabled bit set, and one with the IE-present bit and
+    /// an empty IE region. Both must be rejected, and the buffer returned.
+    #[test]
+    fn malformed_enhanced_acks_are_rejected() {
+        let allocator = crate::scheduler::tests::create_test_allocator();
+        let own = [8u8, 7, 6, 5, 4, 3, 2, 1];
+        for bytes in [
+            // Enh-ACK (type 2), security bit, IE present, ver 0b10, dst ext.
+            [0x0A, 0x2E, 42, 0xEF, 0xBE, 1, 2, 3, 4, 5, 6, 7, 8],
+            // Enh-ACK, IE present, empty IE region.
+            [0x02, 0x2E, 42, 0xEF, 0xBE, 1, 2, 3, 4, 5, 6, 7, 8],
+        ] {
+            let headroom = <FakeDriverConfig as DriverConfig>::HEADROOM as usize;
+            let mut buffer = allocator.try_allocate_buffer(130).unwrap();
+            buffer[headroom..headroom + bytes.len()].copy_from_slice(&bytes);
+            let frame = RadioFrame::<RadioFrameUnsized>::new::<FakeDriverConfig>(buffer)
+                .with_size(NonZero::new(bytes.len() as u16).unwrap());
+            let frame = match crate::driver::validate_ack_frame::<FakeDriverConfig>(frame, 42, &own)
+            {
+                Ok(_) => panic!("a malformed acknowledgment was accepted"),
+                Err(frame) => frame,
+            };
+            // Safety: the buffer was allocated from this allocator.
+            unsafe { allocator.deallocate_buffer(frame.into_buffer()) };
+        }
     }
 }

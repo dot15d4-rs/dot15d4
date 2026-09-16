@@ -123,6 +123,7 @@ where
                         .parse_addressing()
                         .unwrap()
                         .parse_security()
+                        .unwrap()
                         .parse_ies::<Config>()
                         .unwrap();
 
