@@ -255,8 +255,29 @@ pub fn config_peripherals(
     }
 }
 
+/// FICR.INFO.VARIANT, e.g. "AAF0": bits 15:8 hold the build code letter.
+const FICR_INFO_VARIANT: *const u32 = 0x1000_0104 as *const u32;
+const UICR_APPROTECT: *mut u32 = 0x1000_1208 as *mut u32;
+const APPROTECT_DISABLE: *mut u32 = 0x4000_0558 as *mut u32;
+const APPROTECT_OPEN: u32 = 0x5A;
+
 fn config_reset(uicr: &UICR, nvmc: &NVMC, scb: &SCB) {
-    if uicr.pselreset[0].read().connect().is_connected() {
+    // Build codes Fxx and later lock the debug port at every pin, power, or
+    // brownout reset. A debugger then gets in only by ERASEALL, which erases
+    // flash, UICR, and RAM. The port stays open if UICR.APPROTECT holds
+    // HwDisabled and the firmware writes SwDisable after every reset, as
+    // embassy-nrf does by default. Earlier build codes must not get 0x5A: any
+    // value other than 0xFF in UICR.APPROTECT enables their protection.
+    let improved_approtect = (unsafe { FICR_INFO_VARIANT.read_volatile() } >> 8) as u8 >= b'F';
+    if improved_approtect {
+        unsafe { APPROTECT_DISABLE.write_volatile(APPROTECT_OPEN) };
+    }
+
+    let set_reset_pin = !uicr.pselreset[0].read().connect().is_connected();
+    // Flash bits only go from 1 to 0: program UICR.APPROTECT only if erased,
+    // so that a protected chip does not reset in a loop.
+    let set_approtect = improved_approtect && unsafe { UICR_APPROTECT.read_volatile() } == u32::MAX;
+    if !set_reset_pin && !set_approtect {
         // UICR is already configured.
         return;
     }
@@ -266,15 +287,21 @@ fn config_reset(uicr: &UICR, nvmc: &NVMC, scb: &SCB) {
     // requirements: It just seems to have been erased by someone else.
 
     nvmc.config.write(|w| w.wen().wen());
-    // Both pselreset configs must be the same for the configuration to take
-    // effect.
-    for reg in 0..=1 {
-        uicr.pselreset[reg].write(|w| {
-            // Use the DK's default reset pin P0.18.
-            w.port().clear_bit();
-            w.pin().variant(18);
-            w.connect().connected()
-        });
+    if set_reset_pin {
+        // Both pselreset configs must be the same for the configuration to
+        // take effect.
+        for reg in 0..=1 {
+            uicr.pselreset[reg].write(|w| {
+                // Use the DK's default reset pin P0.18.
+                w.port().clear_bit();
+                w.pin().variant(18);
+                w.connect().connected()
+            });
+            while nvmc.ready.read().ready().bit_is_clear() {}
+        }
+    }
+    if set_approtect {
+        unsafe { UICR_APPROTECT.write_volatile(APPROTECT_OPEN) };
         while nvmc.ready.read().ready().bit_is_clear() {}
     }
     nvmc.config.reset();
