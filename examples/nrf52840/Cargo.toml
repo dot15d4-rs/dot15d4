@@ -100,6 +100,8 @@ no-tsch-frame-sync = ["dot15d4/no-tsch-frame-sync"]
 # Disable clock drift adjustment in TSCH network
 no-tsch-drift-adjustment = ["dot15d4/no-tsch-drift-adjustment"]
 
+paint-stack = ["cortex-m-rt/paint-stack"]
+
 # Enables multi-device tests.
 #
 # Synchronizes the clock of multiple test devices with an external sleep timer
