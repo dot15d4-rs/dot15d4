@@ -4359,6 +4359,8 @@ pub(crate) fn fuzz_step(data: &[u8]) {
         }
 
         tick += 1_000_000;
+        // The fake driver gives back the buffers it holds.
+        runner.deallocate_all_buffers();
     }
 
     // Clean teardown returns every outstanding buffer to the pool.
@@ -4541,5 +4543,115 @@ mod forged_beacon_tests {
             // Safety: the buffer was allocated from this allocator.
             unsafe { allocator.deallocate_buffer(frame.into_buffer()) };
         }
+    }
+}
+
+/// Regression tests: an unexpected driver event must give back the buffers and
+/// tokens it carries.
+///
+/// Before the fix, the recovery branch of a slot state returned to idle and
+/// dropped the event, so its buffer was lost to the pool.
+mod recovery_tests {
+    use super::*;
+    use dot15d4_util::tokens::leaked_tokens;
+
+    /// Driver event `kind` (0 to 9), with a fresh buffer if it carries one.
+    fn driver_event(kind: usize, allocator: &MacBufferAllocator) -> DrvSvcEvent {
+        let at = NsInstant::from_ticks(2_002_120_000);
+        match kind {
+            0 => DrvSvcEvent::CcaBusy(create_data_radio_frame(allocator, 20), at),
+            1 => DrvSvcEvent::TxStarted(at),
+            2 => DrvSvcEvent::FrameStarted,
+            3 => DrvSvcEvent::Nack(create_data_radio_frame(allocator, 20), at, None, None),
+            4 => DrvSvcEvent::Sent(create_data_radio_frame(allocator, 20), at, None),
+            5 => DrvSvcEvent::Received(create_data_radio_frame(allocator, 20), at),
+            6 => DrvSvcEvent::RxWindowEnded(create_unsized_radio_frame(allocator)),
+            7 => DrvSvcEvent::ReceptionAborted,
+            8 => DrvSvcEvent::SchedulingFailed(create_data_radio_frame(allocator, 20)),
+            _ => DrvSvcEvent::CrcError(create_unsized_radio_frame(allocator), at),
+        }
+    }
+
+    /// End the current slot with the events its state expects.
+    fn finish_slot(runner: &mut TestRunner<'static, TschTask<FakeDriverConfig>>) {
+        for _ in 0..2 {
+            let kind = match runner.state() {
+                TschState::WaitingForTxStart { .. } => 8,
+                TschState::Transmitting { .. } => 4,
+                TschState::Listening => 6,
+                TschState::Receiving => 9,
+                _ => return,
+            };
+            let event = driver_event(kind, &runner.context.buffer_allocator);
+            runner.step_driver_event(event);
+        }
+    }
+
+    /// A runner in slot state `state`: 0 sends a beacon, 1 sends a data frame,
+    /// 2 listens, 3 receives.
+    fn runner_in(state: usize) -> TestRunner<'static, TschTask<FakeDriverConfig>> {
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        if state == 0 {
+            runner.enter_as_coordinator();
+        } else {
+            runner.enter_as_device();
+        }
+        if state == 1 {
+            let mpdu = create_test_data_frame(&runner.context.buffer_allocator);
+            runner.step_scheduler_request(SchedulerRequest::Transmission(mpdu));
+        }
+        runner.step_timer_expired();
+        if state == 3 {
+            runner.step_driver_event(DrvSvcEvent::FrameStarted);
+        }
+        let reached = match runner.state() {
+            TschState::WaitingForTxStart { .. } => state < 2,
+            TschState::Listening => state == 2,
+            TschState::Receiving => state == 3,
+            _ => false,
+        };
+        assert!(reached);
+        runner
+    }
+
+    /// Each driver event, in each slot state, then the end of the slot.
+    #[test]
+    fn test_every_event_in_every_slot_state_returns_its_tokens() {
+        let leaked = leaked_tokens();
+        for state in 0..4 {
+            for kind in 0..10 {
+                let mut runner = runner_in(state);
+                let event = driver_event(kind, &runner.context.buffer_allocator);
+                runner.step_driver_event(event);
+                finish_slot(&mut runner);
+                assert!(runner.is_idle());
+                runner.terminate();
+            }
+        }
+        assert_eq!(leaked_tokens(), leaked);
+    }
+
+    /// The ten driver events in turn, one per slot, over 10,000 slots.
+    #[test]
+    fn test_an_event_in_every_slot_keeps_the_pool() {
+        let leaked = leaked_tokens();
+        let mut runner = setup();
+        setup_one_link_schedule(&mut runner.context.pib.tsch);
+        runner.enter_as_coordinator();
+
+        let slots = if cfg!(miri) { 100 } else { 10_000 };
+        for slot in 0..slots {
+            runner.step_timer_expired();
+            let event = driver_event(slot % 10, &runner.context.buffer_allocator);
+            runner.step_driver_event(event);
+            finish_slot(&mut runner);
+            assert!(runner.is_idle());
+            // The fake driver gives back the buffers it holds.
+            runner.deallocate_all_buffers();
+        }
+        runner.terminate();
+        drop(runner);
+        assert_eq!(leaked_tokens(), leaked);
     }
 }

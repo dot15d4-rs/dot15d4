@@ -183,11 +183,29 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 );
                 self.handle_tx_start_failure(radio_frame, shared, backoff, origin, context)
             }
+            // A TX outcome that skipped TxStarted.
+            event @ SchedulerTaskEvent::DriverEvent(
+                DrvSvcEvent::Sent(..) | DrvSvcEvent::Nack(..),
+            ) => self.execute_transmitting(origin, shared, backoff, event, context),
+            // Any other driver event: keep waiting, so that the TX outcome
+            // returns the frame to its origin.
+            SchedulerTaskEvent::DriverEvent(event) => {
+                dot15d4_util::warn!(
+                    "TSCH: unexpected event in WaitingForTxStart; continuing to wait."
+                );
+                Self::release_buffers(event, context);
+                self.state = TschState::WaitingForTxStart {
+                    origin,
+                    shared,
+                    backoff,
+                };
+                SchedulerTaskTransition::Execute(SchedulerAction::WaitForDriverEvent, None)
+            }
             // WaitingForTxStart legitimately only sees the events above; recover
             // to idle rather than aborting.
             _ => {
                 dot15d4_util::warn!("TSCH: unexpected event in WaitingForTxStart; recovering to idle.");
-                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                self.recover(event, context)
             }
         }
     }
@@ -499,7 +517,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 dot15d4_util::warn!("TSCH: unexpected event in Listening; recovering to idle.");
                 let current_asn = context.pib.tsch.asn;
                 self.queue_next_rx(current_asn, context);
-                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                self.recover(event, context)
             }
         }
     }
@@ -650,7 +668,7 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 dot15d4_util::warn!("TSCH: unexpected event in Receiving; recovering to idle.");
                 let current_asn = context.pib.tsch.asn;
                 self.queue_next_rx(current_asn, context);
-                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+                self.recover(event, context)
             }
         }
     }
@@ -993,6 +1011,51 @@ impl<RadioDriverImpl: DriverConfig> TschTask<RadioDriverImpl> {
                 .note_tx_result(id, acked, attempts_used, now);
         }
         dst_id
+    }
+
+    /// Return to idle after an unexpected event, giving back what it carries.
+    fn recover(
+        &mut self,
+        event: SchedulerTaskEvent,
+        context: &mut SchedulerContext<RadioDriverImpl>,
+    ) -> SchedulerTaskTransition {
+        match event {
+            // Serve a request as the idle state does.
+            SchedulerTaskEvent::SchedulerRequest { .. } => self.execute_idle(event, context),
+            SchedulerTaskEvent::DriverEvent(event) => {
+                Self::release_buffers(event, context);
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
+            SchedulerTaskEvent::Entry | SchedulerTaskEvent::TimerExpired => {
+                SchedulerTaskTransition::Execute(self.go_idle(context), None)
+            }
+        }
+    }
+
+    /// Return the buffers that a driver event carries to the pool.
+    fn release_buffers(event: DrvSvcEvent, context: &SchedulerContext<RadioDriverImpl>) {
+        let (frame, request) = match event {
+            DrvSvcEvent::CcaBusy(frame, _)
+            | DrvSvcEvent::Sent(frame, ..)
+            | DrvSvcEvent::Received(frame, _)
+            | DrvSvcEvent::SchedulingFailed(frame) => (Some(frame.into_buffer()), None),
+            DrvSvcEvent::RxWindowEnded(frame) | DrvSvcEvent::CrcError(frame, _) => {
+                (Some(frame.into_buffer()), None)
+            }
+            DrvSvcEvent::Nack(frame, _, request, _) => (Some(frame.into_buffer()), request),
+            DrvSvcEvent::TxStarted(_)
+            | DrvSvcEvent::FrameStarted
+            | DrvSvcEvent::ReceptionAborted => (None, None),
+        };
+        let request = request.and_then(|request| match request {
+            DrvSvcRequest::CompleteThenStartTx(tx) => Some(tx.mpdu.into_buffer()),
+            DrvSvcRequest::CompleteThenStartRx(rx) => Some(rx.radio_frame.into_buffer()),
+            DrvSvcRequest::CompleteThenGoIdle => None,
+        });
+        for buffer in [frame, request].into_iter().flatten() {
+            // Safety: every frame buffer of the stack comes from this allocator.
+            unsafe { context.buffer_allocator.deallocate_buffer(buffer) };
+        }
     }
 
     /// Transition to idle state and wait for the next deadline by configuring
